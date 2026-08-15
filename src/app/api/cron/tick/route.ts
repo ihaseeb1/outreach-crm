@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { assertCronAuthorized } from "@/lib/cron";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { runInboundPoll } from "@/mail/poll";
 import { runScrapeBatch } from "@/scraper/run";
 import { runValidationBatch } from "@/validation/run";
 
@@ -33,10 +34,12 @@ export async function GET(request: Request) {
   results.validate = await safely("validate", () =>
     runValidationBatch(supabase, { limit: 100 }),
   );
+  results.inbound = await safely("inbound", () =>
+    runInboundPoll(supabase, { limit: 3 }),
+  );
 
   // Later phases register their jobs here:
   //   phase 3 — sequence sends, bounce sweep
-  //   phase 2 — inbound IMAP poll
   //   phase 4 — warmup sends, daily health checks
 
   return NextResponse.json({

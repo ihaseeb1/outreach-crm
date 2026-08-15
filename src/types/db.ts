@@ -122,6 +122,129 @@ export interface Suppression {
   created_at: Timestamp;
 }
 
+export type MailboxHealthStatus = "healthy" | "warning" | "paused";
+
+export interface Mailbox {
+  id: Uuid;
+  workspace_id: Uuid;
+  provider: "smtp" | "gmail" | "outlook";
+  auth_type: "app_password" | "oauth2";
+  email: string;
+  from_name: string | null;
+  daily_limit: number;
+  sent_today: number;
+  sent_today_date: string;
+  min_gap_seconds: number;
+  max_gap_seconds: number;
+  is_active: boolean;
+  health_status: MailboxHealthStatus;
+  paused_reason: string | null;
+  signature: string | null;
+  imap_last_uid: number | null;
+  last_polled_at: Timestamp | null;
+  last_send_at: Timestamp | null;
+  last_error: string | null;
+  meta: Record<string, unknown>;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+  /** Only ever present on the server. */
+  encrypted_credentials?: string | null;
+}
+
+export type CampaignStatus =
+  | "draft"
+  | "active"
+  | "paused"
+  | "completed"
+  | "archived";
+
+export interface Campaign {
+  id: Uuid;
+  workspace_id: Uuid;
+  name: string;
+  status: CampaignStatus;
+  mailbox_ids: Uuid[];
+  settings: CampaignSettings;
+  created_by: Uuid | null;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface CampaignSettings {
+  /** Local hours during which sends are allowed, e.g. 9–17. */
+  send_window_start?: number;
+  send_window_end?: number;
+  /** 0 = Sunday. Defaults to Mon–Fri. */
+  send_days?: number[];
+  timezone?: string;
+  [key: string]: unknown;
+}
+
+export interface SequenceStep {
+  id: Uuid;
+  campaign_id: Uuid;
+  step_number: number;
+  delay_days: number;
+  subject_template: string;
+  body_template: string;
+  reply_to_thread: boolean;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export type CampaignContactStatus =
+  | "pending"
+  | "active"
+  | "replied"
+  | "completed"
+  | "paused"
+  | "bounced"
+  | "unsubscribed"
+  | "failed";
+
+export interface CampaignContact {
+  id: Uuid;
+  campaign_id: Uuid;
+  contact_id: Uuid;
+  workspace_id: Uuid;
+  current_step: number;
+  status: CampaignContactStatus;
+  next_send_at: Timestamp | null;
+  mailbox_id: Uuid | null;
+  thread_id: string | null;
+  last_sent_at: Timestamp | null;
+  replied_at: Timestamp | null;
+  paused_reason: string | null;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface Message {
+  id: Uuid;
+  workspace_id: Uuid;
+  campaign_id: Uuid | null;
+  contact_id: Uuid | null;
+  mailbox_id: Uuid | null;
+  direction: "outbound" | "inbound";
+  step_number: number | null;
+  from_email: string | null;
+  to_email: string | null;
+  subject: string | null;
+  body: string | null;
+  body_html: string | null;
+  message_id: string | null;
+  in_reply_to: string | null;
+  thread_id: string | null;
+  status: "queued" | "sent" | "failed" | "received" | "bounced";
+  is_bounce: boolean;
+  is_auto_reply: boolean;
+  error: string | null;
+  meta: Record<string, unknown>;
+  sent_at: Timestamp | null;
+  received_at: Timestamp | null;
+  created_at: Timestamp;
+}
+
 export interface ActivityLogEntry {
   id: Uuid;
   workspace_id: Uuid;

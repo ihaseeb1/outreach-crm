@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { getSession } from "@/lib/workspace";
+import { runInboundPoll } from "@/mail/poll";
 import { runScrapeBatch } from "@/scraper/run";
 import { runValidationBatch } from "@/validation/run";
 
@@ -11,7 +12,7 @@ export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
 const bodySchema = z.object({
-  job: z.enum(["scrape", "validate"]),
+  job: z.enum(["scrape", "validate", "inbound"]),
   limit: z.number().int().positive().max(200).optional(),
 });
 
@@ -39,6 +40,23 @@ export async function POST(request: Request) {
       limit: parsed.data.limit ?? 5,
     });
     return NextResponse.json({ ok: true, job: "scrape", ...result });
+  }
+
+  if (parsed.data.job === "inbound") {
+    const { polled, results } = await runInboundPoll(supabase, {
+      workspaceId,
+      limit: Math.min(parsed.data.limit ?? 5, 10),
+    });
+    return NextResponse.json({
+      ok: true,
+      job: "inbound",
+      polled,
+      replies: results.reduce((sum, r) => sum + r.replies, 0),
+      bounces: results.reduce((sum, r) => sum + r.bounces, 0),
+      warmup: results.reduce((sum, r) => sum + r.warmup, 0),
+      ignored: results.reduce((sum, r) => sum + r.ignored, 0),
+      errors: results.filter((r) => r.error).map((r) => r.error),
+    });
   }
 
   const result = await runValidationBatch(supabase, {
