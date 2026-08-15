@@ -8,6 +8,8 @@ const NAV: NavItem[] = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/prospecting", label: "Prospecting" },
   { href: "/contacts", label: "Contacts" },
+  { href: "/pipeline", label: "Pipeline" },
+  { href: "/tasks", label: "Tasks" },
   { href: "/mailboxes", label: "Mailboxes" },
   { href: "/deliverability", label: "Deliverability" },
   { href: "/compose", label: "Compose" },

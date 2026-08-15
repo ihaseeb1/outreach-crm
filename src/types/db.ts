@@ -346,6 +346,46 @@ export interface DealWithPrices extends Deal {
   deal_prices: DealPrice[];
 }
 
+export interface PipelineStage {
+  id: Uuid;
+  workspace_id: Uuid;
+  key: string;
+  label: string;
+  position: number;
+  color: string;
+  is_won: boolean;
+  is_lost: boolean;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface Note {
+  id: Uuid;
+  workspace_id: Uuid;
+  contact_id: Uuid | null;
+  domain: string | null;
+  author_id: Uuid | null;
+  body: string;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface Task {
+  id: Uuid;
+  workspace_id: Uuid;
+  contact_id: Uuid | null;
+  deal_id: Uuid | null;
+  title: string;
+  details: string | null;
+  due_date: string | null;
+  done: boolean;
+  done_at: Timestamp | null;
+  assigned_to: Uuid | null;
+  created_by: Uuid | null;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
 export interface ActivityLogEntry {
   id: Uuid;
   workspace_id: Uuid;

@@ -148,13 +148,31 @@ export default async function ContactsPage({
               <tbody>
                 {contacts.map((contact) => (
                   <tr key={contact.id}>
-                    <td className="font-medium">{contact.email}</td>
+                    <td>
+                      <Link
+                        className="font-medium text-[var(--color-brand)] hover:underline"
+                        href={`/contacts/${contact.id}`}
+                      >
+                        {contact.email}
+                      </Link>
+                    </td>
                     <td>
                       {[contact.first_name, contact.last_name]
                         .filter(Boolean)
                         .join(" ") || "—"}
                     </td>
-                    <td>{contact.domain ?? "—"}</td>
+                    <td>
+                      {contact.domain ? (
+                        <Link
+                          className="hover:underline"
+                          href={`/domains/${encodeURIComponent(contact.domain)}`}
+                        >
+                          {contact.domain}
+                        </Link>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                     <td>
                       <span
                         className={`badge ${VALIDATION_STYLES[contact.validation_status]}`}

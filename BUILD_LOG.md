@@ -586,3 +586,79 @@ src/app/api/    deals/, deals/export/, conversations/, conversations/reply/
   with dozens of niches it scrolls horizontally rather than paginating columns.
 - Editing an existing deal is done from the conversation it belongs to, or by
   re-saving from the deals form; there is no inline row editor yet.
+
+---
+
+## Phase 6 — Full CRM
+
+**Status:** complete. Build, typecheck, and 80 smoke tests pass.
+
+### What was built
+
+**Configurable pipeline.** Every workspace is seeded (by trigger, on creation)
+with New → Contacted → Replied → Negotiating → Agreed → Live → Not a fit, all
+editable: rename, recolour, reorder, add, remove, and mark stages as won/lost for
+phase 7 reporting. Existing workspaces were backfilled by the migration.
+
+**Drag-and-drop board** using native HTML5 drag events — no dependency. The card
+moves optimistically and rolls back if the save fails. HTML5 drag does not fire
+on touch devices, so each card also carries a stage dropdown that appears on
+small screens; the board is usable either way.
+
+Two failure modes are handled explicitly rather than left to chance: deleting a
+stage moves any contact standing in it to the first stage (instead of orphaning
+them off the board), and a contact whose stage no longer exists is rendered in
+the first column rather than vanishing.
+
+**Contact record.** One page with everything: validation and source provenance,
+current stage (changeable inline), campaign enrolments with step and next send
+time, deals with their per-niche prices, notes, tasks, the full message history,
+and the activity log for that contact. Links straight into the conversation.
+
+**Domain record.** A publisher usually has several addresses, and what you care
+about is the site. `/domains/[domain]` rolls up every contact on the domain, all
+its rate cards, domain-level notes, the scrape metadata, and the combined message
+history across all of its addresses.
+
+**Notes and tasks.** Notes attach to a contact or to a domain. Tasks attach to a
+contact and carry a due date, with overdue highlighted. A workspace-wide Tasks
+page lists everything open with its linked contact.
+
+**Activity log surfaced.** The audit trail written since phase 1 now appears on
+the contact record.
+
+### Files added
+
+```
+supabase/migrations/0006_crm.sql
+src/components/ pipeline-board.tsx, pipeline-editor.tsx, notes-tasks.tsx,
+                stage-select.tsx
+src/app/(app)/  pipeline/, tasks/, contacts/[id]/, domains/[domain]/
+src/app/api/    pipeline/, contacts/ (PATCH), notes/, tasks/
+```
+
+### Migrations run
+
+`0006_crm.sql` — `pipeline_stages`, `notes`, `tasks`, the
+`seed_pipeline_stages` function plus a trigger on workspace creation, a backfill
+for existing workspaces, and the `domain_summary` view.
+
+### How to test
+
+1. Pipeline → drag a card between columns; reload and confirm it stuck.
+2. **Edit stages** → rename one, add one, remove one. Contacts in the removed
+   stage move to the first column rather than disappearing.
+3. Contacts → click an email → the full record, with campaigns, deals, notes,
+   tasks, messages and activity.
+4. Click the domain on that record → the site rollup with every address on it.
+5. Add a note and a task; check the task appears on the Tasks page and shows as
+   overdue once its due date passes.
+
+### Open items
+
+- The board loads the 400 most recently updated contacts. Beyond that it needs
+  per-column pagination.
+- Tasks are assigned to their creator; with one user per workspace today there is
+  no assignment UI yet.
+- The `domain_summary` view exists for phase 7 reporting but is not yet read by
+  any page.
