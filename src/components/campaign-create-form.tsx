@@ -44,7 +44,9 @@ export function CampaignCreateForm() {
           required
         />
         <p className="hint mt-1">
-          Starts as a draft with a 3-step sequence you can edit.
+          Starts as a draft with a 3-step sequence you can edit. Open it to set
+          the sending window (hours, days, timezone) and pick which mailboxes it
+          rotates across — it defaults to 9–17 UTC, Mon–Fri.
         </p>
       </div>
       {error && <p className="text-sm text-[var(--color-danger)]">{error}</p>}

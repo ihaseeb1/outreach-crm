@@ -41,7 +41,7 @@ export async function POST(request: Request) {
   if (parsed.data.job === "scrape") {
     const result = await runScrapeBatch(supabase, {
       workspaceId,
-      limit: parsed.data.limit ?? 5,
+      limit: parsed.data.limit ?? 10,
     });
     return NextResponse.json({ ok: true, job: "scrape", ...result });
   }

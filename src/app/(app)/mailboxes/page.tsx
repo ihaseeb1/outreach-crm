@@ -3,6 +3,8 @@ import Link from "next/link";
 import { MailboxActions } from "@/components/mailbox-actions";
 import { MailboxConnectForm } from "@/components/mailbox-connect-form";
 import { RunJobButton } from "@/components/run-job-button";
+import { env } from "@/lib/env";
+import { isOAuthConfigured } from "@/mail/providers/oauth";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
 import type { Mailbox } from "@/types/db";
@@ -40,6 +42,12 @@ export default async function MailboxesPage({
   const mailboxes = (data ?? []) as Mailbox[];
   const today = new Date().toISOString().slice(0, 10);
 
+  // Checked here rather than on click, so an unconfigured provider shows as
+  // unavailable instead of throwing a raw JSON error at the user.
+  const googleReady = isOAuthConfigured("google");
+  const microsoftReady = isOAuthConfigured("microsoft");
+  const appUrl = env.appUrl();
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -67,18 +75,87 @@ export default async function MailboxesPage({
       <div className="card card-pad space-y-3">
         <h2 className="text-sm font-semibold">Connect with OAuth</h2>
         <p className="hint">
-          No app password needed, and it keeps working on Microsoft tenants that
-          have disabled basic auth. Requires the OAuth client id and secret to be
-          set in the environment first.
+          Optional. An app password (the form above) works just as well for Gmail
+          and most providers. OAuth is only worth setting up for Microsoft tenants
+          that have disabled basic auth, or if you would rather not handle app
+          passwords.
         </p>
+
         <div className="flex flex-wrap gap-2">
-          <a className="btn-secondary" href="/api/oauth/google/start">
-            Connect Gmail
-          </a>
-          <a className="btn-secondary" href="/api/oauth/microsoft/start">
-            Connect Microsoft 365
-          </a>
+          {googleReady ? (
+            <a className="btn-secondary" href="/api/oauth/google/start">
+              Connect Gmail
+            </a>
+          ) : (
+            <span className="btn-secondary cursor-not-allowed opacity-50">
+              Connect Gmail — not configured
+            </span>
+          )}
+          {microsoftReady ? (
+            <a className="btn-secondary" href="/api/oauth/microsoft/start">
+              Connect Microsoft 365
+            </a>
+          ) : (
+            <span className="btn-secondary cursor-not-allowed opacity-50">
+              Connect Microsoft 365 — not configured
+            </span>
+          )}
         </div>
+
+        {(!googleReady || !microsoftReady) && (
+          <details className="rounded-md bg-[var(--color-canvas)] px-3 py-2 text-xs text-[var(--color-muted)]">
+            <summary className="cursor-pointer font-medium text-[var(--color-ink)]">
+              How to switch OAuth on
+            </summary>
+            <div className="mt-2 space-y-2">
+              {!googleReady && (
+                <div>
+                  <p className="font-medium text-[var(--color-ink)]">Gmail</p>
+                  <ol className="ml-4 list-decimal space-y-0.5">
+                    <li>
+                      Google Cloud Console → APIs &amp; Services → Credentials →
+                      Create credentials → OAuth client ID → Web application.
+                    </li>
+                    <li>
+                      Authorised redirect URI:{" "}
+                      <code>{appUrl}/api/oauth/google/callback</code>
+                    </li>
+                    <li>
+                      Enable the Gmail API, and add your own address as a test user
+                      while the consent screen is unpublished.
+                    </li>
+                    <li>
+                      Put the client id and secret in Vercel as{" "}
+                      <code>GOOGLE_OAUTH_CLIENT_ID</code> and{" "}
+                      <code>GOOGLE_OAUTH_CLIENT_SECRET</code>, then redeploy.
+                    </li>
+                  </ol>
+                </div>
+              )}
+              {!microsoftReady && (
+                <div>
+                  <p className="font-medium text-[var(--color-ink)]">Microsoft 365</p>
+                  <ol className="ml-4 list-decimal space-y-0.5">
+                    <li>Azure Portal → App registrations → New registration.</li>
+                    <li>
+                      Redirect URI (Web):{" "}
+                      <code>{appUrl}/api/oauth/microsoft/callback</code>
+                    </li>
+                    <li>
+                      Delegated permissions: SMTP.Send, IMAP.AccessAsUser.All,
+                      offline_access, User.Read.
+                    </li>
+                    <li>
+                      Set <code>MICROSOFT_OAUTH_CLIENT_ID</code>,{" "}
+                      <code>MICROSOFT_OAUTH_CLIENT_SECRET</code> and optionally{" "}
+                      <code>MICROSOFT_TENANT_ID</code>, then redeploy.
+                    </li>
+                  </ol>
+                </div>
+              )}
+            </div>
+          </details>
+        )}
       </div>
 
       {!session.workspace.sending_postal_address && (

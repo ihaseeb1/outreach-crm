@@ -105,11 +105,29 @@ export function CampaignControls({
               </label>
             ))}
             <p className="hint">
-              Sends rotate across every ticked mailbox, each capped by its own
-              daily limit and spaced by a randomised gap.
+              First emails rotate across every ticked mailbox — the one with the
+              most headroom left today goes next, so volume stays even instead of
+              draining one inbox at a time. Each is capped by its own daily limit
+              and spaced by a randomised gap.
+            </p>
+            <p className="hint">
+              Follow-ups do <strong>not</strong> rotate. Once a contact has been
+              emailed from a mailbox, every later step in the sequence goes from
+              that same address and replies into the same thread, so the
+              conversation reads as one exchange. If that mailbox is at its limit
+              the follow-up waits rather than switching sender mid-conversation.
             </p>
           </div>
         )}
+      </div>
+
+      <div>
+        <p className="label">Sending window</p>
+        <p className="hint">
+          Nothing leaves outside these hours on these days. Hours are 0–23 in the
+          timezone below, so 9 to 17 means 9am–5pm. Sends are scattered randomly
+          inside the window rather than fired on the hour.
+        </p>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-3">

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
+import { dealStatusStops, stopOutreachForContact } from "@/campaigns/stop";
 import { logActivity } from "@/lib/activity";
 import { safeEqual } from "@/lib/crypto";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
@@ -172,7 +173,24 @@ export async function POST(request: Request) {
     meta: { domain: payload.domain, status: fields.status, prices: cleanPrices.length },
   });
 
-  return NextResponse.json({ ok: true, id: dealId });
+  // Closing a deal has to stop the follow-ups, otherwise the sequence keeps
+  // chasing somebody you have already agreed terms with.
+  const stop = fields.contact_id ? dealStatusStops(fields.status) : null;
+  let stoppedSequences = 0;
+
+  if (stop && fields.contact_id) {
+    const outcome = await stopOutreachForContact(supabase, {
+      workspaceId: session.workspace.id,
+      contactId: fields.contact_id,
+      reason: stop.reason,
+      suppress: stop.suppress,
+      suppressionReason: stop.suppressionReason,
+      actorId: session.userId,
+    });
+    stoppedSequences = outcome.stopped;
+  }
+
+  return NextResponse.json({ ok: true, id: dealId, stopped_sequences: stoppedSequences });
 }
 
 export async function DELETE(request: Request) {

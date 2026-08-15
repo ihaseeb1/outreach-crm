@@ -1,23 +1,13 @@
 import Link from "next/link";
 
+import { ContactAddForm, ContactsTable } from "@/components/contacts-table";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
-import type { Contact, ValidationStatus } from "@/types/db";
+import type { Contact } from "@/types/db";
 
 export const dynamic = "force-dynamic";
 
 const PAGE_SIZE = 50;
-
-const VALIDATION_STYLES: Record<ValidationStatus, string> = {
-  unknown: "bg-gray-100 text-gray-700",
-  valid: "bg-green-50 text-[var(--color-ok)]",
-  role_account: "bg-blue-50 text-[var(--color-brand)]",
-  invalid_syntax: "bg-red-50 text-[var(--color-danger)]",
-  no_mx: "bg-red-50 text-[var(--color-danger)]",
-  disposable: "bg-amber-50 text-[var(--color-warn)]",
-  suppressed: "bg-amber-50 text-[var(--color-warn)]",
-  bounced: "bg-red-50 text-[var(--color-danger)]",
-};
 
 const STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: "", label: "All statuses" },
@@ -60,6 +50,14 @@ export default async function ContactsPage({
   const { data, count } = await query;
   const contacts = (data ?? []) as Contact[];
   const total = count ?? 0;
+
+  const { data: stageRows } = await supabase
+    .from("pipeline_stages")
+    .select("key, label")
+    .eq("workspace_id", session.workspace.id)
+    .order("position", { ascending: true });
+  const stages = (stageRows ?? []) as { key: string; label: string }[];
+
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   const exportQuery = new URLSearchParams();
@@ -80,12 +78,15 @@ export default async function ContactsPage({
           <h1 className="text-2xl font-semibold">Contacts</h1>
           <p className="hint mt-1">{total.toLocaleString()} matching contact(s)</p>
         </div>
-        <a
-          className="btn-secondary"
-          href={`/api/contacts/export?${exportQuery.toString()}`}
-        >
-          Export CSV
-        </a>
+        <div className="flex gap-2">
+          <ContactAddForm />
+          <a
+            className="btn-secondary"
+            href={`/api/contacts/export?${exportQuery.toString()}`}
+          >
+            Export CSV
+          </a>
+        </div>
       </div>
 
       <form method="get" className="card card-pad grid gap-3 sm:grid-cols-4">
@@ -133,72 +134,8 @@ export default async function ContactsPage({
             .
           </p>
         ) : (
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Email</th>
-                  <th>Name</th>
-                  <th>Domain</th>
-                  <th>Validation</th>
-                  <th>Source</th>
-                  <th>Added</th>
-                </tr>
-              </thead>
-              <tbody>
-                {contacts.map((contact) => (
-                  <tr key={contact.id}>
-                    <td>
-                      <Link
-                        className="font-medium text-[var(--color-brand)] hover:underline"
-                        href={`/contacts/${contact.id}`}
-                      >
-                        {contact.email}
-                      </Link>
-                    </td>
-                    <td>
-                      {[contact.first_name, contact.last_name]
-                        .filter(Boolean)
-                        .join(" ") || "—"}
-                    </td>
-                    <td>
-                      {contact.domain ? (
-                        <Link
-                          className="hover:underline"
-                          href={`/domains/${encodeURIComponent(contact.domain)}`}
-                        >
-                          {contact.domain}
-                        </Link>
-                      ) : (
-                        "—"
-                      )}
-                    </td>
-                    <td>
-                      <span
-                        className={`badge ${VALIDATION_STYLES[contact.validation_status]}`}
-                      >
-                        {contact.validation_status.replace("_", " ")}
-                      </span>
-                    </td>
-                    <td className="max-w-xs truncate">
-                      {contact.source_url ? (
-                        <a
-                          className="text-[var(--color-brand)] hover:underline"
-                          href={contact.source_url}
-                          target="_blank"
-                          rel="noreferrer noopener"
-                        >
-                          {contact.source_url.replace(/^https?:\/\//, "")}
-                        </a>
-                      ) : (
-                        "—"
-                      )}
-                    </td>
-                    <td>{new Date(contact.created_at).toLocaleDateString()}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="p-5">
+            <ContactsTable contacts={contacts} stages={stages} />
           </div>
         )}
       </section>

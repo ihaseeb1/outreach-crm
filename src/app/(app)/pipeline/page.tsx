@@ -83,6 +83,17 @@ export default async function PipelinePage() {
     has_deal: withDeals.has(contact.id),
   }));
 
+  // The automatic transitions target these stage keys specifically (see
+  // campaigns/run.ts and mail/inbound.ts), so label them from the live config
+  // rather than hardcoding "New" / "Contacted" in the copy below.
+  const labelFor = (key: string, fallback: string) =>
+    stages.find((stage) => stage.key === key)?.label ?? fallback;
+  const firstLabel = labelFor("new", "New");
+  const contactedLabel = labelFor("contacted", "Contacted");
+  const repliedLabel = labelFor("replied", "Replied");
+  const wonLabels = stages.filter((stage) => stage.is_won).map((stage) => stage.label);
+  const lostLabels = stages.filter((stage) => stage.is_lost).map((stage) => stage.label);
+
   const editable: EditableStage[] = stages.map((stage) => ({
     key: stage.key,
     label: stage.label,
@@ -102,6 +113,48 @@ export default async function PipelinePage() {
           </p>
         </div>
         <PipelineEditor initial={editable} />
+      </div>
+
+      <div className="card card-pad space-y-2 text-sm">
+        <h2 className="text-sm font-semibold">What moves on its own</h2>
+        <ul className="ml-4 list-disc space-y-1 text-[var(--color-muted)]">
+          <li>
+            <strong className="text-[var(--color-ink)]">{firstLabel} → {contactedLabel}</strong>{" "}
+            the moment the first campaign email is sent to that contact.
+          </li>
+          <li>
+            <strong className="text-[var(--color-ink)]">{contactedLabel} → {repliedLabel}</strong>{" "}
+            the moment a genuine reply is received. Out-of-office autoresponders
+            and bounces do not count and do not move the card.
+          </li>
+          <li>
+            Everything after that is yours to set by hand — the app cannot tell
+            negotiating from agreed by reading an email.
+          </li>
+        </ul>
+        {(wonLabels.length > 0 || lostLabels.length > 0) && (
+          <p className="rounded-md bg-[var(--color-canvas)] px-3 py-2 text-xs">
+            Dropping a card into{" "}
+            {[...wonLabels, ...lostLabels].map((label, index, all) => (
+              <span key={label}>
+                <strong>{label}</strong>
+                {index < all.length - 2 ? ", " : index === all.length - 2 ? " or " : ""}
+              </span>
+            ))}{" "}
+            stops every follow-up already queued for that contact.
+            {lostLabels.length > 0 && (
+              <>
+                {" "}
+                A{" "}
+                {lostLabels.map((label) => (
+                  <strong key={label}>{label}</strong>
+                ))}{" "}
+                move also suppresses the address, so no future campaign can
+                re-pitch them.
+              </>
+            )}
+          </p>
+        )}
       </div>
 
       {boardStages.length === 0 ? (

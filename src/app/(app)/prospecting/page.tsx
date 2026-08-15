@@ -1,21 +1,55 @@
+import Link from "next/link";
+
 import { RunJobButton } from "@/components/run-job-button";
 import { UrlImportForm } from "@/components/url-import-form";
+import { WebsiteTable } from "@/components/website-table";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
 import type { ScrapeJob, Website } from "@/types/db";
 
 export const dynamic = "force-dynamic";
 
-const STATUS_STYLES: Record<string, string> = {
+const JOB_STATUS_STYLES: Record<string, string> = {
   pending: "bg-gray-100 text-gray-700",
-  scraping: "bg-blue-50 text-[var(--color-brand)]",
-  done: "bg-green-50 text-[var(--color-ok)]",
+  running: "bg-blue-50 text-[var(--color-brand)]",
+  completed: "bg-green-50 text-[var(--color-ok)]",
   failed: "bg-red-50 text-[var(--color-danger)]",
-  skipped_robots: "bg-amber-50 text-[var(--color-warn)]",
 };
 
-export default async function ProspectingPage() {
+const STATUS_OPTIONS = [
+  { value: "", label: "All statuses" },
+  { value: "pending", label: "Queued" },
+  { value: "done", label: "Done" },
+  { value: "failed", label: "Failed" },
+  { value: "skipped_robots", label: "Blocked by robots.txt" },
+  { value: "scraping", label: "In progress" },
+];
+
+const HTTP_OPTIONS = [
+  { value: "", label: "Any response" },
+  { value: "errors", label: "Any error (4xx / 5xx)" },
+  { value: "403", label: "403 Forbidden" },
+  { value: "404", label: "404 Not found" },
+  { value: "429", label: "429 Rate limited" },
+  { value: "500", label: "500 Server error" },
+  { value: "none", label: "No response at all" },
+];
+
+const PAGE_SIZE = 100;
+
+export default async function ProspectingPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const session = await requireSession();
+  const params = await searchParams;
+
+  const status = typeof params.status === "string" ? params.status : "";
+  const http = typeof params.http === "string" ? params.http : "";
+  const domain = typeof params.domain === "string" ? params.domain : "";
+  const noEmails = params.no_emails === "1";
+
   const supabase = await createSupabaseServerClient();
 
   const { data: jobs } = await supabase
@@ -25,12 +59,37 @@ export default async function ProspectingPage() {
     .order("created_at", { ascending: false })
     .limit(10);
 
-  const { data: websites } = await supabase
+  let query = supabase
     .from("websites")
-    .select("*")
+    .select("*", { count: "exact" })
     .eq("workspace_id", session.workspace.id)
     .order("created_at", { ascending: false })
-    .limit(100);
+    .limit(PAGE_SIZE);
+
+  if (status) query = query.eq("status", status);
+  if (domain) query = query.ilike("domain", `%${domain}%`);
+  if (noEmails) query = query.eq("emails_found", 0);
+
+  if (http === "errors") query = query.gte("http_status", 400);
+  else if (http === "none") query = query.is("http_status", null);
+  else if (http) query = query.eq("http_status", Number.parseInt(http, 10));
+
+  const { data: websites, count } = await query;
+  const rows = (websites ?? []) as Website[];
+
+  // Counts for the shortcut buttons, so the problem piles are visible without
+  // having to guess which filter to try.
+  const { count: failedCount } = await supabase
+    .from("websites")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", session.workspace.id)
+    .eq("status", "failed");
+
+  const { count: blockedCount } = await supabase
+    .from("websites")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", session.workspace.id)
+    .gte("http_status", 400);
 
   return (
     <div className="space-y-6">
@@ -50,7 +109,8 @@ export default async function ProspectingPage() {
           a slice immediately.
         </p>
         <div className="flex flex-wrap gap-4">
-          <RunJobButton job="scrape" label="Scrape next 5 websites" limit={5} />
+          <RunJobButton job="scrape" label="Scrape next 10 websites" limit={10} />
+          <RunJobButton job="scrape" label="Scrape next 25" limit={25} />
           <RunJobButton job="validate" label="Validate next 100 emails" limit={100} />
         </div>
       </div>
@@ -77,7 +137,7 @@ export default async function ProspectingPage() {
                   <tr key={job.id}>
                     <td>{new Date(job.created_at).toLocaleString()}</td>
                     <td>
-                      <span className={`badge ${STATUS_STYLES[job.status] ?? ""}`}>
+                      <span className={`badge ${JOB_STATUS_STYLES[job.status] ?? ""}`}>
                         {job.status}
                       </span>
                     </td>
@@ -94,61 +154,88 @@ export default async function ProspectingPage() {
       </section>
 
       <section className="card">
-        <h2 className="border-b border-[var(--color-line)] px-5 py-3 text-sm font-semibold">
-          Websites
-        </h2>
-        {(websites ?? []).length === 0 ? (
-          <p className="px-5 py-6 text-sm text-[var(--color-muted)]">
-            Nothing queued yet.
-          </p>
-        ) : (
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Domain</th>
-                  <th>Status</th>
-                  <th>Emails</th>
-                  <th>Title</th>
-                  <th>Scraped</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(websites as Website[]).map((site) => (
-                  <tr key={site.id}>
-                    <td>
-                      <a
-                        className="text-[var(--color-brand)] hover:underline"
-                        href={site.url}
-                        target="_blank"
-                        rel="noreferrer noopener"
-                      >
-                        {site.domain}
-                      </a>
-                    </td>
-                    <td>
-                      <span className={`badge ${STATUS_STYLES[site.status] ?? ""}`}>
-                        {site.status}
-                      </span>
-                      {site.error && (
-                        <span className="hint ml-2" title={site.error}>
-                          {site.error.slice(0, 40)}
-                        </span>
-                      )}
-                    </td>
-                    <td>{site.emails_found}</td>
-                    <td className="max-w-xs truncate">{site.meta?.title ?? "—"}</td>
-                    <td>
-                      {site.scraped_at
-                        ? new Date(site.scraped_at).toLocaleString()
-                        : "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--color-line)] px-5 py-3">
+          <h2 className="text-sm font-semibold">
+            Websites{" "}
+            <span className="hint font-normal">
+              ({(count ?? 0).toLocaleString()} matching
+              {(count ?? 0) > PAGE_SIZE ? `, showing ${PAGE_SIZE}` : ""})
+            </span>
+          </h2>
+          <div className="flex flex-wrap gap-2">
+            <Link className="btn-secondary" href="/prospecting?status=failed">
+              Failed ({failedCount ?? 0})
+            </Link>
+            <Link className="btn-secondary" href="/prospecting?http=errors">
+              HTTP errors ({blockedCount ?? 0})
+            </Link>
+            <Link className="btn-secondary" href="/prospecting?status=done&no_emails=1">
+              Done, no emails
+            </Link>
           </div>
-        )}
+        </div>
+
+        <form method="get" className="grid gap-3 px-5 py-4 sm:grid-cols-5">
+          <div>
+            <label className="label" htmlFor="domain">
+              Domain contains
+            </label>
+            <input id="domain" name="domain" className="input" defaultValue={domain} />
+          </div>
+          <div>
+            <label className="label" htmlFor="status">
+              Status
+            </label>
+            <select id="status" name="status" className="input" defaultValue={status}>
+              {STATUS_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="label" htmlFor="http">
+              HTTP response
+            </label>
+            <select id="http" name="http" className="input" defaultValue={http}>
+              {HTTP_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-end">
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                name="no_emails"
+                value="1"
+                defaultChecked={noEmails}
+              />
+              No emails found
+            </label>
+          </div>
+          <div className="flex items-end gap-2">
+            <button className="btn-primary" type="submit">
+              Filter
+            </button>
+            <Link className="btn-secondary" href="/prospecting">
+              Reset
+            </Link>
+          </div>
+        </form>
+
+        <div className="px-5 pb-5">
+          {rows.length === 0 ? (
+            <p className="py-6 text-sm text-[var(--color-muted)]">
+              Nothing matches this filter.
+            </p>
+          ) : (
+            <WebsiteTable websites={rows} />
+          )}
+        </div>
       </section>
     </div>
   );
