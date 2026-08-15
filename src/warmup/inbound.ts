@@ -5,9 +5,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  *
  * It is deliberately kept out of `messages` and out of the unified inbox —
  * warmup traffic is not correspondence, and mixing it in would bury real
- * replies. Phase 4 fills in the `warmup_messages` bookkeeping (marking a peer
- * message as opened/replied); until that table exists this is a no-op that
- * simply discards the mail.
+ * replies. All that happens here is bookkeeping against `warmup_messages`.
  */
 
 export interface WarmupInboundInput {
@@ -23,8 +21,29 @@ export async function recordWarmupInbound(
   workspaceId: string,
   input: WarmupInboundInput,
 ): Promise<void> {
-  void supabase;
-  void workspaceId;
-  void input;
-  // Phase 4 replaces this body.
+  const now = new Date().toISOString();
+
+  // A warmup reply landing back with the original sender closes the loop on
+  // the message it answers.
+  const parents = [input.inReplyTo, ...input.references].filter(
+    (value): value is string => Boolean(value),
+  );
+
+  if (parents.length > 0) {
+    await supabase
+      .from("warmup_messages")
+      .update({ replied: true, replied_at: now, delivered_at: now })
+      .eq("workspace_id", workspaceId)
+      .in("message_id", parents);
+    return;
+  }
+
+  // Otherwise it is a fresh warmup message; the engagement pass will mark it
+  // opened once it has been flagged in the folder.
+  await supabase
+    .from("warmup_messages")
+    .update({ delivered_at: now })
+    .eq("workspace_id", workspaceId)
+    .eq("subject", input.subject)
+    .is("delivered_at", null);
 }

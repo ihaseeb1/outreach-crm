@@ -6,6 +6,7 @@ import type SMTPTransport from "nodemailer/lib/smtp-transport";
 import { classifyInbound } from "@/mail/inbound-classify";
 import type {
   FetchInboundOptions,
+  FolderMessageRef,
   InboundMessage,
   MailboxCredentials,
   MailboxProvider,
@@ -146,6 +147,98 @@ export class SmtpProvider implements MailboxProvider {
     }
 
     return results;
+  }
+
+  /**
+   * Runs `fn` against a connected, locked mailbox and always tears the
+   * connection down afterwards.
+   */
+  private async withFolder<T>(
+    folder: string,
+    fn: (client: ImapFlow) => Promise<T>,
+  ): Promise<T> {
+    const client = this.imapClient();
+    await client.connect();
+    const lock = await client.getMailboxLock(folder);
+    try {
+      return await fn(client);
+    } finally {
+      lock.release();
+      await client.logout().catch(() => undefined);
+    }
+  }
+
+  async findSpamFolder(): Promise<string | null> {
+    const client = this.imapClient();
+    await client.connect();
+    try {
+      const folders = await client.list();
+      const bySpecialUse = folders.find((folder) => folder.specialUse === "\\Junk");
+      if (bySpecialUse) return bySpecialUse.path;
+
+      // Not every server advertises SPECIAL-USE; fall back to the usual names.
+      const byName = folders.find((folder) =>
+        /^(junk|spam|bulk mail|junk e-?mail)$/i.test(folder.name),
+      );
+      return byName?.path ?? null;
+    } catch {
+      return null;
+    } finally {
+      await client.logout().catch(() => undefined);
+    }
+  }
+
+  async findByHeader(
+    folder: string,
+    header: string,
+  ): Promise<FolderMessageRef[]> {
+    try {
+      return await this.withFolder(folder, async (client) => {
+        // An empty value matches any message carrying the header at all.
+        const uids = await client.search({ header: { [header]: "" } }, { uid: true });
+        if (!uids || uids.length === 0) return [];
+
+        const refs: FolderMessageRef[] = [];
+        for await (const item of client.fetch(
+          uids.slice(-100),
+          { uid: true, envelope: true },
+          { uid: true },
+        )) {
+          refs.push({
+            uid: item.uid,
+            messageId: item.envelope?.messageId ?? null,
+            subject: item.envelope?.subject ?? null,
+          });
+        }
+        return refs;
+      });
+    } catch {
+      // A missing folder is normal (not every account has a Junk folder).
+      return [];
+    }
+  }
+
+  async addFlags(folder: string, uids: number[], flags: string[]): Promise<void> {
+    if (uids.length === 0) return;
+    await this.withFolder(folder, async (client) => {
+      await client.messageFlagsAdd(uids, flags, { uid: true });
+    });
+  }
+
+  async moveMessages(
+    folder: string,
+    uids: number[],
+    destination: string,
+  ): Promise<number> {
+    if (uids.length === 0) return 0;
+    try {
+      return await this.withFolder(folder, async (client) => {
+        await client.messageMove(uids, destination, { uid: true });
+        return uids.length;
+      });
+    } catch {
+      return 0;
+    }
   }
 
   async close(): Promise<void> {

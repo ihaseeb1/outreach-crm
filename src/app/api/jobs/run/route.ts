@@ -5,8 +5,10 @@ import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { getSession } from "@/lib/workspace";
 import { runCampaignBatch } from "@/campaigns/run";
 import { syncSuppressedCampaignContacts } from "@/campaigns/enroll";
+import { runHealthChecks } from "@/health/run";
 import { runInboundPoll } from "@/mail/poll";
 import { runScrapeBatch } from "@/scraper/run";
+import { runWarmupBatch } from "@/warmup/engine";
 import { runValidationBatch } from "@/validation/run";
 
 export const runtime = "nodejs";
@@ -14,7 +16,7 @@ export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
 const bodySchema = z.object({
-  job: z.enum(["scrape", "validate", "inbound", "campaigns"]),
+  job: z.enum(["scrape", "validate", "inbound", "campaigns", "warmup", "health"]),
   limit: z.number().int().positive().max(200).optional(),
 });
 
@@ -68,6 +70,22 @@ export async function POST(request: Request) {
       limit: Math.min(parsed.data.limit ?? 10, 40),
     });
     return NextResponse.json({ ok: true, job: "campaigns", ...result });
+  }
+
+  if (parsed.data.job === "warmup") {
+    const result = await runWarmupBatch(supabase, {
+      workspaceId,
+      sendLimit: Math.min(parsed.data.limit ?? 5, 20),
+    });
+    return NextResponse.json({ ok: true, job: "warmup", ...result });
+  }
+
+  if (parsed.data.job === "health") {
+    const result = await runHealthChecks(supabase, {
+      workspaceId,
+      limit: Math.min(parsed.data.limit ?? 10, 20),
+    });
+    return NextResponse.json({ ok: true, job: "health", ...result });
   }
 
   const result = await runValidationBatch(supabase, {

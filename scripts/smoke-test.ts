@@ -21,7 +21,19 @@ import {
   nextWindowOpening,
   resolveWindow,
 } from "../src/campaigns/schedule";
+import { rate, scoreMailbox, type HealthSignals } from "../src/health/score";
 import { encryptSecret, decryptSecret, safeEqual } from "../src/lib/crypto";
+import { warmupMessage } from "../src/warmup/content";
+import {
+  nextVolume,
+  pickPeer,
+  poolIsViable,
+  quotaRemaining,
+  resumeVolume,
+  shouldRampToday,
+  shouldReply,
+} from "../src/warmup/plan";
+import { isValidWarmupToken, newWarmupToken } from "../src/warmup/token";
 import { domainFromUrl, isRoleAccount, normalizeUrl, splitName } from "../src/lib/email";
 import {
   classifyInbound,
@@ -518,6 +530,161 @@ test("when the assigned mailbox is full we wait rather than switch sender", () =
 test("no eligible mailbox returns null instead of overshooting a limit", () => {
   const pool = [mailbox({ id: "a", sent_today: 50, daily_limit: 50 })];
   assert.equal(pickMailbox(pool, { now: NOW }), null);
+});
+
+console.log("\nwarmup planning");
+
+test("the ramp climbs by the increment and stops at the target", () => {
+  assert.equal(nextVolume({ current: 5, target: 40, increment: 2 }), 7);
+  assert.equal(nextVolume({ current: 39, target: 40, increment: 5 }), 40);
+  assert.equal(nextVolume({ current: 40, target: 40, increment: 5 }), 40);
+});
+
+test("the ramp advances at most once a day", () => {
+  assert.equal(shouldRampToday("2026-08-16", "2026-08-16"), false);
+  assert.equal(shouldRampToday("2026-08-15", "2026-08-16"), true);
+  assert.equal(shouldRampToday(null, "2026-08-16"), true);
+});
+
+test("recovering from a pause restarts low instead of spiking", () => {
+  assert.equal(resumeVolume(38), 5);
+  assert.equal(resumeVolume(3), 3);
+});
+
+test("warmup needs at least two mailboxes to form a loop", () => {
+  assert.equal(poolIsViable(1), false);
+  assert.equal(poolIsViable(2), true);
+  assert.equal(poolIsViable(9), true);
+});
+
+test("a peer is picked from those least recently written to", () => {
+  const pool = [
+    { id: "a", email: "a@mine.com", lastReceivedAt: "2026-08-16T10:00:00Z" },
+    { id: "b", email: "b@mine.com", lastReceivedAt: "2026-08-10T10:00:00Z" },
+    { id: "c", email: "c@mine.com", lastReceivedAt: null },
+    { id: "d", email: "d@mine.com", lastReceivedAt: "2026-08-15T10:00:00Z" },
+  ];
+  // Never itself, and drawn from the stalest half.
+  const chosen = pickPeer(pool, "a", () => 0);
+  assert.equal(chosen?.id, "c");
+  assert.notEqual(pickPeer(pool, "a", () => 0.99)?.id, "a");
+});
+
+test("a single-mailbox pool has nobody to warm up with", () => {
+  assert.equal(
+    pickPeer([{ id: "a", email: "a@mine.com", lastReceivedAt: null }], "a"),
+    null,
+  );
+});
+
+test("quota never goes negative", () => {
+  assert.equal(quotaRemaining(10, 3), 7);
+  assert.equal(quotaRemaining(10, 14), 0);
+});
+
+test("reply rate is honoured and never exceeds its bounds", () => {
+  assert.equal(shouldReply(0.35, () => 0.2), true);
+  assert.equal(shouldReply(0.35, () => 0.9), false);
+  assert.equal(shouldReply(0, () => 0), false);
+  assert.equal(shouldReply(1, () => 0.999), true);
+});
+
+test("warmup content varies rather than repeating one template", () => {
+  const a = warmupMessage(() => 0.1);
+  const b = warmupMessage(() => 0.8);
+  assert.notEqual(a.subject, b.subject);
+  assert.ok(a.body.length > 20);
+});
+
+test("a warmup token verifies only for its own workspace", () => {
+  const token = newWarmupToken("ws-1");
+  assert.equal(isValidWarmupToken("ws-1", token), true);
+  assert.equal(isValidWarmupToken("ws-2", token), false);
+  assert.equal(isValidWarmupToken("ws-1", "forged.token"), false);
+});
+
+console.log("\nhealth scoring");
+
+const CLEAN: HealthSignals = {
+  sent7d: 200,
+  bounceRate: 0,
+  complaintRate: 0,
+  warmupSpamRate: 0,
+  spfOk: true,
+  dkimOk: true,
+  dmarcOk: true,
+  blacklists: [],
+};
+
+test("a clean mailbox scores 100 and stays healthy", () => {
+  const verdict = scoreMailbox(CLEAN);
+  assert.equal(verdict.score, 100);
+  assert.equal(verdict.status, "healthy");
+  assert.deepEqual(verdict.issues, []);
+});
+
+test("a high bounce rate pauses the mailbox", () => {
+  const verdict = scoreMailbox({ ...CLEAN, bounceRate: 0.12 });
+  assert.equal(verdict.status, "paused");
+  assert.ok(verdict.score < 70);
+});
+
+test("a moderate bounce rate warns without stopping sending", () => {
+  assert.equal(scoreMailbox({ ...CLEAN, bounceRate: 0.05 }).status, "warning");
+});
+
+test("low volume never pauses on a noisy rate", () => {
+  // 1 bounce out of 3 sends is 33% — meaningless, and must not pause.
+  const verdict = scoreMailbox({ ...CLEAN, sent7d: 3, bounceRate: 0.33 });
+  assert.equal(verdict.status, "warning");
+});
+
+test("a blacklisting pauses immediately", () => {
+  const verdict = scoreMailbox({ ...CLEAN, blacklists: ["Spamhaus DBL"] });
+  assert.equal(verdict.status, "paused");
+  assert.match(verdict.issues.join(" "), /Spamhaus/);
+});
+
+test("warmup landing in spam escalates from warning to pause", () => {
+  assert.equal(scoreMailbox({ ...CLEAN, warmupSpamRate: 0.3 }).status, "warning");
+  assert.equal(scoreMailbox({ ...CLEAN, warmupSpamRate: 0.7 }).status, "paused");
+});
+
+test("missing DNS auth warns but never pauses — pausing would not fix it", () => {
+  const verdict = scoreMailbox({
+    ...CLEAN,
+    spfOk: false,
+    dkimOk: false,
+    dmarcOk: false,
+  });
+  assert.equal(verdict.status, "warning");
+  assert.equal(verdict.issues.length, 3);
+});
+
+test("complaints are judged on a far tighter threshold than bounces", () => {
+  assert.equal(scoreMailbox({ ...CLEAN, complaintRate: 0.002 }).status, "warning");
+  assert.equal(scoreMailbox({ ...CLEAN, complaintRate: 0.01 }).status, "paused");
+});
+
+test("the score is clamped to 0–100", () => {
+  const verdict = scoreMailbox({
+    sent7d: 500,
+    bounceRate: 0.5,
+    complaintRate: 0.5,
+    warmupSpamRate: 1,
+    spfOk: false,
+    dkimOk: false,
+    dmarcOk: false,
+    blacklists: ["Spamhaus DBL", "SURBL"],
+  });
+  assert.ok(verdict.score >= 0);
+  assert.equal(verdict.status, "paused");
+});
+
+test("rate() is safe when nothing has been sent", () => {
+  assert.equal(rate(0, 0), 0);
+  assert.equal(rate(3, 0), 0);
+  assert.equal(rate(1, 4), 0.25);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

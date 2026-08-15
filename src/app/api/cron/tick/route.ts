@@ -4,8 +4,10 @@ import { assertCronAuthorized } from "@/lib/cron";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { runCampaignBatch } from "@/campaigns/run";
 import { syncSuppressedCampaignContacts } from "@/campaigns/enroll";
+import { runHealthChecks } from "@/health/run";
 import { runInboundPoll } from "@/mail/poll";
 import { runScrapeBatch } from "@/scraper/run";
+import { runWarmupBatch } from "@/warmup/engine";
 import { runValidationBatch } from "@/validation/run";
 
 export const runtime = "nodejs";
@@ -45,9 +47,13 @@ export async function GET(request: Request) {
   results.campaigns = await safely("campaigns", () =>
     runCampaignBatch(supabase, { limit: 10 }),
   );
-
-  // Later phases register their jobs here:
-  //   phase 4 — warmup sends, daily health checks
+  results.warmup = await safely("warmup", () =>
+    runWarmupBatch(supabase, { sendLimit: 4 }),
+  );
+  // Skips any mailbox already checked today, so calling it every tick is cheap.
+  results.health = await safely("health", () =>
+    runHealthChecks(supabase, { limit: 3 }),
+  );
 
   return NextResponse.json({
     ok: true,

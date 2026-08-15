@@ -382,3 +382,123 @@ pair, and a test asserts the fallback window actually opens.
   per-run limit, so each function stays well inside its timeout.
 - Enrolment matches on domain/status only; richer targeting arrives with the CRM
   filters in phase 6.
+
+---
+
+## Phase 4 — Email warmup and health maintenance
+
+**Status:** complete. Build, typecheck, and 69 smoke tests pass.
+
+### What was built
+
+**Peer warmup.** A closed loop between your own mailboxes — no paid pool. Each
+tick does four things:
+
+1. **Ramp** — once per calendar day, raise the mailbox's daily warmup volume by a
+   small increment toward its target. Only *healthy* mailboxes climb; a warning
+   holds volume steady rather than raising it into a problem.
+2. **Send** — pick a peer that has gone longest without receiving anything (from
+   the stalest half of the pool, so the pattern is not perfectly predictable) and
+   send ordinary-looking short mail, composed from varied openers/middles/closers
+   rather than one template.
+3. **Engage** — over IMAP, find warmup mail by its header, mark it `\Seen` and
+   `\Flagged`, and — the part that actually matters — **move anything sitting in
+   the spam folder back to the inbox**.
+4. **Reply** — answer a configurable fraction (default 35%) of received warmup
+   mail, threaded properly. Deliberately not 100%: a perfect reply rate is itself
+   a tell.
+
+**Conservative by design**, per the spec's warning that Google and Microsoft
+detect artificial warmup: start at 5/day, climb 2/day, default target 40/day,
+randomised send times, randomised inter-send gaps, varied content, and a resume
+after a pause that restarts at 5/day rather than the volume that caused the
+pause.
+
+**Warmup respects every real-sending guard.** It goes through the same
+`sendEmail` path, so `canSend()` applies, the per-mailbox daily limit applies
+(warmup counts against the same allowance as campaigns), and a mailbox paused for
+health stops warming up as well as stopping campaigns.
+
+**Warmup never touches the inbox.** Every warmup email carries a signed
+`X-OCRM-Warmup` header (HMAC, so it cannot be forged from outside the workspace).
+Inbound warmup is recognised by that header, tracked in `warmup_messages`, and
+never written to `messages` — so the unified inbox stays real replies only.
+
+**Health monitoring.** A daily job per mailbox, from free signals only:
+
+| Signal              | Source                                                |
+| ------------------- | ----------------------------------------------------- |
+| SPF / DKIM / DMARC  | TXT lookups; DKIM tried across 11 common selectors     |
+| Blacklists          | Spamhaus DBL + SURBL, domain-based DNS queries         |
+| Bounce rate         | your own inbound bounce classifications, 7-day window  |
+| Complaint rate      | suppressions with reason `complaint`, 7-day window     |
+| Warmup-in-spam rate | how much warmup mail had to be rescued                 |
+
+DNS answers are cached in Postgres for 24h and shared across mailboxes on the
+same domain, because several DNSBLs rate-limit aggressively. A `127.255.255.x`
+answer is treated as a rate-limit response, not a listing — otherwise a throttled
+query would falsely pause a healthy mailbox.
+
+**Scoring** (`src/health/score.ts`, pure and fully tested) starts at 100 and
+deducts per signal, escalating `healthy → warning → paused`:
+
+- bounce ≥8% or complaint ≥0.3% or blacklisted or >60% warmup-in-spam → **paused**
+- bounce ≥4%, complaint ≥0.1%, >25% warmup-in-spam → **warning**
+- missing SPF/DKIM/DMARC → **warning** only, never a pause: pausing does not fix
+  a DNS record, and stopping a mailbox over it would be pure damage
+- **below 20 sends in 7 days the rates cannot pause anything** — one bounce out of
+  three is 33%, which would otherwise pause a perfectly healthy new mailbox
+
+Recovery is automatic: when signals come good the status returns to healthy and
+warmup resumes from a reduced volume.
+
+**UI.** A Deliverability page with a card per mailbox: warmup toggle and ramp
+progress bar, target/increment/reply-rate controls, current score, 7-day rates,
+SPF/DKIM/DMARC badges, blacklist hits, a 14-day score history, and the plain
+English list of what is wrong.
+
+### Files added
+
+```
+supabase/migrations/0004_warmup_and_health.sql
+src/warmup/   plan.ts, content.ts, token.ts, engine.ts, inbound.ts (now real)
+src/health/   dns.ts, score.ts, run.ts
+src/components/warmup-controls.tsx
+src/app/(app)/deliverability/
+src/app/api/  warmup/, cron/warmup/, cron/health/
+```
+
+`MailboxProvider` gained four folder operations (`findSpamFolder`,
+`findByHeader`, `addFlags`, `moveMessages`) — generic IMAP verbs rather than
+warmup-specific ones, so the phase 7 OAuth providers implement the same contract.
+
+### Migrations run
+
+`0004_warmup_and_health.sql` — `warmup_settings`, `warmup_messages`,
+`mailbox_health`, and `dns_check_cache`.
+
+### How to test
+
+Warmup needs **at least two** connected mailboxes; it refuses to enable with one
+and says why.
+
+1. Connect two or more mailboxes, then Deliverability → toggle warmup on for each.
+2. **Run warmup now** — check the peer mailbox actually received the mail.
+3. Move a warmup email into the spam folder by hand, run warmup again, and watch
+   it get pulled back into the inbox (`rescued` in the result).
+4. **Run health check now** — the card fills in with score, rates and DNS badges.
+5. Poll the inbox and confirm the warmup mail does **not** appear as a
+   conversation anywhere.
+
+### Open items
+
+- Warmup shares the mailbox's daily limit with campaigns. That is the safe
+  default for reputation, but if you run both hard on one mailbox they compete —
+  raise the limit or add mailboxes rather than exempting warmup.
+- Complaint rate is approximated from manually-recorded complaints. Gmail offers
+  no free feedback loop, so a true complaint rate is not obtainable without a
+  paid postmaster integration.
+- DKIM detection tries 11 common selectors. A custom selector reports as missing
+  and shows a warning — cosmetic, not a sending block.
+- Warmup engagement opens one IMAP connection per operation. With many mailboxes,
+  spread the work across ticks rather than raising the per-tick limit.

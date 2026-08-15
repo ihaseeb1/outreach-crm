@@ -7,7 +7,13 @@ import { useState } from "react";
  * Runs one batch of a background job for the current workspace. The same
  * batches run automatically on the cron tick; this is for impatience and testing.
  */
-export type RunnableJob = "scrape" | "validate" | "inbound" | "campaigns";
+export type RunnableJob =
+  | "scrape"
+  | "validate"
+  | "inbound"
+  | "campaigns"
+  | "warmup"
+  | "health";
 
 export function RunJobButton({
   job,
@@ -62,5 +68,9 @@ function describe(job: RunnableJob, payload: Record<string, number>): string {
       return `Polled ${payload.polled} mailbox(es): ${payload.replies} reply(ies), ${payload.bounces} bounce(s).`;
     case "campaigns":
       return `Sent ${payload.sent}, skipped ${payload.skipped}, completed ${payload.completed}.`;
+    case "warmup":
+      return `Warmup: ${payload.sent} sent, ${payload.engaged} opened, ${payload.rescued} rescued from spam, ${payload.replied} replied.`;
+    case "health":
+      return `Checked ${payload.checked}: ${payload.paused} paused, ${payload.warnings} warning(s), ${payload.recovered} recovered.`;
   }
 }

@@ -61,12 +61,29 @@ export interface VerifyResult {
   imap?: boolean;
 }
 
+/** Lightweight handle on a message in a folder, for warmup engagement. */
+export interface FolderMessageRef {
+  uid: number;
+  messageId: string | null;
+  subject: string | null;
+}
+
 export interface MailboxProvider {
   readonly kind: string;
   /** Checks the credentials work for both sending and receiving. */
   verify(): Promise<VerifyResult>;
   send(message: OutboundMessage): Promise<SendResult>;
   fetchInbound(options?: FetchInboundOptions): Promise<InboundMessage[]>;
+
+  // --- Folder operations, used by warmup engagement -------------------
+  /** The provider's spam folder (\Junk special-use), if it has one. */
+  findSpamFolder(): Promise<string | null>;
+  /** Messages in `folder` that carry the given header. */
+  findByHeader(folder: string, header: string): Promise<FolderMessageRef[]>;
+  addFlags(folder: string, uids: number[], flags: string[]): Promise<void>;
+  /** Returns how many messages were moved. */
+  moveMessages(folder: string, uids: number[], destination: string): Promise<number>;
+
   /** Providers open connections lazily; this releases whatever was opened. */
   close(): Promise<void>;
 }

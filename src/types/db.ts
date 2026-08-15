@@ -249,6 +249,42 @@ export interface Message {
   created_at: Timestamp;
 }
 
+export interface WarmupSettings {
+  id: Uuid;
+  mailbox_id: Uuid;
+  workspace_id: Uuid;
+  enabled: boolean;
+  current_daily_volume: number;
+  target_daily_volume: number;
+  ramp_increment: number;
+  reply_rate: number;
+  last_ramped_on: string | null;
+  started_at: Timestamp | null;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface MailboxHealth {
+  id: Uuid;
+  mailbox_id: Uuid;
+  workspace_id: Uuid;
+  date: string;
+  reputation_score: number;
+  sent_7d: number;
+  bounce_rate: number;
+  complaint_rate: number;
+  reply_rate: number;
+  warmup_spam_rate: number;
+  spf_ok: boolean | null;
+  dkim_ok: boolean | null;
+  dmarc_ok: boolean | null;
+  dns_detail: Record<string, unknown>;
+  blacklists: string[];
+  status: MailboxHealthStatus;
+  issues: string[];
+  checked_at: Timestamp;
+}
+
 export interface ActivityLogEntry {
   id: Uuid;
   workspace_id: Uuid;
