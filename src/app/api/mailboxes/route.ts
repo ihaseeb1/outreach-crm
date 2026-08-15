@@ -21,8 +21,10 @@ const connectSchema = z.object({
   from_name: z.string().max(120).optional(),
   signature: z.string().max(2000).optional(),
   daily_limit: z.number().int().min(1).max(2000).optional(),
-  min_gap_seconds: z.number().int().min(10).max(3600).optional(),
-  max_gap_seconds: z.number().int().min(10).max(7200).optional(),
+  // Up to 24h either side: a slow-drip mailbox sending twice a day is a
+  // legitimate warmup posture, and the old 1h ceiling made it unexpressible.
+  min_gap_seconds: z.number().int().min(10).max(86_400).optional(),
+  max_gap_seconds: z.number().int().min(10).max(86_400).optional(),
   // Only needed for the "other" provider.
   smtp_host: z.string().optional(),
   smtp_port: z.number().int().optional(),
@@ -145,8 +147,10 @@ const patchSchema = z.object({
   daily_limit: z.number().int().min(1).max(2000).optional(),
   from_name: z.string().max(120).nullable().optional(),
   signature: z.string().max(2000).nullable().optional(),
-  min_gap_seconds: z.number().int().min(10).max(3600).optional(),
-  max_gap_seconds: z.number().int().min(10).max(7200).optional(),
+  // Up to 24h either side: a slow-drip mailbox sending twice a day is a
+  // legitimate warmup posture, and the old 1h ceiling made it unexpressible.
+  min_gap_seconds: z.number().int().min(10).max(86_400).optional(),
+  max_gap_seconds: z.number().int().min(10).max(86_400).optional(),
 });
 
 export async function PATCH(request: Request) {
@@ -161,6 +165,20 @@ export async function PATCH(request: Request) {
   }
 
   const { id, ...patch } = parsed.data;
+
+  // A max below the min would make randomGapMs collapse to the min silently.
+  // Rejecting is better than quietly ignoring half of what was asked for.
+  if (
+    patch.min_gap_seconds !== undefined &&
+    patch.max_gap_seconds !== undefined &&
+    patch.max_gap_seconds < patch.min_gap_seconds
+  ) {
+    return NextResponse.json(
+      { error: "The maximum gap must be at least the minimum gap." },
+      { status: 400 },
+    );
+  }
+
   const supabase = await createSupabaseServerClient();
 
   const { error } = await supabase

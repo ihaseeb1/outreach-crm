@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { MailboxActions } from "@/components/mailbox-actions";
 import { MailboxConnectForm } from "@/components/mailbox-connect-form";
+import { MailboxPacing } from "@/components/mailbox-pacing";
 import { RunJobButton } from "@/components/run-job-button";
 import { env } from "@/lib/env";
 import { isOAuthConfigured } from "@/mail/providers/oauth";
@@ -34,7 +35,7 @@ export default async function MailboxesPage({
   const { data } = await supabase
     .from("mailboxes")
     .select(
-      "id, email, from_name, provider, auth_type, daily_limit, sent_today, sent_today_date, is_active, health_status, paused_reason, last_error, last_polled_at, last_send_at, created_at",
+      "id, email, from_name, provider, auth_type, daily_limit, sent_today, sent_today_date, min_gap_seconds, max_gap_seconds, is_active, health_status, paused_reason, last_error, last_polled_at, last_send_at, created_at",
     )
     .eq("workspace_id", session.workspace.id)
     .order("created_at", { ascending: true });
@@ -241,6 +242,13 @@ export default async function MailboxesPage({
                     {mailbox.last_error}
                   </p>
                 )}
+
+                <MailboxPacing
+                  id={mailbox.id}
+                  dailyLimit={mailbox.daily_limit}
+                  minGapSeconds={mailbox.min_gap_seconds}
+                  maxGapSeconds={mailbox.max_gap_seconds}
+                />
 
                 <MailboxActions
                   id={mailbox.id}
