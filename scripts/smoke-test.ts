@@ -8,6 +8,19 @@
 
 import assert from "node:assert/strict";
 
+import {
+  isEligible,
+  mailboxForContact,
+  pickMailbox,
+  type RotationMailbox,
+} from "../src/campaigns/rotation";
+import {
+  isWithinSendWindow,
+  mailboxIsRested,
+  nextSendAt,
+  nextWindowOpening,
+  resolveWindow,
+} from "../src/campaigns/schedule";
 import { encryptSecret, decryptSecret, safeEqual } from "../src/lib/crypto";
 import { domainFromUrl, isRoleAccount, normalizeUrl, splitName } from "../src/lib/email";
 import {
@@ -327,6 +340,184 @@ test("the CAN-SPAM footer carries the address and the opt-out", () => {
   });
   assert.ok(footer.includes("Acme Ltd, 1 Example St, London"));
   assert.ok(footer.includes("/api/unsubscribe?"));
+});
+
+console.log("\nsend windows");
+
+const WEEKDAY_9_TO_5 = resolveWindow({
+  send_window_start: 9,
+  send_window_end: 17,
+  send_days: [1, 2, 3, 4, 5],
+  timezone: "UTC",
+});
+
+test("inside the window on a Tuesday morning", () => {
+  // 2026-08-18 is a Tuesday.
+  assert.equal(
+    isWithinSendWindow(new Date("2026-08-18T10:00:00Z"), WEEKDAY_9_TO_5),
+    true,
+  );
+});
+
+test("outside the window at night and at weekends", () => {
+  assert.equal(
+    isWithinSendWindow(new Date("2026-08-18T03:00:00Z"), WEEKDAY_9_TO_5),
+    false,
+  );
+  // 2026-08-16 is a Sunday.
+  assert.equal(
+    isWithinSendWindow(new Date("2026-08-16T10:00:00Z"), WEEKDAY_9_TO_5),
+    false,
+  );
+});
+
+test("the window follows the configured timezone", () => {
+  const tokyo = resolveWindow({
+    send_window_start: 9,
+    send_window_end: 17,
+    send_days: [1, 2, 3, 4, 5],
+    timezone: "Asia/Tokyo",
+  });
+  // 01:00 UTC Tuesday is 10:00 Tuesday in Tokyo.
+  assert.equal(isWithinSendWindow(new Date("2026-08-18T01:00:00Z"), tokyo), true);
+  // 10:00 UTC is 19:00 in Tokyo — after hours.
+  assert.equal(isWithinSendWindow(new Date("2026-08-18T10:00:00Z"), tokyo), false);
+});
+
+test("a weekend send is pushed to Monday morning", () => {
+  const opening = nextWindowOpening(
+    new Date("2026-08-16T12:00:00Z"),
+    WEEKDAY_9_TO_5,
+  );
+  assert.equal(isWithinSendWindow(opening, WEEKDAY_9_TO_5), true);
+  assert.equal(opening.getUTCDay(), 1);
+  assert.equal(opening.getUTCHours(), 9);
+});
+
+test("an inverted window falls back instead of never sending", () => {
+  const broken = resolveWindow({ send_window_start: 18, send_window_end: 9 });
+  assert.ok(broken.endHour > broken.startHour);
+  // And the fallback is a window that actually opens.
+  assert.equal(
+    isWithinSendWindow(new Date("2026-08-18T10:00:00Z"), broken),
+    true,
+  );
+});
+
+test("an empty day list falls back to weekdays", () => {
+  assert.deepEqual(resolveWindow({ send_days: [] }).days, [1, 2, 3, 4, 5]);
+});
+
+test("follow-ups land the right number of days later, inside the window", () => {
+  const when = nextSendAt({
+    from: new Date("2026-08-18T10:00:00Z"),
+    delayDays: 3,
+    window: WEEKDAY_9_TO_5,
+    random: () => 0.5,
+  });
+  assert.ok(when.getTime() > new Date("2026-08-21T00:00:00Z").getTime());
+  assert.equal(isWithinSendWindow(when, WEEKDAY_9_TO_5), true);
+});
+
+test("two contacts on the same step do not fire at the same instant", () => {
+  const from = new Date("2026-08-18T09:00:00Z");
+  const a = nextSendAt({ from, delayDays: 0, window: WEEKDAY_9_TO_5, random: () => 0.1 });
+  const b = nextSendAt({ from, delayDays: 0, window: WEEKDAY_9_TO_5, random: () => 0.9 });
+  assert.notEqual(a.getTime(), b.getTime());
+});
+
+test("a mailbox must rest between sends", () => {
+  const now = new Date("2026-08-18T10:00:00Z");
+  const justSent = new Date(now.getTime() - 10_000).toISOString();
+  const longAgo = new Date(now.getTime() - 600_000).toISOString();
+  assert.equal(mailboxIsRested(justSent, 90, 300, now, () => 0.5), false);
+  assert.equal(mailboxIsRested(longAgo, 90, 300, now, () => 0.5), true);
+  assert.equal(mailboxIsRested(null, 90, 300, now, () => 0.5), true);
+});
+
+console.log("\nmailbox rotation");
+
+const NOW = new Date("2026-08-18T10:00:00Z");
+const TODAY = NOW.toISOString().slice(0, 10);
+
+function mailbox(overrides: Partial<RotationMailbox> & { id: string }): RotationMailbox {
+  return {
+    email: `${overrides.id}@mine.com`,
+    daily_limit: 50,
+    sent_today: 0,
+    sent_today_date: TODAY,
+    min_gap_seconds: 90,
+    max_gap_seconds: 300,
+    last_send_at: null,
+    is_active: true,
+    health_status: "healthy",
+    ...overrides,
+  };
+}
+
+test("a mailbox at its daily limit is skipped", () => {
+  const full = mailbox({ id: "a", sent_today: 50, daily_limit: 50 });
+  assert.equal(isEligible(full, { now: NOW }), false);
+});
+
+test("yesterday's count does not block today", () => {
+  const stale = mailbox({
+    id: "a",
+    sent_today: 50,
+    sent_today_date: "2026-08-17",
+  });
+  assert.equal(isEligible(stale, { now: NOW }), true);
+});
+
+test("inactive and health-paused mailboxes never send", () => {
+  assert.equal(isEligible(mailbox({ id: "a", is_active: false }), { now: NOW }), false);
+  assert.equal(
+    isEligible(mailbox({ id: "b", health_status: "paused" }), { now: NOW }),
+    false,
+  );
+  // A warning is not a stop — it still sends while you investigate.
+  assert.equal(
+    isEligible(mailbox({ id: "c", health_status: "warning" }), { now: NOW }),
+    true,
+  );
+});
+
+test("rotation spreads load across every connected mailbox", () => {
+  const pool = [
+    mailbox({ id: "a", sent_today: 40 }),
+    mailbox({ id: "b", sent_today: 5 }),
+    mailbox({ id: "c", sent_today: 20 }),
+    mailbox({ id: "d", sent_today: 12 }),
+  ];
+  assert.equal(pickMailbox(pool, { now: NOW })?.id, "b");
+});
+
+test("ties break towards the mailbox idle longest", () => {
+  const pool = [
+    mailbox({ id: "a", last_send_at: "2026-08-18T09:50:00Z" }),
+    mailbox({ id: "b", last_send_at: "2026-08-18T08:00:00Z" }),
+  ];
+  assert.equal(pickMailbox(pool, { now: NOW, ignoreRest: true })?.id, "b");
+});
+
+test("a contact keeps its original mailbox for follow-ups", () => {
+  const pool = [mailbox({ id: "a" }), mailbox({ id: "b" })];
+  assert.equal(mailboxForContact("b", pool, { now: NOW }).mailbox?.id, "b");
+});
+
+test("when the assigned mailbox is full we wait rather than switch sender", () => {
+  const pool = [
+    mailbox({ id: "a" }),
+    mailbox({ id: "b", sent_today: 50, daily_limit: 50 }),
+  ];
+  const result = mailboxForContact("b", pool, { now: NOW });
+  assert.equal(result.mailbox, null);
+  assert.equal(result.waiting, true);
+});
+
+test("no eligible mailbox returns null instead of overshooting a limit", () => {
+  const pool = [mailbox({ id: "a", sent_today: 50, daily_limit: 50 })];
+  assert.equal(pickMailbox(pool, { now: NOW }), null);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 
 import { assertCronAuthorized } from "@/lib/cron";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { runCampaignBatch } from "@/campaigns/run";
+import { syncSuppressedCampaignContacts } from "@/campaigns/enroll";
 import { runInboundPoll } from "@/mail/poll";
 import { runScrapeBatch } from "@/scraper/run";
 import { runValidationBatch } from "@/validation/run";
@@ -37,9 +39,14 @@ export async function GET(request: Request) {
   results.inbound = await safely("inbound", () =>
     runInboundPoll(supabase, { limit: 3 }),
   );
+  results.suppressionSync = await safely("suppressionSync", () =>
+    syncSuppressedCampaignContacts(supabase, { limit: 200 }),
+  );
+  results.campaigns = await safely("campaigns", () =>
+    runCampaignBatch(supabase, { limit: 10 }),
+  );
 
   // Later phases register their jobs here:
-  //   phase 3 — sequence sends, bounce sweep
   //   phase 4 — warmup sends, daily health checks
 
   return NextResponse.json({

@@ -1,0 +1,121 @@
+import { mailboxIsRested } from "@/campaigns/schedule";
+import type { Mailbox } from "@/types/db";
+
+/**
+ * Mailbox rotation.
+ *
+ * Sends are spread across every eligible mailbox rather than hammering one.
+ * A mailbox is eligible only if it is active, not health-paused, under its
+ * daily limit, and has rested long enough since its last send.
+ *
+ * Pure functions so the smoke tests can cover the limit and rest rules.
+ */
+
+export type RotationMailbox = Pick<
+  Mailbox,
+  | "id"
+  | "email"
+  | "daily_limit"
+  | "sent_today"
+  | "sent_today_date"
+  | "min_gap_seconds"
+  | "max_gap_seconds"
+  | "last_send_at"
+  | "is_active"
+  | "health_status"
+>;
+
+function sentToday(mailbox: RotationMailbox, now: Date): number {
+  const today = now.toISOString().slice(0, 10);
+  return mailbox.sent_today_date === today ? mailbox.sent_today : 0;
+}
+
+export function remainingCapacity(mailbox: RotationMailbox, now: Date): number {
+  return Math.max(0, mailbox.daily_limit - sentToday(mailbox, now));
+}
+
+export interface EligibilityOptions {
+  now?: Date;
+  random?: () => number;
+  /** Ignore the inter-send gap (used when only capacity matters, e.g. planning). */
+  ignoreRest?: boolean;
+}
+
+export function isEligible(
+  mailbox: RotationMailbox,
+  options: EligibilityOptions = {},
+): boolean {
+  const now = options.now ?? new Date();
+
+  if (!mailbox.is_active) return false;
+  // Health status is set by the phase 4 job; a paused mailbox sends nothing,
+  // campaign or warmup.
+  if (mailbox.health_status === "paused") return false;
+  if (remainingCapacity(mailbox, now) <= 0) return false;
+
+  if (!options.ignoreRest) {
+    return mailboxIsRested(
+      mailbox.last_send_at,
+      mailbox.min_gap_seconds,
+      mailbox.max_gap_seconds,
+      now,
+      options.random,
+    );
+  }
+
+  return true;
+}
+
+export function eligibleMailboxes(
+  mailboxes: RotationMailbox[],
+  options: EligibilityOptions = {},
+): RotationMailbox[] {
+  return mailboxes.filter((mailbox) => isEligible(mailbox, options));
+}
+
+/**
+ * Picks the next mailbox to send from: the one with the most headroom left
+ * today, breaking ties by whichever has been idle longest. That keeps volume
+ * even across every connected mailbox instead of draining them in order.
+ */
+export function pickMailbox(
+  mailboxes: RotationMailbox[],
+  options: EligibilityOptions = {},
+): RotationMailbox | null {
+  const now = options.now ?? new Date();
+  const eligible = eligibleMailboxes(mailboxes, options);
+  if (eligible.length === 0) return null;
+
+  return eligible.reduce((best, candidate) => {
+    const bestCapacity = remainingCapacity(best, now);
+    const candidateCapacity = remainingCapacity(candidate, now);
+    if (candidateCapacity !== bestCapacity) {
+      return candidateCapacity > bestCapacity ? candidate : best;
+    }
+    const bestLast = best.last_send_at ? Date.parse(best.last_send_at) : 0;
+    const candidateLast = candidate.last_send_at
+      ? Date.parse(candidate.last_send_at)
+      : 0;
+    return candidateLast < bestLast ? candidate : best;
+  });
+}
+
+/**
+ * Once a contact has been emailed from a mailbox, follow-ups stay on it so the
+ * thread stays coherent. If that mailbox is temporarily unavailable we wait for
+ * it rather than switching sender mid-conversation.
+ */
+export function mailboxForContact(
+  assignedId: string | null,
+  mailboxes: RotationMailbox[],
+  options: EligibilityOptions = {},
+): { mailbox: RotationMailbox | null; waiting: boolean } {
+  if (assignedId) {
+    const assigned = mailboxes.find((mailbox) => mailbox.id === assignedId);
+    if (!assigned) return { mailbox: null, waiting: false };
+    if (isEligible(assigned, options)) return { mailbox: assigned, waiting: false };
+    return { mailbox: null, waiting: true };
+  }
+
+  return { mailbox: pickMailbox(mailboxes, options), waiting: false };
+}

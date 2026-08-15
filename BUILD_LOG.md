@@ -266,3 +266,119 @@ phase 3) so the reply handler can already pause a sequence on reply.
   wired for it in phase 5).
 - Microsoft tenants with SMTP AUTH disabled cannot connect until the phase 7
   OAuth2 provider lands. Gmail App Passwords are unaffected.
+
+---
+
+## Phase 3 — Sequences, follow-ups, multi-mailbox rotation, bounce handling
+
+**Status:** complete. Build, typecheck, and 49 smoke tests pass.
+
+### What was built
+
+**Sequences.** A campaign holds up to 10 steps, each with its own delay, subject,
+and body. Step 1 always starts the thread; later steps default to threading under
+it as `Re: …`, which is how a real follow-up looks. The editor saves the whole
+sequence in one request; shortening a sequence completes contacts who are past
+the new end rather than re-sending anything.
+
+**The runner** (`src/campaigns/run.ts`) is a bounded batch. For each active
+campaign it checks the sending window, loads the steps and eligible mailboxes,
+claims due contacts one at a time, and sends. Gates apply in this order:
+
+1. campaign is `active`
+2. now is inside the sending window (weekday + hour + timezone)
+3. a mailbox is eligible — active, not health-paused, under its daily limit, and
+   rested since its last send
+4. `canSend()` inside `sendEmail` — suppression, syntax, disposable, postal address
+
+**Claim locking.** `campaign_contact_claim()` is a Postgres function that flips a
+self-expiring lock, so two overlapping cron ticks can never send the same step
+twice, and a function that dies mid-send releases the contact automatically
+instead of stranding it.
+
+**Rotation** (`src/campaigns/rotation.ts`) picks the mailbox with the most
+headroom left today, breaking ties towards whichever has been idle longest — so
+volume stays even across every connected mailbox rather than draining them in
+order. Once a contact has been emailed from a mailbox, follow-ups stay on it; if
+that mailbox is full or resting the contact waits rather than switching sender
+mid-conversation.
+
+**Natural sending patterns.** Sends only happen inside a configurable window
+(default Mon–Fri, 09:00–17:00, per-campaign timezone). Each mailbox must rest a
+randomised 90–300 s between sends. Follow-up times are scattered across the
+window so two contacts on the same step never fire together. Timezone handling
+steps forward in 15-minute increments rather than doing offset arithmetic, so DST
+and half-hour zones come out right.
+
+**Failure handling** is per-cause rather than one generic retry:
+
+| Cause                     | Result                                          |
+| ------------------------- | ----------------------------------------------- |
+| suppressed / disposable   | contact stopped, marked `unsubscribed`          |
+| hard bounce               | contact stopped, marked `bounced`               |
+| missing postal address    | whole campaign paused (a config fault, not a per-contact one) |
+| daily limit / resting     | left due, retried next tick                     |
+| anything else             | retried up to 3 attempts, then marked `failed`  |
+
+**Bounce handling.** Hard bounces detected by the phase 2 IMAP classifier
+auto-suppress and stop the contact. On top of that, a sweep runs before every
+send batch and stops any queued contact whose address has landed on the
+suppression list by another route (manual add, unsubscribe from a different
+campaign), so the queue and the campaign counts stay honest.
+
+**Preflight.** Activating a campaign is checked up front: postal address set, at
+least one step, at least one active mailbox, at least one enrolled contact. That
+turns four silent per-contact failures into one clear message.
+
+**UI.** Campaigns list with live per-status counts (from a `campaign_stats` view
+so it is one query, not N), and a detail page with the sequence editor, mailbox
+selection, sending window and days, contact enrolment by filter, and the enrolled
+contact table showing each contact's step, next send time, and last error.
+
+### Files added
+
+```
+supabase/migrations/0003_sequence_scheduling.sql
+src/campaigns/       schedule.ts, rotation.ts, run.ts, enroll.ts
+src/components/      campaign-create-form.tsx, campaign-controls.tsx,
+                     sequence-editor.tsx, campaign-enroll-form.tsx
+src/app/(app)/       campaigns/, campaigns/[id]/
+src/app/api/         campaigns/, campaigns/steps/, campaigns/contacts/,
+                     cron/campaigns/
+```
+
+### Migrations run
+
+`0003_sequence_scheduling.sql` — claim lock, attempt/error columns, the
+`campaign_contact_claim` / `campaign_contact_release` functions, and the
+`campaign_stats` view (declared `security_invoker` so RLS still applies).
+
+### How to test
+
+1. Campaigns → create one → edit the sequence (a 3-step default is pre-filled).
+2. Tick the mailboxes to rotate across, set the window, save.
+3. **Add matching contacts** — note the counts for suppressed and unvalidated
+   contacts that were refused.
+4. **Start sending**. If anything is missing, preflight says exactly what.
+5. **Send due steps now** on the Campaigns page, or wait for the cron tick.
+6. Reply from the recipient account, poll the inbox, and confirm the contact
+   flips to `replied` with `next_send_at` cleared — no follow-up is sent.
+7. Set a contact's address to something non-existent to see the bounce path
+   suppress it automatically.
+
+### A bug the tests caught
+
+`resolveWindow` originally fell back only on the end hour, so a window entered
+inverted (start 18, end 9) resolved to 18:00–17:00 — empty. The campaign would
+have sat "active" and silently never sent. It now falls back to the whole default
+pair, and a test asserts the fallback window actually opens.
+
+### Open items
+
+- Per-campaign daily caps are not implemented — volume is bounded per mailbox
+  only. If two campaigns share a mailbox they compete for the same allowance.
+- The runner sends at most 40 emails per invocation. With a 5-minute scheduler
+  that is plenty; if you ever need more, raise the tick frequency rather than the
+  per-run limit, so each function stays well inside its timeout.
+- Enrolment matches on domain/status only; richer targeting arrives with the CRM
+  filters in phase 6.

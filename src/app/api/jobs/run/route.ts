@@ -3,6 +3,8 @@ import { z } from "zod";
 
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { getSession } from "@/lib/workspace";
+import { runCampaignBatch } from "@/campaigns/run";
+import { syncSuppressedCampaignContacts } from "@/campaigns/enroll";
 import { runInboundPoll } from "@/mail/poll";
 import { runScrapeBatch } from "@/scraper/run";
 import { runValidationBatch } from "@/validation/run";
@@ -12,7 +14,7 @@ export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
 const bodySchema = z.object({
-  job: z.enum(["scrape", "validate", "inbound"]),
+  job: z.enum(["scrape", "validate", "inbound", "campaigns"]),
   limit: z.number().int().positive().max(200).optional(),
 });
 
@@ -57,6 +59,15 @@ export async function POST(request: Request) {
       ignored: results.reduce((sum, r) => sum + r.ignored, 0),
       errors: results.filter((r) => r.error).map((r) => r.error),
     });
+  }
+
+  if (parsed.data.job === "campaigns") {
+    await syncSuppressedCampaignContacts(supabase, { workspaceId, limit: 200 });
+    const result = await runCampaignBatch(supabase, {
+      workspaceId,
+      limit: Math.min(parsed.data.limit ?? 10, 40),
+    });
+    return NextResponse.json({ ok: true, job: "campaigns", ...result });
   }
 
   const result = await runValidationBatch(supabase, {

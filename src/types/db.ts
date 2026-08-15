@@ -215,6 +215,10 @@ export interface CampaignContact {
   last_sent_at: Timestamp | null;
   replied_at: Timestamp | null;
   paused_reason: string | null;
+  /** Claim lock held by the campaign runner; self-expires. */
+  locked_until: Timestamp | null;
+  attempts: number;
+  last_error: string | null;
   created_at: Timestamp;
   updated_at: Timestamp;
 }
