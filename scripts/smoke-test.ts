@@ -21,7 +21,16 @@ import {
   nextWindowOpening,
   resolveWindow,
 } from "../src/campaigns/schedule";
+import {
+  buildExportGrid,
+  gridToCsv,
+  gridToTsv,
+  nicheColumns,
+  toApiShape,
+} from "../src/deals/export";
+import { matchesPriceFilters, parseDealFilters } from "../src/deals/query";
 import { rate, scoreMailbox, type HealthSignals } from "../src/health/score";
+import type { DealWithPrices } from "../src/types/db";
 import { encryptSecret, decryptSecret, safeEqual } from "../src/lib/crypto";
 import { warmupMessage } from "../src/warmup/content";
 import {
@@ -685,6 +694,162 @@ test("rate() is safe when nothing has been sent", () => {
   assert.equal(rate(0, 0), 0);
   assert.equal(rate(3, 0), 0);
   assert.equal(rate(1, 4), 0.25);
+});
+
+console.log("\ndeal export");
+
+function deal(
+  domain: string,
+  prices: { niche: string; price: number }[],
+  overrides: Partial<DealWithPrices> = {},
+): DealWithPrices {
+  return {
+    id: `id-${domain}`,
+    workspace_id: "ws",
+    contact_id: `contact-${domain}`,
+    conversation_id: null,
+    domain,
+    link_type: "dofollow",
+    placement_type: "guest post",
+    tat_days: 7,
+    da: 40,
+    dr: 55,
+    monthly_traffic: 12000,
+    spam_score: 2,
+    word_count: 1000,
+    content_by: "us",
+    max_links: 2,
+    payment_terms: "50% upfront",
+    payment_method: "PayPal",
+    currency: "USD",
+    status: "negotiating",
+    notes: null,
+    created_by: null,
+    created_at: "2026-08-01T00:00:00Z",
+    updated_at: "2026-08-10T00:00:00Z",
+    deal_prices: prices.map((price, index) => ({
+      id: `price-${domain}-${index}`,
+      deal_id: `id-${domain}`,
+      niche: price.niche,
+      price: price.price,
+      currency: "USD",
+      created_at: "2026-08-01T00:00:00Z",
+    })),
+    ...overrides,
+  };
+}
+
+test("a column is created for every niche across the export", () => {
+  const grid = buildExportGrid([
+    deal("a.com", [{ niche: "General", price: 150 }]),
+    deal("b.com", [
+      { niche: "Casino", price: 400 },
+      { niche: "CBD", price: 350 },
+    ]),
+  ]);
+  assert.ok(grid.headers.includes("General price"));
+  assert.ok(grid.headers.includes("Casino price"));
+  assert.ok(grid.headers.includes("CBD price"));
+  assert.equal(grid.rows.length, 2);
+});
+
+test("common niches keep a stable leading order", () => {
+  const niches = nicheColumns([
+    deal("a.com", [
+      { niche: "Zebra", price: 10 },
+      { niche: "Casino", price: 400 },
+      { niche: "General", price: 150 },
+    ]),
+  ]);
+  assert.deepEqual(niches, ["General", "Casino", "Zebra"]);
+});
+
+test("a niche a publisher does not quote is blank, not zero", () => {
+  const grid = buildExportGrid([
+    deal("a.com", [{ niche: "General", price: 150 }]),
+    deal("b.com", [{ niche: "Casino", price: 400 }]),
+  ]);
+  const generalIndex = grid.headers.indexOf("General price");
+  // b.com quoted no General price — must not read as free.
+  assert.equal(grid.rows[1]?.[generalIndex], null);
+  assert.equal(grid.rows[0]?.[generalIndex], 150);
+});
+
+test("the contact email is carried into the export", () => {
+  const grid = buildExportGrid([deal("a.com", [{ niche: "General", price: 150 }])], {
+    contactEmails: new Map([["contact-a.com", "editor@a.com"]]),
+  });
+  assert.ok(grid.rows[0]?.includes("editor@a.com"));
+});
+
+test("TSV stays column-aligned even with messy text", () => {
+  const grid = buildExportGrid([
+    deal("a.com", [{ niche: "General", price: 150 }], {
+      notes: "Line one\nLine two\twith a tab",
+    }),
+  ]);
+  const lines = gridToTsv(grid).split("\n");
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0]?.split("\t").length, lines[1]?.split("\t").length);
+});
+
+test("CSV quotes commas and quotes correctly", () => {
+  const grid = buildExportGrid([
+    deal("a.com", [{ niche: "General", price: 150 }], {
+      notes: 'Says "yes", eventually',
+    }),
+  ]);
+  assert.ok(gridToCsv(grid).includes('"Says ""yes"", eventually"'));
+});
+
+test("the API shape groups metrics, content and payment", () => {
+  const shaped = toApiShape(
+    deal("a.com", [{ niche: "General", price: 150 }]),
+    "editor@a.com",
+  );
+  assert.equal(shaped.domain, "a.com");
+  assert.equal(shaped.contact_email, "editor@a.com");
+  assert.equal(shaped.metrics.dr, 55);
+  assert.equal(shaped.payment.method, "PayPal");
+  assert.deepEqual(shaped.prices, [
+    { niche: "General", price: 150, currency: "USD" },
+  ]);
+});
+
+console.log("\ndeal filtering");
+
+test("a price range matches only within the named niche", () => {
+  const subject = deal("a.com", [
+    { niche: "General", price: 150 },
+    { niche: "Casino", price: 900 },
+  ]);
+  assert.equal(
+    matchesPriceFilters(subject, { niche: "Casino", maxPrice: 500 }),
+    false,
+  );
+  assert.equal(
+    matchesPriceFilters(subject, { niche: "General", maxPrice: 500 }),
+    true,
+  );
+});
+
+test("a publisher who does not quote the niche is excluded", () => {
+  const subject = deal("a.com", [{ niche: "General", price: 150 }]);
+  assert.equal(matchesPriceFilters(subject, { niche: "Casino" }), false);
+});
+
+test("no price filter matches everything, including empty rate cards", () => {
+  assert.equal(matchesPriceFilters(deal("a.com", []), {}), true);
+});
+
+test("filters parse from query params, ignoring junk", () => {
+  const parsed = parseDealFilters(
+    new URLSearchParams("status=live&min_price=100&max_tat=abc&niche=CBD"),
+  );
+  assert.equal(parsed.status, "live");
+  assert.equal(parsed.minPrice, 100);
+  assert.equal(parsed.maxTat, undefined);
+  assert.equal(parsed.niche, "CBD");
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

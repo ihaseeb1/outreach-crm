@@ -502,3 +502,87 @@ and says why.
   and shows a warning — cosmetic, not a sending block.
 - Warmup engagement opens one IMAP connection per operation. With many mailboxes,
   spread the work across ticks rather than raising the per-tick limit.
+
+---
+
+## Phase 5 — Unified inbox, deal capture, Excel export
+
+**Status:** complete. Build, typecheck, and 80 smoke tests pass.
+
+### What was built
+
+**Unified inbox.** One thread per contact, aggregated across every connected
+mailbox, newest first, with unread counts, open/closed state, and assignment.
+Opening a thread marks it read; replying sends from the mailbox that owns the
+thread so it threads correctly for the recipient.
+
+**Conversations are built by a database trigger**, not by application code. Any
+insert into `messages` attaches to (or creates) the right conversation — and the
+trigger refuses to do so for bounces and autoresponders. Combined with warmup
+never reaching `messages` at all, that means there is no code path that can
+accidentally put non-correspondence in the inbox. The migration also backfills
+conversations for messages sent before this phase.
+
+**Deal capture.** From any conversation, **Log deal** opens the rate card:
+per-niche prices (add as many rows as the publisher quotes), turnaround, link
+type, placement type, DA/DR/traffic/spam score, word count, who writes the
+content, max links, payment terms and method, currency, status, and notes. It
+pre-fills the domain and contact from the conversation.
+
+**Deals table** with filtering by domain, niche, price range, max TAT, and status.
+Niche prices become columns, so publishers are directly comparable at a glance.
+Niche and price filters run in memory on purpose: Postgres can filter a parent by
+a child row, but not while still returning every child, and a rate card with its
+other niches stripped out is useless.
+
+**Export.** One grid builder feeds all three outputs, so they can never disagree:
+
+- **XLSX** via SheetJS, with sized columns and a frozen header row
+- **CSV** with a UTF-8 BOM so Excel on Windows opens it correctly
+- **Copy for Excel** — TSV to the clipboard, paste straight into a sheet
+
+A niche a publisher did not quote exports as **blank, not zero** — zero would
+read as "free" and is the kind of thing that gets a price wrong in a
+negotiation.
+
+**Read-only JSON API.** `GET /api/deals` authenticated by the workspace API key
+(`Authorization: Bearer <key>`), so your portal can pull the rate cards. It
+accepts the same filters as the UI and returns prices grouped per deal. The key
+is compared in constant time. The handler contains no write path at all — POST
+and DELETE on the same route require a real session.
+
+### Files added
+
+```
+supabase/migrations/0005_inbox_and_deals.sql
+src/deals/      export.ts, query.ts
+src/components/ conversation-panel.tsx, deal-form.tsx, deals-toolbar.tsx
+src/app/(app)/  inbox/, deals/
+src/app/api/    deals/, deals/export/, conversations/, conversations/reply/
+```
+
+### Migrations run
+
+`0005_inbox_and_deals.sql` — `conversations`, `messages.conversation_id`, the
+`messages_attach_conversation` trigger, `deals`, `deal_prices`, and a backfill.
+
+### How to test
+
+1. Get a reply from a prospect, then Inbox → the thread appears with an unread dot.
+2. Reply from inside the thread; confirm the recipient sees it threaded.
+3. **Log deal** → add General 150 and Casino 400 → save.
+4. Deals → both niches appear as columns. Filter `niche=Casino, max_price=500` →
+   that publisher drops out, correctly.
+5. **Download Excel**, and separately **Copy for Excel** then paste into a sheet.
+6. Pull the API with your key from Settings:
+   `curl -H "Authorization: Bearer <key>" ".../api/deals?status=live"`.
+7. Confirm the inbox contains no warmup mail, no bounce notifications, and no
+   out-of-office replies.
+
+### Open items
+
+- Attachments on inbound mail are still not stored.
+- The deals table shows the first niche columns found across the current filter;
+  with dozens of niches it scrolls horizontally rather than paginating columns.
+- Editing an existing deal is done from the conversation it belongs to, or by
+  re-saving from the deals form; there is no inline row editor yet.

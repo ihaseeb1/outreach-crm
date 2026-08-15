@@ -285,6 +285,67 @@ export interface MailboxHealth {
   checked_at: Timestamp;
 }
 
+export interface Conversation {
+  id: Uuid;
+  workspace_id: Uuid;
+  contact_id: Uuid;
+  mailbox_id: Uuid | null;
+  subject: string | null;
+  last_message_at: Timestamp;
+  last_direction: "inbound" | "outbound" | null;
+  is_read: boolean;
+  assigned_to: Uuid | null;
+  status: "open" | "snoozed" | "closed";
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export type DealStatus =
+  | "negotiating"
+  | "agreed"
+  | "ordered"
+  | "live"
+  | "rejected";
+
+export interface Deal {
+  id: Uuid;
+  workspace_id: Uuid;
+  contact_id: Uuid | null;
+  conversation_id: Uuid | null;
+  domain: string;
+  link_type: string | null;
+  placement_type: string | null;
+  tat_days: number | null;
+  da: number | null;
+  dr: number | null;
+  monthly_traffic: number | null;
+  spam_score: number | null;
+  word_count: number | null;
+  content_by: string | null;
+  max_links: number | null;
+  payment_terms: string | null;
+  payment_method: string | null;
+  currency: string;
+  status: DealStatus;
+  notes: string | null;
+  created_by: Uuid | null;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface DealPrice {
+  id: Uuid;
+  deal_id: Uuid;
+  niche: string;
+  price: number;
+  currency: string;
+  created_at: Timestamp;
+}
+
+export interface DealWithPrices extends Deal {
+  deal_prices: DealPrice[];
+}
+
 export interface ActivityLogEntry {
   id: Uuid;
   workspace_id: Uuid;
