@@ -17,6 +17,24 @@ function optional(name: string, fallback: string): string {
   return process.env[name] || fallback;
 }
 
+/**
+ * First non-empty of several names.
+ *
+ * The Supabase↔Vercel integration injects its own variable names
+ * (SUPABASE_SECRET_KEY, NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY, …) which differ
+ * from the ones in .env.example. Accepting both means the integration can be
+ * used as-is, and a hand-set value still wins when present.
+ */
+function firstOf(...names: string[]): string {
+  for (const name of names) {
+    const value = process.env[name];
+    if (value && value.trim()) return value;
+  }
+  throw new Error(
+    `Missing required environment variable. Set one of: ${names.join(", ")}. See .env.example.`,
+  );
+}
+
 function optionalInt(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -27,9 +45,16 @@ function optionalInt(name: string, fallback: number): number {
 export const env = {
   appUrl: () => optional("NEXT_PUBLIC_APP_URL", "http://localhost:3000").replace(/\/$/, ""),
 
-  supabaseUrl: () => required("NEXT_PUBLIC_SUPABASE_URL"),
-  supabaseAnonKey: () => required("NEXT_PUBLIC_SUPABASE_ANON_KEY"),
-  supabaseServiceRoleKey: () => required("SUPABASE_SERVICE_ROLE_KEY"),
+  supabaseUrl: () => firstOf("NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_URL"),
+  supabaseAnonKey: () =>
+    firstOf(
+      "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+      "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
+      "SUPABASE_ANON_KEY",
+      "SUPABASE_PUBLISHABLE_KEY",
+    ),
+  supabaseServiceRoleKey: () =>
+    firstOf("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SECRET_KEY"),
 
   cronSecret: () => required("CRON_SECRET"),
   encryptionKey: () => required("APP_ENCRYPTION_KEY"),

@@ -19,9 +19,11 @@ const PUBLIC_PREFIXES = [
 export async function updateSession(request: NextRequest) {
   let response = NextResponse.next({ request });
 
+  // Second option in each pair is what the Supabase↔Vercel integration sets.
   const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    (process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL)!,
+    (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+      process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY)!,
     {
       cookies: {
         getAll() {
