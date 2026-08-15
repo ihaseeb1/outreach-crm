@@ -4,6 +4,7 @@ import nodemailer, { type Transporter } from "nodemailer";
 import type SMTPTransport from "nodemailer/lib/smtp-transport";
 
 import { classifyInbound } from "@/mail/inbound-classify";
+import { accessTokenFor } from "@/mail/providers/oauth";
 import type {
   FetchInboundOptions,
   FolderMessageRef,
@@ -33,14 +34,38 @@ export class SmtpProvider implements MailboxProvider {
     private readonly fromName: string | null,
   ) {}
 
-  private smtp(): Transporter {
+  /**
+   * Password or XOAUTH2, decided by whether OAuth credentials are stored.
+   * Everything downstream — send, fetch, folder ops — is identical either way.
+   */
+  private async smtpAuth(): Promise<SMTPTransport.Options["auth"]> {
+    const { user, pass } = this.credentials.smtp;
+    if (this.credentials.oauth) {
+      return {
+        type: "OAuth2",
+        user,
+        accessToken: await accessTokenFor(this.credentials.oauth),
+      };
+    }
+    return { user, pass };
+  }
+
+  private async imapAuth(): Promise<{ user: string; pass?: string; accessToken?: string }> {
+    const { user, pass } = this.credentials.imap;
+    if (this.credentials.oauth) {
+      return { user, accessToken: await accessTokenFor(this.credentials.oauth) };
+    }
+    return { user, pass };
+  }
+
+  private async smtp(): Promise<Transporter> {
     if (this.transporter) return this.transporter;
-    const { host, port, secure, user, pass } = this.credentials.smtp;
+    const { host, port, secure } = this.credentials.smtp;
     const options: SMTPTransport.Options = {
       host,
       port,
       secure,
-      auth: { user, pass },
+      auth: await this.smtpAuth(),
       // Unpooled (nodemailer's default): one connection per message keeps sends
       // spaced out, so Gmail never sees a burst down a single connection.
       connectionTimeout: 20_000,
@@ -55,14 +80,14 @@ export class SmtpProvider implements MailboxProvider {
     const result: VerifyResult = { ok: false, smtp: false, imap: false };
 
     try {
-      await this.smtp().verify();
+      await (await this.smtp()).verify();
       result.smtp = true;
     } catch (error) {
       result.error = `SMTP: ${message(error)}`;
       return result;
     }
 
-    const client = this.imapClient();
+    const client = await this.imapClient();
     try {
       await client.connect();
       await client.getMailboxLock("INBOX").then((lock) => lock.release());
@@ -79,7 +104,8 @@ export class SmtpProvider implements MailboxProvider {
   }
 
   async send(msg: OutboundMessage): Promise<SendResult> {
-    const info = await this.smtp().sendMail({
+    const transporter = await this.smtp();
+    const info = await transporter.sendMail({
       from: this.fromName
         ? { name: this.fromName, address: this.fromEmail }
         : this.fromEmail,
@@ -100,13 +126,13 @@ export class SmtpProvider implements MailboxProvider {
     };
   }
 
-  private imapClient(): ImapFlow {
-    const { host, port, secure, user, pass } = this.credentials.imap;
+  private async imapClient(): Promise<ImapFlow> {
+    const { host, port, secure } = this.credentials.imap;
     return new ImapFlow({
       host,
       port,
       secure,
-      auth: { user, pass },
+      auth: await this.imapAuth(),
       logger: false,
       emitLogs: false,
     });
@@ -116,7 +142,7 @@ export class SmtpProvider implements MailboxProvider {
     options: FetchInboundOptions = {},
   ): Promise<InboundMessage[]> {
     const limit = options.limit ?? 25;
-    const client = this.imapClient();
+    const client = await this.imapClient();
     const results: InboundMessage[] = [];
 
     await client.connect();
@@ -157,7 +183,7 @@ export class SmtpProvider implements MailboxProvider {
     folder: string,
     fn: (client: ImapFlow) => Promise<T>,
   ): Promise<T> {
-    const client = this.imapClient();
+    const client = await this.imapClient();
     await client.connect();
     const lock = await client.getMailboxLock(folder);
     try {
@@ -169,7 +195,7 @@ export class SmtpProvider implements MailboxProvider {
   }
 
   async findSpamFolder(): Promise<string | null> {
-    const client = this.imapClient();
+    const client = await this.imapClient();
     await client.connect();
     try {
       const folders = await client.list();

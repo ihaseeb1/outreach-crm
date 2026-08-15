@@ -11,6 +11,9 @@ const PUBLIC_PREFIXES = [
   "/api/cron",
   "/api/unsubscribe",
   "/api/public",
+  // The OAuth callback arrives via a third-party redirect; it authenticates
+  // itself with the encrypted state parameter rather than a session.
+  "/api/oauth",
 ];
 
 export async function updateSession(request: NextRequest) {

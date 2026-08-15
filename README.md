@@ -65,11 +65,15 @@ Serverless functions time out, so nothing runs in a long-lived loop. Every job
 processes a bounded batch and returns; state lives in Postgres. Jobs are
 idempotent, so overlapping ticks are safe.
 
-| Endpoint             | Does                                          |
-| -------------------- | --------------------------------------------- |
-| `/api/cron/tick`     | Dispatcher — runs a slice of every due job     |
-| `/api/cron/scrape`   | Scrapes a batch of pending websites            |
-| `/api/cron/validate` | Validates a batch of contacts                  |
+| Endpoint              | Does                                           |
+| --------------------- | ---------------------------------------------- |
+| `/api/cron/tick`      | Dispatcher — runs a slice of every due job      |
+| `/api/cron/scrape`    | Scrapes a batch of pending websites             |
+| `/api/cron/validate`  | Validates a batch of contacts                   |
+| `/api/cron/inbound`   | Polls mailboxes over IMAP for replies           |
+| `/api/cron/campaigns` | Sends the next due sequence step                |
+| `/api/cron/warmup`    | Ramps, sends, engages, rescues from spam, replies |
+| `/api/cron/health`    | Daily reputation check per mailbox              |
 
 All of them require `Authorization: Bearer $CRON_SECRET` (or `?secret=` for
 local testing).
@@ -100,6 +104,65 @@ These are enforced in code, not by convention:
 - **Source tracking** — every contact stores `source_url` and `scraped_at`.
 - **Secrets** — mailbox credentials are AES-256-GCM encrypted at rest and never
   logged.
+
+## Connecting mailboxes
+
+Two options, and you can mix them:
+
+**App password (simplest).** Mailboxes → Connect a mailbox. For Gmail, turn on
+2-Step Verification, create an App Password, and make sure IMAP is enabled in
+Gmail settings. Credentials are verified against the real SMTP *and* IMAP servers
+before anything is stored, then encrypted with AES-256-GCM.
+
+**OAuth2.** Needed on Microsoft tenants that have disabled basic auth, and
+generally more robust. Set the client id/secret in the environment (see
+`.env.example`), register the redirect URI with the provider, then use
+**Connect Gmail** / **Connect Microsoft 365** on the Mailboxes page. Only the
+refresh token is stored; access tokens are fetched on demand.
+
+There is no limit on how many mailboxes you connect. Campaigns rotate across
+every active one, and warmup pairs them with each other.
+
+## Warmup and the unified inbox
+
+Warmup is a closed loop between your own mailboxes — there is no paid pool.
+They email each other, open and flag what arrives, **move anything that lands in
+spam back to the inbox**, and reply to a configurable fraction. Volume starts at
+5/day and climbs slowly; it never spikes, because providers detect artificial
+warmup and a jump is the clearest tell there is.
+
+Warmup traffic carries a signed `X-OCRM-Warmup` header and is tracked separately
+from real mail. **The unified inbox contains genuine replies only** — warmup,
+bounce notifications, out-of-office autoresponders, and the mailbox owner's
+ordinary personal correspondence are all filtered out before anything becomes a
+conversation.
+
+## Dynamic scraping (optional)
+
+The default scraper is `fetch` + `cheerio`, which handles the large majority of
+publisher sites. Sites that render contact details with JavaScript need
+Playwright — which **cannot run on Vercel**: a serverless function has no
+persistent browser and Chromium exceeds the bundle limit.
+
+Run it instead on any always-on machine (a Hostinger VPS, a home server, a
+Raspberry Pi). It talks to the same Supabase database and uses the same batch
+runner, so work queued in the UI is picked up automatically:
+
+```bash
+git clone <your-repo> && cd outreach-crm
+npm install
+npm install playwright
+npx playwright install --with-deps chromium
+```
+
+Create a `.env.local` with `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
+and the `SCRAPER_*` values, then:
+
+```bash
+npm run scrape-worker
+```
+
+To keep it running after you log out, use a systemd unit or `pm2 start "npm run scrape-worker" --name scraper`.
 
 ## Deploy
 

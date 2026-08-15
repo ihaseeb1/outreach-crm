@@ -15,8 +15,16 @@ const HEALTH_STYLES: Record<string, string> = {
   paused: "bg-red-50 text-[var(--color-danger)]",
 };
 
-export default async function MailboxesPage() {
+export default async function MailboxesPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const session = await requireSession();
+  const params = await searchParams;
+  const oauthError =
+    typeof params.oauth_error === "string" ? params.oauth_error : null;
+  const connected = typeof params.connected === "string" ? params.connected : null;
   const supabase = await createSupabaseServerClient();
 
   // encrypted_credentials is revoked from the authenticated role, so it cannot
@@ -43,6 +51,34 @@ export default async function MailboxesPage() {
           </p>
         </div>
         <MailboxConnectForm />
+      </div>
+
+      {connected && (
+        <p className="card card-pad text-sm text-[var(--color-ok)]">
+          Connected {connected} over OAuth.
+        </p>
+      )}
+      {oauthError && (
+        <p className="card card-pad text-sm text-[var(--color-danger)]">
+          {oauthError}
+        </p>
+      )}
+
+      <div className="card card-pad space-y-3">
+        <h2 className="text-sm font-semibold">Connect with OAuth</h2>
+        <p className="hint">
+          No app password needed, and it keeps working on Microsoft tenants that
+          have disabled basic auth. Requires the OAuth client id and secret to be
+          set in the environment first.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <a className="btn-secondary" href="/api/oauth/google/start">
+            Connect Gmail
+          </a>
+          <a className="btn-secondary" href="/api/oauth/microsoft/start">
+            Connect Microsoft 365
+          </a>
+        </div>
       </div>
 
       {!session.workspace.sending_postal_address && (

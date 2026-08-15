@@ -6,6 +6,7 @@ import { requireSession } from "@/lib/workspace";
 // Items marked `soon` light up as their phase lands.
 const NAV: NavItem[] = [
   { href: "/dashboard", label: "Dashboard" },
+  { href: "/reports", label: "Reports" },
   { href: "/prospecting", label: "Prospecting" },
   { href: "/contacts", label: "Contacts" },
   { href: "/pipeline", label: "Pipeline" },

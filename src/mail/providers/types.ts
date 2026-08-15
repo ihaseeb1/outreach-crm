@@ -104,7 +104,21 @@ export interface ImapConfig {
   pass: string;
 }
 
+/**
+ * OAuth2 credentials. The refresh token is the long-lived secret; access tokens
+ * are short-lived and refreshed on demand rather than stored for long.
+ */
+export interface OAuthCredentials {
+  provider: "google" | "microsoft";
+  refreshToken: string;
+  accessToken?: string;
+  /** Epoch milliseconds. */
+  expiresAt?: number;
+}
+
 export interface MailboxCredentials {
   smtp: SmtpConfig;
   imap: ImapConfig;
+  /** When present, XOAUTH2 is used instead of the stored password. */
+  oauth?: OAuthCredentials;
 }

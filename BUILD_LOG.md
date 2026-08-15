@@ -18,9 +18,12 @@ not to build it. Everything below can be filled in whenever you are ready.
    `APP_ENCRYPTION_KEY` (command in README).
 3. **Sending postal address** — enter it in Settings. Campaigns are hard-blocked
    from sending until it is set (CAN-SPAM).
-4. **Gmail App Password** (phase 2) — for each mailbox you want to send from,
-   enable 2FA on the Google account and create an App Password. Phase 2 sends
-   over SMTP with it; phase 7 adds OAuth2 as an alternative.
+4. **Gmail App Password** — for each mailbox you want to send from, enable 2FA on
+   the Google account and create an App Password. Or use OAuth instead: set
+   `GOOGLE_OAUTH_CLIENT_ID`/`SECRET` (and the Microsoft pair) and register
+   `<APP_URL>/api/oauth/<provider>/callback` as the redirect URI.
+   **Warmup needs at least two mailboxes** — it works by having them email each
+   other. More is better.
 5. **A scheduler** (phase 1 onward, needed for anything automatic).
    Vercel Hobby only fires cron once a day. Point cron-job.org (or GitHub
    Actions) at `/api/cron/tick` every 5–10 minutes with the
@@ -662,3 +665,114 @@ for existing workspaces, and the `domain_summary` view.
   no assignment UI yet.
 - The `domain_summary` view exists for phase 7 reporting but is not yet read by
   any page.
+
+---
+
+## Phase 7 — Reporting, OAuth, polish
+
+**Status:** complete. Build, typecheck, and 88 smoke tests pass. **All seven
+phases are done.**
+
+### What was built
+
+**Reports.** A 30-day view: emails sent, replies and reply rate, bounces and
+bounce rate, deals won. A daily volume chart (sent vs replies), a conversion
+funnel (contacted → replied → deal logged → won), a per-mailbox table with health
+status, reputation score, 30-day volume and bounce rate, and value by niche —
+quoted count, won count, won value, average, and price range per niche. Every
+rate is computed by a tested pure function, including the empty cases that would
+otherwise render `NaN%`.
+
+**OAuth2 for Gmail and Microsoft 365**, added behind the existing
+`MailboxProvider` interface exactly as planned in phase 2. `SmtpProvider` now
+resolves its auth lazily: password when a password is stored, XOAUTH2 when OAuth
+credentials are. Send, IMAP fetch, and the warmup folder operations are
+byte-identical either way — nothing in campaigns, warmup, or the inbox changed.
+
+The flow stores only the refresh token, encrypted. Access tokens are fetched on
+demand and cached in memory for the life of the invocation. The OAuth state is
+*encrypted* rather than merely signed, so the workspace id is never exposed in a
+URL passing through a third party, and it expires after 30 minutes. The mailbox
+address is read back from the provider rather than trusted from the client, so a
+mailbox can only ever be connected as the account that actually granted consent.
+
+**Playwright scraper** behind the `Scraper` interface, plus
+`scripts/scrape-worker.ts` — a long-lived worker that talks to the same database
+and uses the same batch runner, so work queued in the UI is picked up
+automatically. Playwright is an optional dependency, imported through a
+runtime-built specifier so neither TypeScript nor the bundler tries to resolve it
+in the serverless build. Documented for Hostinger/VPS with systemd and pm2.
+
+**Hardening.** Security headers (nosniff, DENY framing, strict referrer,
+Permissions-Policy, HSTS) plus `noindex`/`no-store` on the public unsubscribe
+endpoint. A 404 page and an error boundary that logs only the error *message*,
+never an object that could carry credentials, and tells you plainly that
+background jobs are unaffected by a UI error.
+
+### Files added
+
+```
+src/reports/metrics.ts
+src/mail/providers/oauth.ts
+src/scraper/playwright-scraper.ts
+scripts/scrape-worker.ts
+src/app/(app)/reports/
+src/app/api/oauth/[provider]/start/, .../callback/
+src/app/not-found.tsx, src/app/error.tsx
+```
+
+### Migrations run
+
+None — phase 7 adds no schema.
+
+### How to test
+
+1. Reports → the 30-day figures, funnel, per-mailbox table, and niche values.
+2. OAuth: set the client id/secret, register the redirect URI, then
+   **Connect Gmail** on the Mailboxes page. Send a test email from the connected
+   mailbox and poll for replies — both paths go through the same code as an
+   app-password mailbox.
+3. Dynamic scraper: on a VPS, `npm install playwright && npx playwright install
+   chromium && npm run scrape-worker`. Queue a JS-rendered site in the UI and
+   watch the worker pick it up.
+4. `curl -I https://your-app/` and confirm the security headers.
+
+### Open items
+
+- Reports load raw message rows for the window (capped at 20,000). Past that,
+  move the aggregation into a Postgres view or a materialised daily rollup.
+- Microsoft OAuth needs SMTP AUTH enabled at tenant level even with OAuth; some
+  tenants disable it entirely, in which case Graph API sending would be needed.
+- The Playwright scraper is written and wired but has not been run end-to-end
+  here — it needs a machine with Chromium installed.
+
+---
+
+## Final state
+
+Seven phases, seven commits, six migrations, 88 pure-logic tests, 34 routes.
+
+**Compliance rules (Section 4), and where each is enforced:**
+
+| Rule                         | Where                                                       |
+| ---------------------------- | ----------------------------------------------------------- |
+| Global suppression list      | `canSend()` in `src/mail/guard.ts` — the only route to a send |
+| One-click unsubscribe        | `src/mail/unsubscribe.ts`, RFC 8058, immediate suppression   |
+| Postal address in footer     | `sendEmail` refuses campaign mail without one                |
+| Immediate opt-out            | `/api/unsubscribe` suppresses and stops in-flight sequences  |
+| Hard-bounce suppression      | `src/mail/inbound-classify.ts` → `suppressEmail`             |
+| Reply auto-pause             | `src/mail/inbound.ts`, on the inbound poll                   |
+| Rate limits, natural pattern | `mailbox_reserve_send` + `src/campaigns/schedule.ts`         |
+| Consent/source tracking      | `contacts.source_url` + `scraped_at`, set at scrape time     |
+| robots.txt                   | `src/scraper/robots.ts`, with crawl delay and a real UA      |
+| Encrypted credentials        | `src/lib/crypto.ts`; the column is revoked from `authenticated` |
+
+**What to do first, in order:**
+
+1. Create the Supabase project and run migrations `0001`–`0006` in order.
+2. Fill in `.env.local` (and the same values in Vercel).
+3. Sign up, then set the sending postal address in Settings — campaigns are
+   hard-blocked until you do.
+4. Connect at least two mailboxes (two so warmup has a loop) and turn warmup on.
+5. Point a scheduler at `/api/cron/tick` every 5–10 minutes.
+6. Let the mailboxes warm for two to three weeks before running real volume.

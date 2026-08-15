@@ -30,6 +30,12 @@ import {
 } from "../src/deals/export";
 import { matchesPriceFilters, parseDealFilters } from "../src/deals/query";
 import { rate, scoreMailbox, type HealthSignals } from "../src/health/score";
+import {
+  buildDailySeries,
+  buildFunnel,
+  summariseByNiche,
+  totals,
+} from "../src/reports/metrics";
 import type { DealWithPrices } from "../src/types/db";
 import { encryptSecret, decryptSecret, safeEqual } from "../src/lib/crypto";
 import { warmupMessage } from "../src/warmup/content";
@@ -850,6 +856,98 @@ test("filters parse from query params, ignoring junk", () => {
   assert.equal(parsed.minPrice, 100);
   assert.equal(parsed.maxTat, undefined);
   assert.equal(parsed.niche, "CBD");
+});
+
+console.log("\nreporting");
+
+test("totals compute reply and bounce rates", () => {
+  const summary = totals([
+    { date: "2026-08-14", sent: 100, replies: 8, bounces: 2 },
+    { date: "2026-08-15", sent: 100, replies: 12, bounces: 4 },
+  ]);
+  assert.equal(summary.sent, 200);
+  assert.equal(summary.replyRate, 0.1);
+  assert.equal(summary.bounceRate, 0.03);
+});
+
+test("a period with no sends reports 0%, not NaN", () => {
+  const summary = totals([{ date: "2026-08-14", sent: 0, replies: 0, bounces: 0 }]);
+  assert.equal(summary.replyRate, 0);
+  assert.ok(Number.isFinite(summary.bounceRate));
+});
+
+test("the day series is dense, so quiet days show as zero", () => {
+  const series = buildDailySeries(
+    3,
+    {
+      sent: ["2026-08-16T10:00:00Z", "2026-08-16T11:00:00Z"],
+      replies: ["2026-08-14T09:00:00Z"],
+      bounces: [],
+    },
+    new Date("2026-08-16T12:00:00Z"),
+  );
+  assert.equal(series.length, 3);
+  assert.deepEqual(
+    series.map((point) => point.date),
+    ["2026-08-14", "2026-08-15", "2026-08-16"],
+  );
+  assert.equal(series[2]?.sent, 2);
+  assert.equal(series[1]?.sent, 0);
+  assert.equal(series[0]?.replies, 1);
+});
+
+test("timestamps outside the window are ignored, not misfiled", () => {
+  const series = buildDailySeries(
+    2,
+    { sent: ["2026-01-01T10:00:00Z"], replies: [], bounces: [] },
+    new Date("2026-08-16T12:00:00Z"),
+  );
+  assert.equal(series.reduce((total, point) => total + point.sent, 0), 0);
+});
+
+test("niche summary counts agreed, ordered and live as won", () => {
+  const summary = summariseByNiche([
+    { niche: "General", price: 150, status: "live" },
+    { niche: "General", price: 250, status: "negotiating" },
+    { niche: "Casino", price: 400, status: "ordered" },
+    { niche: "Casino", price: 600, status: "rejected" },
+  ]);
+
+  const general = summary.find((row) => row.niche === "General")!;
+  assert.equal(general.quoted, 2);
+  assert.equal(general.won, 1);
+  assert.equal(general.wonValue, 150);
+  assert.equal(general.averagePrice, 200);
+  assert.equal(general.lowestPrice, 150);
+  assert.equal(general.highestPrice, 250);
+
+  const casino = summary.find((row) => row.niche === "Casino")!;
+  assert.equal(casino.wonValue, 400);
+});
+
+test("niches are ordered by won value", () => {
+  const summary = summariseByNiche([
+    { niche: "Small", price: 50, status: "live" },
+    { niche: "Big", price: 900, status: "live" },
+  ]);
+  assert.equal(summary[0]?.niche, "Big");
+});
+
+test("the funnel converts each step against the previous one", () => {
+  const funnel = buildFunnel({
+    contacted: 200,
+    replied: 40,
+    dealsLogged: 20,
+    dealsWon: 5,
+  });
+  assert.equal(funnel[1]?.rate, 0.2);
+  assert.equal(funnel[2]?.rate, 0.5);
+  assert.equal(funnel[3]?.rate, 0.25);
+});
+
+test("an empty funnel does not divide by zero", () => {
+  const funnel = buildFunnel({ contacted: 0, replied: 0, dealsLogged: 0, dealsWon: 0 });
+  assert.ok(funnel.every((step) => Number.isFinite(step.rate)));
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

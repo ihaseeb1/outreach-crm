@@ -17,10 +17,14 @@ export function providerForMailbox(
     case "app_password":
       return new SmtpProvider(credentials, mailbox.email, mailbox.from_name);
     case "oauth2":
-      // Phase 7. Until then a mailbox cannot be saved with this auth type.
-      throw new Error(
-        "OAuth2 mailboxes are not available yet — connect with an app password for now.",
-      );
+      if (!credentials.oauth) {
+        throw new Error(
+          "This mailbox is marked as OAuth2 but has no stored refresh token — reconnect it.",
+        );
+      }
+      // Same transport; SmtpProvider swaps password auth for XOAUTH2 when
+      // OAuth credentials are present.
+      return new SmtpProvider(credentials, mailbox.email, mailbox.from_name);
     default:
       throw new Error(`Unknown auth type: ${mailbox.auth_type}`);
   }
