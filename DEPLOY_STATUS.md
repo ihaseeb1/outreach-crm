@@ -3,9 +3,9 @@
 Live record of the hosting setup, so any session can resume without re-deriving it.
 Last updated: 2026-08-16.
 
-**The app is live at https://crm.orankly.com** (and
-`https://outreach-crm-sandy.vercel.app`). Two env vars are still missing —
-see "Remaining" below.
+**The app is live and fully configured at https://crm.orankly.com** (and
+`https://outreach-crm-sandy.vercel.app`). Hosting is done; what is left is
+first-run setup inside the app.
 
 ## Decisions made
 
@@ -46,36 +46,34 @@ see "Remaining" below.
       Vercel shows "Valid Configuration"; HTTPS serves a 200 and redirects to
       `/login`.
 
-## Remaining
+- [x] **`CRON_SECRET` and `APP_ENCRYPTION_KEY` set** (Production and Preview,
+      marked Sensitive). Both were **regenerated on 2026-08-16** rather than
+      reused from the Desktop file "2 - VERCEL SETTINGS.txt" — that file is now
+      **stale for these two keys**. Rotating was free at this point because no
+      mailbox was connected yet, so nothing had been encrypted with the old key.
+      Verified end to end: `POST /api/cron/tick` returns `200 {"ok":true}` with
+      the correct bearer token and `401 {"error":"Unauthorized"}` without it or
+      with a wrong one.
 
-1. **Two env vars are still unset** — the agent does not type secrets into
-   forms, so these must be added by hand at
-   Vercel → outreach-crm → Settings → Environment Variables → Add:
+## Remaining — inside the app, not the hosting
 
-   | Variable | Value |
-   | --- | --- |
-   | `CRON_SECRET` | in Desktop file "2 - VERCEL SETTINGS.txt" |
-   | `APP_ENCRYPTION_KEY` | in Desktop file "2 - VERCEL SETTINGS.txt" |
-
-   Scope them to **Production** (Preview too if you want preview builds to
-   work). Then **redeploy** — Vercel only applies env changes to new builds.
-
-   Without them the app still signs in and browses fine; what breaks is
-   `/api/cron/*` (needs `CRON_SECRET`) and connecting a mailbox (needs
-   `APP_ENCRYPTION_KEY`, which encrypts stored credentials). If
-   `APP_ENCRYPTION_KEY` is ever changed or lost, every connected mailbox must
-   be reconnected — so set it once and keep the value.
+1. **Sign up** at https://crm.orankly.com/signup. There is no seeded admin
+   account and no separate admin role. The first signup creates the account,
+   the workspace, and the owner membership in one step, via the
+   `handle_new_user()` trigger reading the `workspace_name` metadata. Because
+   Supabase "Confirm email" is off, signup returns a session immediately and
+   lands on `/dashboard` — no confirmation mail, no waiting.
 
 2. **Scheduler** — point cron-job.org (free) at
-   `https://crm.orankly.com/api/cron/tick` every 5–10 minutes, with header
-   `Authorization: Bearer <CRON_SECRET>`. Do this after step 1.
-   `vercel.json` also declares a daily Vercel cron as a safety net (Hobby
-   rejects anything more frequent than once a day — an hourly expression made
-   the whole deployment fail validation).
+   `https://crm.orankly.com/api/cron/tick`, method **POST**, every 5–10 minutes,
+   with header `Authorization: Bearer <CRON_SECRET>`. `vercel.json` also
+   declares a daily Vercel cron as a safety net (Hobby rejects anything more
+   frequent than once a day — an hourly expression made the whole deployment
+   fail validation).
 
-3. **First run in the app**: sign up → Settings → set the sending postal address
-   (campaigns are hard-blocked until it is set) → connect **two or more**
-   mailboxes → turn warmup on → let them warm 2–3 weeks before real volume.
+3. **First run**: Settings → set the sending postal address (campaigns are
+   hard-blocked until it is set) → connect **two or more** mailboxes → turn
+   warmup on → let them warm 2–3 weeks before real volume.
 
 ## Notes for future sessions
 
