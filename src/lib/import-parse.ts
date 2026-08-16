@@ -81,6 +81,93 @@ function stripWrappers(token: string): string {
   return token.replace(/^[<("']+/, "").replace(/[>)"',.]+$/, "");
 }
 
+/**
+ * Pairs two pasted columns — websites in one box, emails in the other —
+ * matching them line by line.
+ *
+ * This is what copying two columns out of a spreadsheet actually gives you, so
+ * it saves reformatting every row into "site, email" by hand.
+ *
+ * Blank lines are kept while pairing, because a blank cell in the middle of a
+ * spreadsheet column is meaningful: dropping it would silently shift every
+ * later email onto the wrong website. Only trailing blanks are trimmed.
+ */
+export function pairColumns(websitesRaw: string, emailsRaw: string): ParseResult {
+  const sites = trimTrailingBlanks(websitesRaw.split(/\r?\n/).map((line) => line.trim()));
+  const mails = trimTrailingBlanks(emailsRaw.split(/\r?\n/).map((line) => line.trim()));
+
+  // A header on either column would otherwise pair "Email" with the first site.
+  if (looksLikeHeader([sites[0] ?? ""]) && looksLikeHeader([mails[0] ?? ""])) {
+    sites.shift();
+    mails.shift();
+  } else if (mails.length === 0 && looksLikeHeader([sites[0] ?? ""])) {
+    sites.shift();
+  } else if (sites.length === 0 && looksLikeHeader([mails[0] ?? ""])) {
+    mails.shift();
+  }
+
+  const rows: ParsedRow[] = [];
+  const websitesOnly: string[] = [];
+  const skipped: SkippedRow[] = [];
+  const seenEmails = new Set<string>();
+  const seenSites = new Set<string>();
+
+  const length = Math.max(sites.length, mails.length);
+
+  for (let index = 0; index < length; index += 1) {
+    const siteCell = stripWrappers(sites[index] ?? "");
+    const mailCell = stripWrappers(mails[index] ?? "");
+
+    const emailMatch = mailCell ? EMAIL_RE.exec(mailCell) : null;
+    const email = emailMatch ? normalizeEmail(emailMatch[0]) : null;
+    const site = siteCell && isValidHttpUrl(siteCell) ? normalizeUrl(siteCell) : null;
+
+    if (!email) {
+      // An address that was typed but cannot be used is always reported, even
+      // when the website on the same row is fine and gets queued — otherwise
+      // the contact they meant to add disappears without a word.
+      if (mailCell) {
+        skipped.push({
+          line: `row ${index + 1}: ${mailCell}`,
+          reason: "Not a valid email address",
+        });
+      }
+
+      if (site) {
+        if (!seenSites.has(site)) {
+          seenSites.add(site);
+          websitesOnly.push(site);
+        }
+      } else if (siteCell && !mailCell) {
+        skipped.push({
+          line: `row ${index + 1}: ${siteCell}`,
+          reason: "Not a valid website",
+        });
+      }
+      continue;
+    }
+
+    if (seenEmails.has(email)) continue;
+    seenEmails.add(email);
+
+    rows.push({
+      email,
+      website: site,
+      domain: (site ? domainFromUrl(site) : emailDomain(email)) || null,
+      firstName: null,
+      lastName: null,
+    });
+  }
+
+  return { rows, websitesOnly, skipped };
+}
+
+function trimTrailingBlanks(lines: string[]): string[] {
+  const copy = [...lines];
+  while (copy.length > 0 && copy[copy.length - 1] === "") copy.pop();
+  return copy;
+}
+
 export function parseContactImport(raw: string): ParseResult {
   const rows: ParsedRow[] = [];
   const websitesOnly: string[] = [];

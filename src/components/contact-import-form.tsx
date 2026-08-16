@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useMemo, useRef, useState } from "react";
 
-import { parseContactImport } from "@/lib/import-parse";
+import { pairColumns, parseContactImport } from "@/lib/import-parse";
 
 interface ImportResult {
   parsed: number;
@@ -15,28 +15,51 @@ interface ImportResult {
   skippedTotal: number;
 }
 
+const countLines = (value: string) =>
+  value.split(/\r?\n/).filter((line) => line.trim()).length;
+
 /**
- * Paste a list of websites and emails.
+ * Bulk contact import.
  *
- * The same parser runs in the browser for the live preview and on the server
- * for the real import, so what the preview counts is exactly what gets saved.
+ * Two boxes by default — paste the website column in one and the email column
+ * in the other, exactly as they come out of a spreadsheet, and they are matched
+ * row by row. No reformatting every line into "site, email" by hand.
+ *
+ * The combined single-box mode is kept behind a toggle for lists that are
+ * already one-per-line, and for file uploads.
+ *
+ * The same parser runs here and on the server, so the live count cannot
+ * disagree with what actually gets saved.
  */
 export function ContactImportForm() {
   const router = useRouter();
   const fileRef = useRef<HTMLInputElement>(null);
+  const [open, setOpen] = useState(false);
+  const [paired, setPaired] = useState(true);
+  const [websites, setWebsites] = useState("");
+  const [emails, setEmails] = useState("");
   const [text, setText] = useState("");
   const [scrapeWebsites, setScrapeWebsites] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [open, setOpen] = useState(false);
 
-  const preview = useMemo(() => parseContactImport(text), [text]);
+  const preview = useMemo(
+    () => (paired ? pairColumns(websites, emails) : parseContactImport(text)),
+    [paired, websites, emails, text],
+  );
+
+  const siteLines = countLines(websites);
+  const mailLines = countLines(emails);
+  const mismatch = paired && siteLines > 0 && mailLines > 0 && siteLines !== mailLines;
+  const nothingToDo =
+    preview.rows.length === 0 && preview.websitesOnly.length === 0;
 
   async function onFile(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
     const content = await file.text();
+    setPaired(false);
     setText((current) => (current ? `${current}\n${content}` : content));
     if (fileRef.current) fileRef.current.value = "";
   }
@@ -50,11 +73,17 @@ export function ContactImportForm() {
       const response = await fetch("/api/contacts/import", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text, scrapeWebsites }),
+        body: JSON.stringify(
+          paired
+            ? { websites, emails, scrapeWebsites }
+            : { text, scrapeWebsites },
+        ),
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error ?? "Import failed.");
       setResult(payload as ImportResult);
+      setWebsites("");
+      setEmails("");
       setText("");
       router.refresh();
     } catch (err) {
@@ -75,33 +104,98 @@ export function ContactImportForm() {
   return (
     <form onSubmit={onSubmit} className="card card-pad w-full space-y-3">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold">Paste websites and emails</h2>
+        <h2 className="text-sm font-semibold">Import contacts</h2>
         <button className="hint hover:underline" type="button" onClick={() => setOpen(false)}>
           Close
         </button>
       </div>
 
-      <textarea
-        className="input min-h-48 font-mono text-xs"
-        placeholder={
-          "example.com, jane@example.com\n" +
-          "https://another-site.co.uk\teditor@another-site.co.uk\n" +
-          "hello@thirdsite.net\n" +
-          "sitewithnoemail.com"
-        }
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-      />
+      {paired ? (
+        <>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="label" htmlFor="import-websites">
+                Websites {siteLines > 0 && <span className="hint">({siteLines})</span>}
+              </label>
+              <textarea
+                id="import-websites"
+                className="input min-h-48 font-mono text-xs"
+                placeholder={"example.com\nanother-site.co.uk\nthirdsite.net"}
+                value={websites}
+                onChange={(e) => setWebsites(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="import-emails">
+                Emails {mailLines > 0 && <span className="hint">({mailLines})</span>}
+              </label>
+              <textarea
+                id="import-emails"
+                className="input min-h-48 font-mono text-xs"
+                placeholder={
+                  "jane@example.com\neditor@another-site.co.uk\nhello@thirdsite.net"
+                }
+                value={emails}
+                onChange={(e) => setEmails(e.target.value)}
+              />
+            </div>
+          </div>
 
-      <p className="hint">
-        One per line. Website and email in either order, separated by a tab,
-        comma or space — so a straight copy out of a spreadsheet works. An email
-        on its own is fine; the domain is taken from the address. A website on
-        its own is queued for scraping instead, since there is no address yet.
-        A header row is ignored.
-      </p>
+          <p className="hint">
+            Paste each column straight from your spreadsheet. Row 1 pairs with
+            row 1, row 2 with row 2, and so on. You can fill in just one box:
+            emails alone still create contacts, websites alone get queued for
+            scraping.
+          </p>
 
-      {text.trim() && (
+          {mismatch && (
+            <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-[var(--color-warn)]">
+              {siteLines} website(s) but {mailLines} email(s). They are still
+              paired by row —{" "}
+              {siteLines > mailLines
+                ? `the last ${siteLines - mailLines} website(s) have no address and will be queued for scraping instead.`
+                : `the last ${mailLines - siteLines} email(s) have no website and will take their domain from the address.`}{" "}
+              If your columns had a blank cell in the middle, keep the blank line
+              so the rows stay lined up.
+            </p>
+          )}
+        </>
+      ) : (
+        <div>
+          <label className="label" htmlFor="import-text">
+            One per line
+          </label>
+          <textarea
+            id="import-text"
+            className="input min-h-48 font-mono text-xs"
+            placeholder={
+              "example.com, jane@example.com\n" +
+              "another-site.co.uk\teditor@another-site.co.uk\n" +
+              "hello@thirdsite.net"
+            }
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+          />
+          <p className="hint mt-1">
+            Website and email on the same line, in either order, separated by a
+            tab, comma or space. A header row is ignored.
+          </p>
+        </div>
+      )}
+
+      <button
+        className="text-xs text-[var(--color-brand)] hover:underline"
+        type="button"
+        onClick={() => setPaired((current) => !current)}
+      >
+        {paired
+          ? "My list is already one-per-line instead"
+          : "Use two separate boxes instead"}
+      </button>
+
+      {(preview.rows.length > 0 ||
+        preview.websitesOnly.length > 0 ||
+        preview.skipped.length > 0) && (
         <div className="rounded-md bg-[var(--color-canvas)] px-3 py-2 text-xs">
           <strong>{preview.rows.length}</strong> contact(s)
           {preview.websitesOnly.length > 0 && (
@@ -114,7 +208,7 @@ export function ContactImportForm() {
             <>
               {" · "}
               <span className="text-[var(--color-warn)]">
-                <strong>{preview.skipped.length}</strong> line(s) unreadable
+                <strong>{preview.skipped.length}</strong> unreadable
               </span>
             </>
           )}
@@ -132,11 +226,7 @@ export function ContactImportForm() {
       </label>
 
       <div className="flex flex-wrap items-center gap-3">
-        <button
-          className="btn-primary"
-          type="submit"
-          disabled={busy || (preview.rows.length === 0 && preview.websitesOnly.length === 0)}
-        >
+        <button className="btn-primary" type="submit" disabled={busy || nothingToDo}>
           {busy ? "Importing…" : "Import"}
         </button>
 

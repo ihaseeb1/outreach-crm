@@ -50,7 +50,7 @@ import {
 } from "../src/warmup/plan";
 import { isValidWarmupToken, newWarmupToken } from "../src/warmup/token";
 import { domainFromUrl, isRoleAccount, normalizeUrl, splitName } from "../src/lib/email";
-import { parseContactImport } from "../src/lib/import-parse";
+import { pairColumns, parseContactImport } from "../src/lib/import-parse";
 import {
   classifyInbound,
   parseBounceBody,
@@ -1020,6 +1020,81 @@ test("a junk line is reported rather than silently dropped", () => {
   const result = parseContactImport("just some words here");
   assert.equal(result.rows.length, 0);
   assert.equal(result.skipped.length, 1);
+});
+
+
+console.log("\npaired column import");
+
+test("pairs two columns line by line", () => {
+  const result = pairColumns(
+    "example.com\nanother.co.uk",
+    "jane@example.com\neditor@another.co.uk",
+  );
+  assert.equal(result.rows.length, 2);
+  assert.equal(result.rows[0]?.email, "jane@example.com");
+  assert.equal(result.rows[0]?.domain, "example.com");
+  assert.equal(result.rows[1]?.domain, "another.co.uk");
+});
+
+test("a blank cell mid-column does not shift later rows", () => {
+  const result = pairColumns(
+    "first.com\n\nthird.com",
+    "a@first.com\nb@orphan.com\nc@third.com",
+  );
+  assert.equal(result.rows.length, 3);
+  // b@ had no website, so its domain falls back to the address, and c@ must
+  // still be paired with third.com rather than being pulled up a row.
+  assert.equal(result.rows[1]?.domain, "orphan.com");
+  assert.equal(result.rows[2]?.domain, "third.com");
+});
+
+test("more websites than emails queues the leftovers for scraping", () => {
+  const result = pairColumns("a.com\nb.com\nc.com", "one@a.com");
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.websitesOnly.length, 2);
+});
+
+test("more emails than websites still creates every contact", () => {
+  const result = pairColumns("a.com", "one@a.com\ntwo@b.com\nthree@c.com");
+  assert.equal(result.rows.length, 3);
+  assert.equal(result.rows[1]?.website, null);
+  assert.equal(result.rows[1]?.domain, "b.com");
+});
+
+test("emails only is a valid import", () => {
+  const result = pairColumns("", "solo@example.com");
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0]?.website, null);
+});
+
+test("websites only becomes a scrape queue, not contacts", () => {
+  const result = pairColumns("a.com\nb.com", "");
+  assert.equal(result.rows.length, 0);
+  assert.equal(result.websitesOnly.length, 2);
+});
+
+test("matching header rows on both columns are dropped together", () => {
+  const result = pairColumns("Website\nexample.com", "Email\njane@example.com");
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0]?.domain, "example.com");
+});
+
+test("trailing blank lines from a spreadsheet copy are ignored", () => {
+  const result = pairColumns("a.com\n\n\n", "one@a.com\n\n\n");
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.skipped.length, 0);
+});
+
+test("a malformed address is reported with its row number", () => {
+  const result = pairColumns("a.com", "not-an-email");
+  assert.equal(result.rows.length, 0);
+  assert.equal(result.skipped.length, 1);
+  assert.ok(result.skipped[0]?.line.includes("row 1"));
+});
+
+test("duplicate addresses across rows collapse to one", () => {
+  const result = pairColumns("a.com\nb.com", "same@x.com\nSAME@x.com");
+  assert.equal(result.rows.length, 1);
 });
 
 

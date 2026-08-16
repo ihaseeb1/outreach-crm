@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { logActivity } from "@/lib/activity";
 import { domainFromUrl } from "@/lib/email";
-import { parseContactImport } from "@/lib/import-parse";
+import { pairColumns, parseContactImport } from "@/lib/import-parse";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getSession } from "@/lib/workspace";
 import { suppressedSubset } from "@/mail/suppressions";
@@ -12,11 +12,20 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
-const bodySchema = z.object({
-  text: z.string().min(1).max(1_000_000),
-  /** Also queue every website seen here for scraping, to find more contacts. */
-  scrapeWebsites: z.boolean().optional(),
-});
+const bodySchema = z
+  .object({
+    /** Combined mode: one line per contact, any separator. */
+    text: z.string().max(1_000_000).optional(),
+    /** Paired mode: two pasted columns, matched line by line. */
+    websites: z.string().max(1_000_000).optional(),
+    emails: z.string().max(1_000_000).optional(),
+    /** Also queue every website seen here for scraping, to find more contacts. */
+    scrapeWebsites: z.boolean().optional(),
+  })
+  .refine(
+    (body) => Boolean(body.text?.trim() || body.websites?.trim() || body.emails?.trim()),
+    { message: "Paste something to import." },
+  );
 
 const MAX_ROWS = 5000;
 
@@ -38,7 +47,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
-  const result = parseContactImport(parsed.data.text);
+  const body = parsed.data;
+  const result = body.text?.trim()
+    ? parseContactImport(body.text)
+    : pairColumns(body.websites ?? "", body.emails ?? "");
   const rows = result.rows.slice(0, MAX_ROWS);
   const truncated = result.rows.length - rows.length;
 
@@ -81,7 +93,7 @@ export async function POST(request: Request) {
   // Websites: the ones pasted alone, plus — when asked — the ones that came
   // alongside an address, so the crawler can look for more people at the site.
   const siteUrls = new Set(result.websitesOnly);
-  if (parsed.data.scrapeWebsites) {
+  if (body.scrapeWebsites) {
     for (const row of rows) {
       if (row.website) siteUrls.add(row.website);
     }
