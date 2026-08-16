@@ -4,6 +4,10 @@ import { z } from "zod";
 import { logActivity } from "@/lib/activity";
 import { encryptJson } from "@/lib/crypto";
 import { normalizeEmail } from "@/lib/email";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+// PATCH and DELETE keep the request-scoped client: neither reads the row back,
+// so the revoked-column problem does not apply, and they keep RLS as a second
+// line of defence behind the explicit workspace filter.
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getSession } from "@/lib/workspace";
 import { providerForMailbox } from "@/mail/providers";
@@ -101,7 +105,18 @@ export async function POST(request: Request) {
     );
   }
 
-  const supabase = await createSupabaseServerClient();
+  // Must be the admin client, not the request-scoped one.
+  //
+  // Migration 0002 revokes table-level SELECT on mailboxes from `authenticated`
+  // and re-grants it column by column, deliberately leaving out
+  // encrypted_credentials so credentials can never reach the browser. PostgREST
+  // reads the row back after an insert-with-representation, that read touches
+  // the revoked column, and the whole statement dies with
+  // "permission denied for table mailboxes" — the write itself was fine.
+  //
+  // Every query below is scoped by session.workspace.id by hand, because the
+  // service role bypasses RLS and nothing else would confine it.
+  const supabase = createSupabaseAdminClient();
   const { data, error } = await supabase
     .from("mailboxes")
     .upsert(
