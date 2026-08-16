@@ -204,7 +204,10 @@ async function processCampaignContact(
   }
   const contact = contactRow as Contact;
 
-  const { mailbox, waiting } = mailboxForContact(entry.mailbox_id, mailboxes);
+  const { mailbox, waiting, switched } = mailboxForContact(
+    entry.mailbox_id,
+    mailboxes,
+  );
   if (!mailbox) {
     // Either every mailbox is at its limit / resting, or the assigned one is.
     // Leave the contact due and try again on the next tick.
@@ -212,6 +215,24 @@ async function processCampaignContact(
     return "skipped";
   }
   void waiting;
+
+  if (switched) {
+    // The mailbox this contact was on is paused or gone. The send below writes
+    // the new mailbox_id, so every later step follows it too.
+    await logActivity(supabase, {
+      workspaceId: campaign.workspace_id,
+      action: "campaign.mailbox_switched",
+      entityType: "contact",
+      entityId: entry.contact_id,
+      meta: {
+        campaign: campaign.name,
+        step: stepNumber,
+        from_mailbox: entry.mailbox_id,
+        to_mailbox: mailbox.id,
+        reason: "previous mailbox unavailable — paused, deactivated or removed",
+      },
+    });
+  }
 
   // Follow-ups thread under the first email in the conversation.
   const thread = step.reply_to_thread && stepNumber > 1

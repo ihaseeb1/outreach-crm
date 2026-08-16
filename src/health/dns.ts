@@ -21,6 +21,34 @@ export interface DnsAuthResult {
   };
 }
 
+/**
+ * Consumer mailbox domains. You cannot publish DNS for these and the provider
+ * already authenticates outbound mail, so auth checks against them are
+ * meaningless rather than failing.
+ */
+const PROVIDER_MANAGED_DOMAINS = new Set([
+  "gmail.com",
+  "googlemail.com",
+  "outlook.com",
+  "hotmail.com",
+  "hotmail.co.uk",
+  "live.com",
+  "live.co.uk",
+  "msn.com",
+  "yahoo.com",
+  "yahoo.co.uk",
+  "ymail.com",
+  "aol.com",
+  "icloud.com",
+  "me.com",
+  "proton.me",
+  "protonmail.com",
+  "gmx.com",
+  "gmx.net",
+  "zoho.com",
+  "yandex.com",
+]);
+
 /** Selectors used by the providers people actually connect. */
 const DKIM_SELECTORS = [
   "google",
@@ -104,6 +132,23 @@ export async function checkAuthRecords(
     if (!dmarcRecord) notes.push("No DMARC record found.");
     else if (dmarcPolicy === "none") {
       notes.push("DMARC policy is p=none — monitoring only, not enforcing.");
+    }
+
+    // Sending from a consumer mailbox means the provider owns the domain's DNS
+    // and signs on your behalf, using dated selectors that rotate and cannot be
+    // guessed. Probing for them always comes back empty, which reported every
+    // @gmail.com mailbox as "DKIM missing" forever — a permanent warning that
+    // no user action could ever clear, and which would mask a real one.
+    if (PROVIDER_MANAGED_DOMAINS.has(domain.toLowerCase())) {
+      notes.push(
+        `${domain} is signed by the provider — SPF, DKIM and DMARC are theirs to publish, and there is nothing to add.`,
+      );
+      return {
+        spfOk: true,
+        dkimOk: true,
+        dmarcOk: true,
+        detail: { spfRecord, dmarcPolicy, dkimSelector: "provider-managed", notes },
+      };
     }
 
     let dkimSelector: string | null = null;

@@ -102,20 +102,47 @@ export function pickMailbox(
 
 /**
  * Once a contact has been emailed from a mailbox, follow-ups stay on it so the
- * thread stays coherent. If that mailbox is temporarily unavailable we wait for
- * it rather than switching sender mid-conversation.
+ * thread stays coherent.
+ *
+ * Two different reasons that mailbox might be unusable, handled differently:
+ *
+ * - It is in the pool but resting or at its daily cap. Transient — wait for it,
+ *   because switching sender to save a few hours is not worth breaking the
+ *   conversation.
+ * - It is absent from the pool entirely: health-paused, deactivated or removed.
+ *   Not transient. Waiting for it meant the contact was never followed up at
+ *   all, silently, for as long as the mailbox stayed paused. Hand the step to a
+ *   healthy mailbox instead and let the caller record the reassignment.
+ *
+ * The follow-up keeps the original subject and threading headers either way —
+ * those come from the first message in the conversation, not from the sender.
  */
 export function mailboxForContact(
   assignedId: string | null,
   mailboxes: RotationMailbox[],
   options: EligibilityOptions = {},
-): { mailbox: RotationMailbox | null; waiting: boolean } {
+): { mailbox: RotationMailbox | null; waiting: boolean; switched: boolean } {
   if (assignedId) {
     const assigned = mailboxes.find((mailbox) => mailbox.id === assignedId);
-    if (!assigned) return { mailbox: null, waiting: false };
-    if (isEligible(assigned, options)) return { mailbox: assigned, waiting: false };
-    return { mailbox: null, waiting: true };
+
+    if (!assigned) {
+      const replacement = pickMailbox(mailboxes, options);
+      return {
+        mailbox: replacement,
+        waiting: replacement === null,
+        switched: replacement !== null,
+      };
+    }
+
+    if (isEligible(assigned, options)) {
+      return { mailbox: assigned, waiting: false, switched: false };
+    }
+    return { mailbox: null, waiting: true, switched: false };
   }
 
-  return { mailbox: pickMailbox(mailboxes, options), waiting: false };
+  return {
+    mailbox: pickMailbox(mailboxes, options),
+    waiting: false,
+    switched: false,
+  };
 }

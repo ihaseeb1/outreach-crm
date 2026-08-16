@@ -1141,5 +1141,69 @@ test("a mailbox reset to zero after a health pause sends nothing until it climbs
 });
 
 
+console.log("\nmailbox failover");
+
+const healthyBox = (id: string, lastSend: string | null = null): RotationMailbox => ({
+  id,
+  email: `${id}@example.com`,
+  daily_limit: 50,
+  sent_today: 0,
+  sent_today_date: new Date().toISOString().slice(0, 10),
+  min_gap_seconds: 10,
+  max_gap_seconds: 10,
+  last_send_at: lastSend,
+  is_active: true,
+  health_status: "healthy",
+});
+
+test("a follow-up stays on its assigned mailbox while that mailbox is usable", () => {
+  const pool = [healthyBox("a"), healthyBox("b")];
+  const result = mailboxForContact("a", pool, { ignoreRest: true });
+  assert.equal(result.mailbox?.id, "a");
+  assert.equal(result.switched, false);
+});
+
+test("a mailbox merely resting is waited for, not swapped out", () => {
+  const resting = { ...healthyBox("a"), last_send_at: new Date().toISOString() };
+  const pool = [resting, healthyBox("b")];
+  const result = mailboxForContact("a", pool, { now: new Date() });
+  assert.equal(result.mailbox, null);
+  assert.equal(result.waiting, true);
+  assert.equal(result.switched, false);
+});
+
+test("a mailbox at its daily cap is waited for, not swapped out", () => {
+  const full = { ...healthyBox("a"), sent_today: 50 };
+  const pool = [full, healthyBox("b")];
+  const result = mailboxForContact("a", pool, { ignoreRest: true });
+  assert.equal(result.mailbox, null);
+  assert.equal(result.waiting, true);
+  assert.equal(result.switched, false);
+});
+
+test("a mailbox absent from the pool hands the step to a healthy one", () => {
+  // loadMailboxes filters out paused and inactive mailboxes, so 'gone' is how
+  // a health-paused mailbox presents itself here.
+  const pool = [healthyBox("b")];
+  const result = mailboxForContact("a", pool, { ignoreRest: true });
+  assert.equal(result.mailbox?.id, "b");
+  assert.equal(result.switched, true);
+  assert.equal(result.waiting, false);
+});
+
+test("with nothing healthy left it waits rather than inventing a sender", () => {
+  const result = mailboxForContact("a", [], { ignoreRest: true });
+  assert.equal(result.mailbox, null);
+  assert.equal(result.waiting, true);
+  assert.equal(result.switched, false);
+});
+
+test("a first send with no assignment is not a switch", () => {
+  const result = mailboxForContact(null, [healthyBox("a")], { ignoreRest: true });
+  assert.equal(result.mailbox?.id, "a");
+  assert.equal(result.switched, false);
+});
+
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 if (failed > 0) process.exit(1);
