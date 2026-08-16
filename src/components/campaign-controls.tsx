@@ -8,6 +8,18 @@ import type { CampaignSettings, CampaignStatus } from "@/types/db";
 
 const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+/** 0–24, so the end can be midnight without wrapping to the previous day. */
+const HOURS = Array.from({ length: 25 }, (_, hour) => hour);
+
+function hourLabel(hour: number): string {
+  if (hour === 0) return "00:00 (midnight)";
+  if (hour === 12) return "12:00 (noon)";
+  if (hour === 24) return "24:00 (midnight)";
+  const suffix = hour < 12 ? "am" : "pm";
+  const twelve = hour % 12 === 0 ? 12 : hour % 12;
+  return `${String(hour).padStart(2, "0")}:00 (${twelve}${suffix})`;
+}
+
 export function CampaignControls({
   campaignId,
   status,
@@ -136,35 +148,41 @@ export function CampaignControls({
           <label className="label" htmlFor="start-hour">
             Window start
           </label>
-          <input
+          <select
             id="start-hour"
             className="input"
-            type="number"
-            min={0}
-            max={23}
             value={startHour}
             onChange={(e) => {
               setStartHour(Number(e.target.value));
               setSaved(false);
             }}
-          />
+          >
+            {HOURS.slice(0, 24).map((hour) => (
+              <option key={hour} value={hour}>
+                {hourLabel(hour)}
+              </option>
+            ))}
+          </select>
         </div>
         <div>
           <label className="label" htmlFor="end-hour">
             Window end
           </label>
-          <input
+          <select
             id="end-hour"
             className="input"
-            type="number"
-            min={1}
-            max={24}
             value={endHour}
             onChange={(e) => {
               setEndHour(Number(e.target.value));
               setSaved(false);
             }}
-          />
+          >
+            {HOURS.slice(1).map((hour) => (
+              <option key={hour} value={hour}>
+                {hourLabel(hour)}
+              </option>
+            ))}
+          </select>
         </div>
         <div>
           <label className="label" htmlFor="timezone">
@@ -180,6 +198,14 @@ export function CampaignControls({
           />
         </div>
       </div>
+
+      {endHour <= startHour && (
+        <p className="rounded-md bg-amber-50 px-3 py-2 text-sm text-[var(--color-warn)]">
+          The window ends at or before it starts, which is an empty window. Saved
+          as-is the campaign would fall back to 09:00–17:00 without telling you,
+          so pick an end later than the start.
+        </p>
+      )}
 
       <div>
         <p className="label">Sending days</p>
@@ -208,7 +234,7 @@ export function CampaignControls({
         <button
           className="btn-secondary"
           type="button"
-          disabled={busy}
+          disabled={busy || endHour <= startHour}
           onClick={() =>
             patch({
               mailbox_ids:

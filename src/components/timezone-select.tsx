@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
 /**
  * Timezone picker.
@@ -116,6 +116,20 @@ export function TimezoneSelect({
   }, [detected, value]);
 
   const now = useMemo(() => new Date(), []);
+
+  // A campaign saved before this field existed has an empty timezone. The
+  // select would then *display* the detected zone while the value still saved
+  // as empty — so the panel would claim one sending window and the engine
+  // would use another. Committing the fallback keeps shown and saved identical.
+  // Guarded with a ref rather than an effect dependency: the parent passes an
+  // inline arrow, so its identity changes every render and a dependency on it
+  // would re-fire this in a loop.
+  const committed = useRef(false);
+  useEffect(() => {
+    if (committed.current || value || !detected) return;
+    committed.current = true;
+    onChange(detected);
+  }, [value, detected, onChange]);
 
   return (
     <>
