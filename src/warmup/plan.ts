@@ -37,6 +37,36 @@ export function quotaRemaining(dailyVolume: number, sentToday: number): number {
   return Math.max(0, dailyVolume - sentToday);
 }
 
+export interface WarmupState {
+  enabled: boolean;
+  currentDailyVolume: number;
+  targetDailyVolume: number;
+}
+
+/**
+ * How many campaign emails a mailbox may actually send today.
+ *
+ * Warmup ramping its own peer volume is only half the job. Without this, a
+ * mailbox three days into a 40-day ramp would still send whatever
+ * `daily_limit` said — which is the volume spike warmup exists to avoid. While
+ * the ramp is climbing, real sending is held to the volume already reached.
+ *
+ * A mailbox with warmup switched off keeps its configured limit untouched:
+ * turning warmup off is an explicit choice, and silently overriding the limit
+ * would be worse than honouring it.
+ */
+export function sendingAllowance(
+  dailyLimit: number,
+  warmup: WarmupState | null,
+): number {
+  if (!warmup || !warmup.enabled) return dailyLimit;
+
+  const warmed = Math.max(0, warmup.currentDailyVolume);
+  const stillRamping = warmed < warmup.targetDailyVolume;
+
+  return stillRamping ? Math.min(dailyLimit, warmed) : dailyLimit;
+}
+
 export interface PeerCandidate {
   id: string;
   email: string;

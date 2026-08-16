@@ -45,6 +45,7 @@ import {
   poolIsViable,
   quotaRemaining,
   resumeVolume,
+  sendingAllowance,
   shouldRampToday,
   shouldReply,
 } from "../src/warmup/plan";
@@ -1095,6 +1096,48 @@ test("a malformed address is reported with its row number", () => {
 test("duplicate addresses across rows collapse to one", () => {
   const result = pairColumns("a.com\nb.com", "same@x.com\nSAME@x.com");
   assert.equal(result.rows.length, 1);
+});
+
+
+console.log("\nwarmup-aware sending allowance");
+
+test("a mailbox with no warmup row keeps its configured limit", () => {
+  assert.equal(sendingAllowance(50, null), 50);
+});
+
+test("warmup switched off is an explicit choice and is not overridden", () => {
+  assert.equal(
+    sendingAllowance(50, { enabled: false, currentDailyVolume: 5, targetDailyVolume: 40 }),
+    50,
+  );
+});
+
+test("while ramping, real sending is held to the volume reached so far", () => {
+  assert.equal(
+    sendingAllowance(50, { enabled: true, currentDailyVolume: 7, targetDailyVolume: 40 }),
+    7,
+  );
+});
+
+test("a limit below the warmed volume still wins — it is the stricter of the two", () => {
+  assert.equal(
+    sendingAllowance(3, { enabled: true, currentDailyVolume: 20, targetDailyVolume: 40 }),
+    3,
+  );
+});
+
+test("once the ramp reaches target the configured limit applies again", () => {
+  assert.equal(
+    sendingAllowance(50, { enabled: true, currentDailyVolume: 40, targetDailyVolume: 40 }),
+    50,
+  );
+});
+
+test("a mailbox reset to zero after a health pause sends nothing until it climbs", () => {
+  assert.equal(
+    sendingAllowance(50, { enabled: true, currentDailyVolume: 0, targetDailyVolume: 40 }),
+    0,
+  );
 });
 
 

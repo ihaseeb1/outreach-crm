@@ -8,6 +8,7 @@ import {
   type ResolvedWindow,
 } from "@/campaigns/schedule";
 import { mailboxForContact, type RotationMailbox } from "@/campaigns/rotation";
+import { sendingAllowance } from "@/warmup/plan";
 import { contactVars, renderTemplate } from "@/mail/template";
 import { sendEmail } from "@/mail/send";
 import type {
@@ -393,7 +394,43 @@ async function loadMailboxes(
   if (ids.length > 0) query = query.in("id", ids);
 
   const { data } = await query;
-  return (data ?? []) as RotationMailbox[];
+  const mailboxes = (data ?? []) as RotationMailbox[];
+  if (mailboxes.length === 0) return mailboxes;
+
+  // Hold real sending to what warmup has actually reached. Rotation already
+  // works off daily_limit, so folding the allowance into that field keeps the
+  // capacity and rest rules in one place instead of two.
+  const { data: warmupRows } = await supabase
+    .from("warmup_settings")
+    .select("mailbox_id, enabled, current_daily_volume, target_daily_volume")
+    .in(
+      "mailbox_id",
+      mailboxes.map((mailbox) => mailbox.id),
+    );
+
+  const warmupByMailbox = new Map(
+    ((warmupRows ?? []) as {
+      mailbox_id: string;
+      enabled: boolean;
+      current_daily_volume: number;
+      target_daily_volume: number;
+    }[]).map((row) => [
+      row.mailbox_id,
+      {
+        enabled: row.enabled,
+        currentDailyVolume: row.current_daily_volume,
+        targetDailyVolume: row.target_daily_volume,
+      },
+    ]),
+  );
+
+  return mailboxes.map((mailbox) => ({
+    ...mailbox,
+    daily_limit: sendingAllowance(
+      mailbox.daily_limit,
+      warmupByMailbox.get(mailbox.id) ?? null,
+    ),
+  }));
 }
 
 interface ThreadAnchor {

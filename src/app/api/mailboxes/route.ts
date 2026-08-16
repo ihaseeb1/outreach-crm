@@ -144,13 +144,34 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
+  const mailboxId = (data as { id: string }).id;
+
+  // Warmup starts on its own. It used to require finding the toggle and
+  // switching it on per mailbox, which meant the common case — connect a
+  // mailbox, start sending — ran a completely cold inbox at full volume.
+  //
+  // ignoreDuplicates so reconnecting a mailbox cannot reset a ramp that is
+  // already partway up; the schema defaults (5/day climbing by 2 toward 40)
+  // only apply to a genuinely new row. The engine skips any workspace with
+  // fewer than two enabled mailboxes, so enabling the first one is harmless
+  // and it simply begins when the second arrives.
+  await supabase.from("warmup_settings").upsert(
+    {
+      mailbox_id: mailboxId,
+      workspace_id: session.workspace.id,
+      enabled: true,
+      started_at: new Date().toISOString(),
+    },
+    { onConflict: "mailbox_id", ignoreDuplicates: true },
+  );
+
   await logActivity(supabase, {
     workspaceId: session.workspace.id,
     actorId: session.userId,
     action: "mailbox.connected",
     entityType: "mailbox",
-    entityId: (data as { id: string }).id,
-    meta: { email, provider: input.provider },
+    entityId: mailboxId,
+    meta: { email, provider: input.provider, warmup: "auto-enabled" },
   });
 
   return NextResponse.json({ ok: true, id: (data as { id: string }).id });

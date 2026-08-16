@@ -6,6 +6,7 @@ import { MailboxPacing } from "@/components/mailbox-pacing";
 import { RunJobButton } from "@/components/run-job-button";
 import { env } from "@/lib/env";
 import { isOAuthConfigured } from "@/mail/providers/oauth";
+import { sendingAllowance } from "@/warmup/plan";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
 import type { Mailbox } from "@/types/db";
@@ -42,6 +43,20 @@ export default async function MailboxesPage({
 
   const mailboxes = (data ?? []) as Mailbox[];
   const today = new Date().toISOString().slice(0, 10);
+
+  const { data: warmupRows } = await supabase
+    .from("warmup_settings")
+    .select("mailbox_id, enabled, current_daily_volume, target_daily_volume")
+    .eq("workspace_id", session.workspace.id);
+
+  const warmupByMailbox = new Map(
+    ((warmupRows ?? []) as {
+      mailbox_id: string;
+      enabled: boolean;
+      current_daily_volume: number;
+      target_daily_volume: number;
+    }[]).map((row) => [row.mailbox_id, row]),
+  );
 
   // Checked here rather than on click, so an unconfigured provider shows as
   // unavailable instead of throwing a raw JSON error at the user.
@@ -242,6 +257,46 @@ export default async function MailboxesPage({
                     {mailbox.last_error}
                   </p>
                 )}
+
+                {(() => {
+                  const warmup = warmupByMailbox.get(mailbox.id);
+                  if (!warmup?.enabled) {
+                    return (
+                      <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-[var(--color-warn)]">
+                        Warmup is off for this mailbox, so campaign sending is
+                        capped only by the daily limit below. Turn it on in{" "}
+                        <Link className="underline" href="/deliverability">
+                          Deliverability
+                        </Link>
+                        .
+                      </p>
+                    );
+                  }
+                  const allowance = sendingAllowance(mailbox.daily_limit, {
+                    enabled: warmup.enabled,
+                    currentDailyVolume: warmup.current_daily_volume,
+                    targetDailyVolume: warmup.target_daily_volume,
+                  });
+                  const ramping =
+                    warmup.current_daily_volume < warmup.target_daily_volume;
+                  return (
+                    <p className="rounded-md bg-[var(--color-canvas)] px-3 py-2 text-xs text-[var(--color-muted)]">
+                      Warming up: <strong>{warmup.current_daily_volume}</strong> of{" "}
+                      <strong>{warmup.target_daily_volume}</strong> a day.
+                      {ramping ? (
+                        <>
+                          {" "}
+                          Campaign sending is held to{" "}
+                          <strong>{allowance}</strong> a day until the ramp
+                          catches up, so a cold inbox is never pushed at full
+                          volume.
+                        </>
+                      ) : (
+                        <> Fully warmed — the daily limit below now applies.</>
+                      )}
+                    </p>
+                  );
+                })()}
 
                 <MailboxPacing
                   id={mailbox.id}
