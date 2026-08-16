@@ -55,6 +55,30 @@ export function ContactsTable({
     });
   }
 
+  async function validate(force: boolean) {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const response = await fetch("/api/contacts/validate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ids: [...selected], force }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Validation failed.");
+      setMessage(
+        payload.processed === 0
+          ? "Nothing to do — those are already validated. Use Re-check to run them again."
+          : `Checked ${payload.processed}: ${payload.valid} sendable, ${payload.invalid} not, ${payload.suppressed} suppressed.`,
+      );
+      router.refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function remove(suppress: boolean) {
     const what = suppress
       ? `Delete ${selected.size} contact(s) AND add them to the suppression list? They can never be emailed again.`
@@ -86,6 +110,23 @@ export function ContactsTable({
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
+        <button
+          className="btn-secondary"
+          type="button"
+          disabled={busy || selected.size === 0}
+          onClick={() => void validate(false)}
+        >
+          Validate selected
+        </button>
+        <button
+          className="btn-secondary"
+          type="button"
+          disabled={busy || selected.size === 0}
+          title="Run the check again on contacts that already have a verdict"
+          onClick={() => void validate(true)}
+        >
+          Re-check
+        </button>
         <button
           className="btn-secondary text-[var(--color-danger)]"
           type="button"

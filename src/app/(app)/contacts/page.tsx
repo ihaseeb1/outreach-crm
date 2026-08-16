@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { ContactImportForm } from "@/components/contact-import-form";
 import { ContactAddForm, ContactsTable } from "@/components/contacts-table";
+import { RunJobButton } from "@/components/run-job-button";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
 import type { Contact } from "@/types/db";
@@ -52,6 +53,12 @@ export default async function ContactsPage({
   const contacts = (data ?? []) as Contact[];
   const total = count ?? 0;
 
+  const { count: unvalidated } = await supabase
+    .from("contacts")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", session.workspace.id)
+    .eq("validation_status", "unknown");
+
   const { data: stageRows } = await supabase
     .from("pipeline_stages")
     .select("key, label")
@@ -89,10 +96,26 @@ export default async function ContactsPage({
 
       {/* Both collapse to a single button until opened, so the page stays calm
           until you actually want to add something. */}
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <ContactImportForm />
         <ContactAddForm />
+        <RunJobButton
+          job="validate"
+          label={`Validate ${unvalidated ?? 0} unchecked`}
+          limit={100}
+        />
       </div>
+
+      {(unvalidated ?? 0) > 0 && (
+        <p className="hint">
+          A contact added by hand or pasted in starts as{" "}
+          <strong>not validated</strong>. Validation checks the syntax, rejects
+          disposable domains, and looks up the domain&rsquo;s MX records to see
+          whether it can receive mail at all — it does not prove the individual
+          mailbox exists. It also runs automatically on every cron tick, 100 at
+          a time.
+        </p>
+      )}
 
       <form method="get" className="card card-pad grid gap-3 sm:grid-cols-4">
         <div>
