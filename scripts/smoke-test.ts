@@ -50,6 +50,7 @@ import {
 } from "../src/warmup/plan";
 import { isValidWarmupToken, newWarmupToken } from "../src/warmup/token";
 import { domainFromUrl, isRoleAccount, normalizeUrl, splitName } from "../src/lib/email";
+import { parseContactImport } from "../src/lib/import-parse";
 import {
   classifyInbound,
   parseBounceBody,
@@ -949,6 +950,78 @@ test("an empty funnel does not divide by zero", () => {
   const funnel = buildFunnel({ contacted: 0, replied: 0, dealsLogged: 0, dealsWon: 0 });
   assert.ok(funnel.every((step) => Number.isFinite(step.rate)));
 });
+
+console.log("\ncontact import parsing");
+
+test("reads a spreadsheet paste with tab-separated website and email", () => {
+  const result = parseContactImport("https://example.com\tjane@example.com");
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0]?.email, "jane@example.com");
+  assert.equal(result.rows[0]?.domain, "example.com");
+  assert.ok(result.rows[0]?.website?.includes("example.com"));
+});
+
+test("reads comma separated, in either order", () => {
+  const a = parseContactImport("example.com, jane@example.com");
+  const b = parseContactImport("jane@example.com, example.com");
+  assert.equal(a.rows[0]?.email, "jane@example.com");
+  assert.equal(b.rows[0]?.email, "jane@example.com");
+  assert.equal(a.rows[0]?.domain, "example.com");
+  assert.equal(b.rows[0]?.domain, "example.com");
+});
+
+test("an email on its own derives the domain from the address", () => {
+  const result = parseContactImport("editor@blog.co.uk");
+  assert.equal(result.rows[0]?.domain, "blog.co.uk");
+  assert.equal(result.rows[0]?.website, null);
+});
+
+test("a website on its own is queued for scraping, not made a contact", () => {
+  const result = parseContactImport("https://nocontact.com");
+  assert.equal(result.rows.length, 0);
+  assert.equal(result.websitesOnly.length, 1);
+});
+
+test("a name is kept whole when a real separator is present", () => {
+  const result = parseContactImport("Jane Doe, example.com, jane@example.com");
+  assert.equal(result.rows[0]?.firstName, "Jane");
+  assert.equal(result.rows[0]?.lastName, "Doe");
+});
+
+test("space separated still splits when there is no other separator", () => {
+  const result = parseContactImport("example.com jane@example.com");
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0]?.email, "jane@example.com");
+});
+
+test("a spreadsheet header row is ignored", () => {
+  const result = parseContactImport("Website\tEmail\nexample.com\tjane@example.com");
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.skipped.length, 0);
+});
+
+test("numeric metric columns are not mistaken for names", () => {
+  const result = parseContactImport("example.com\tjane@example.com\t55\t72");
+  assert.equal(result.rows[0]?.firstName, null);
+  assert.equal(result.rows[0]?.lastName, null);
+});
+
+test("duplicate addresses collapse to one row", () => {
+  const result = parseContactImport("jane@example.com\nJANE@example.com");
+  assert.equal(result.rows.length, 1);
+});
+
+test("angle brackets and trailing punctuation are stripped", () => {
+  const result = parseContactImport("<jane@example.com>,");
+  assert.equal(result.rows[0]?.email, "jane@example.com");
+});
+
+test("a junk line is reported rather than silently dropped", () => {
+  const result = parseContactImport("just some words here");
+  assert.equal(result.rows.length, 0);
+  assert.equal(result.skipped.length, 1);
+});
+
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
 if (failed > 0) process.exit(1);

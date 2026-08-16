@@ -240,7 +240,7 @@ export function ContactAddForm() {
   }
 
   return (
-    <form onSubmit={onSubmit} className="card card-pad space-y-3">
+    <form onSubmit={onSubmit} className="card card-pad w-full space-y-3">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-semibold">Add a contact</h2>
         <button className="hint hover:underline" type="button" onClick={() => setOpen(false)}>

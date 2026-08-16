@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { ContactImportForm } from "@/components/contact-import-form";
 import { ContactAddForm, ContactsTable } from "@/components/contacts-table";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
@@ -78,15 +79,19 @@ export default async function ContactsPage({
           <h1 className="text-2xl font-semibold">Contacts</h1>
           <p className="hint mt-1">{total.toLocaleString()} matching contact(s)</p>
         </div>
-        <div className="flex gap-2">
-          <ContactAddForm />
-          <a
-            className="btn-secondary"
-            href={`/api/contacts/export?${exportQuery.toString()}`}
-          >
-            Export CSV
-          </a>
-        </div>
+        <a
+          className="btn-secondary"
+          href={`/api/contacts/export?${exportQuery.toString()}`}
+        >
+          Export CSV
+        </a>
+      </div>
+
+      {/* Both collapse to a single button until opened, so the page stays calm
+          until you actually want to add something. */}
+      <div className="flex flex-wrap gap-2">
+        <ContactImportForm />
+        <ContactAddForm />
       </div>
 
       <form method="get" className="card card-pad grid gap-3 sm:grid-cols-4">
