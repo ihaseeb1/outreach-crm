@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
+import { VariablePicker } from "@/components/variable-picker";
 import { contactVars, renderTemplate, templateVariables } from "@/mail/template";
 
 export interface ComposeContact {
@@ -49,6 +50,9 @@ export function ComposeForm({
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const subjectRef = useRef<HTMLInputElement | null>(null);
+  const bodyRef = useRef<HTMLTextAreaElement | null>(null);
 
   const contact = useMemo(
     () => contacts.find((c) => c.id === contactId) ?? null,
@@ -146,11 +150,13 @@ export function ComposeForm({
           </label>
           <input
             id="subject"
+            ref={subjectRef}
             className="input"
             value={subject}
             onChange={(e) => setSubject(e.target.value)}
             required
           />
+          <VariablePicker targetRef={subjectRef} onInsert={setSubject} />
         </div>
 
         <div>
@@ -159,11 +165,13 @@ export function ComposeForm({
           </label>
           <textarea
             id="body"
+            ref={bodyRef}
             className="input min-h-64"
             value={body}
             onChange={(e) => setBody(e.target.value)}
             required
           />
+          <VariablePicker targetRef={bodyRef} onInsert={setBody} />
           <p className="hint mt-1">
             Variables: {AVAILABLE_VARS.map((v) => `{{${v}}}`).join(", ")}. Add a
             fallback with a pipe: <code>{"{{first_name|there}}"}</code>.

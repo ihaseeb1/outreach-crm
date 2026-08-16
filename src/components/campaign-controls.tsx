@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
+import { TimezoneSelect } from "@/components/timezone-select";
 import type { CampaignSettings, CampaignStatus } from "@/types/db";
 
 const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -169,13 +170,11 @@ export function CampaignControls({
           <label className="label" htmlFor="timezone">
             Timezone
           </label>
-          <input
+          <TimezoneSelect
             id="timezone"
-            className="input"
-            placeholder="Europe/London"
             value={timezone}
-            onChange={(e) => {
-              setTimezone(e.target.value);
+            onChange={(next) => {
+              setTimezone(next);
               setSaved(false);
             }}
           />

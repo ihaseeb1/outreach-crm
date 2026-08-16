@@ -1,7 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+
+import { VariablePicker } from "@/components/variable-picker";
 
 export interface EditableStep {
   delay_days: number;
@@ -35,6 +37,11 @@ export function SequenceEditor({
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // One ref per field so the picker can insert at the caret in the step the
+  // user is actually editing, not the last one rendered.
+  const subjectRefs = useRef<(HTMLInputElement | null)[]>([]);
+  const bodyRefs = useRef<(HTMLTextAreaElement | null)[]>([]);
 
   function update(index: number, patch: Partial<EditableStep>) {
     setSteps((current) =>
@@ -129,11 +136,18 @@ export function SequenceEditor({
               </label>
               <input
                 id={`subject-${index}`}
+                ref={(el) => {
+                  subjectRefs.current[index] = el;
+                }}
                 className="input"
                 value={step.subject_template}
                 onChange={(e) =>
                   update(index, { subject_template: e.target.value })
                 }
+              />
+              <VariablePicker
+                targetRef={{ current: subjectRefs.current[index] ?? null }}
+                onInsert={(next) => update(index, { subject_template: next })}
               />
             </div>
           )}
@@ -150,9 +164,16 @@ export function SequenceEditor({
             </label>
             <textarea
               id={`body-${index}`}
+              ref={(el) => {
+                bodyRefs.current[index] = el;
+              }}
               className="input min-h-40"
               value={step.body_template}
               onChange={(e) => update(index, { body_template: e.target.value })}
+            />
+            <VariablePicker
+              targetRef={{ current: bodyRefs.current[index] ?? null }}
+              onInsert={(next) => update(index, { body_template: next })}
             />
           </div>
         </div>
@@ -178,9 +199,10 @@ export function SequenceEditor({
       </div>
 
       <p className="hint">
-        Variables: {"{{first_name}}"}, {"{{last_name}}"}, {"{{full_name}}"},{" "}
-        {"{{domain}}"}, {"{{website}}"}, {"{{email}}"}. Fallbacks with a pipe:{" "}
-        <code>{"{{first_name|there}}"}</code>. Your postal address and an
+        Click a variable to drop it in at the cursor. A pipe sets a fallback for
+        contacts missing that field — <code>{"{{first_name|there}}"}</code>{" "}
+        renders as &ldquo;there&rdquo; rather than leaving a gap, which is why
+        the First name button includes one. Your postal address and an
         unsubscribe link are appended automatically.
       </p>
     </section>
