@@ -73,6 +73,12 @@ import {
 import { extractFromHtml, isJunkEmail } from "../src/scraper/extract";
 import { isAllowed, parseRobots } from "../src/scraper/robots";
 import { isDisposableDomain } from "../src/validation/disposable";
+import {
+  MAX_VOLUME_WINDOW,
+  summariseVolume,
+  perDay,
+  type SentRow,
+} from "../src/mailboxes/volume";
 
 // Set before any test runs; env values are read lazily inside the functions.
 process.env.APP_ENCRYPTION_KEY ??= "0".repeat(64);
@@ -1455,6 +1461,91 @@ test("once the gap has elapsed the mailbox is usable again", () => {
   assert.equal(isEligible(box, { now: new Date("2026-08-17T13:00:00Z") }), true);
 });
 
+
+console.log("\nmailbox sent volume");
+
+const VOLUME_NOW = new Date("2026-08-17T12:00:00Z");
+
+function sentRow(
+  mailbox: string,
+  daysAgo: number,
+  kind: string | null = "campaign",
+): SentRow {
+  return {
+    mailbox_id: mailbox,
+    sent_at: new Date(VOLUME_NOW.getTime() - daysAgo * 86_400_000).toISOString(),
+    meta: kind === null ? null : { kind },
+  };
+}
+
+function volumeFor(rows: SentRow[], mailbox: string) {
+  const volume = summariseVolume(rows, VOLUME_NOW)[mailbox];
+  assert.ok(volume, `no volume recorded for ${mailbox}`);
+  return volume;
+}
+
+test("windows nest — a recent send is in all three counts", () => {
+  const volume = volumeFor([sentRow("a", 2)], "a");
+  assert.equal(volume[7].outreach, 1);
+  assert.equal(volume[14].outreach, 1);
+  assert.equal(volume[30].outreach, 1);
+});
+
+test("an older send only reaches the wider windows", () => {
+  const volume = volumeFor([sentRow("a", 10), sentRow("a", 20)], "a");
+  assert.equal(volume[7].outreach, 0);
+  assert.equal(volume[14].outreach, 1);
+  assert.equal(volume[30].outreach, 2);
+});
+
+test("anything past the widest window is dropped", () => {
+  const volume = summariseVolume([sentRow("a", MAX_VOLUME_WINDOW + 1)], VOLUME_NOW);
+  assert.deepEqual(volume, {});
+});
+
+test("warmup is counted apart from real outreach", () => {
+  const volume = volumeFor(
+    [sentRow("a", 1, "warmup"), sentRow("a", 1, "campaign"), sentRow("a", 1, "manual")],
+    "a",
+  );
+  assert.equal(volume[7].warmup, 1);
+  // Manual sends are real mail to a real person, so they belong with outreach.
+  assert.equal(volume[7].outreach, 2);
+});
+
+test("a row with no kind counts as outreach, never as warmup", () => {
+  const volume = volumeFor([sentRow("a", 1, null)], "a");
+  assert.equal(volume[7].outreach, 1);
+  assert.equal(volume[7].warmup, 0);
+});
+
+test("mailboxes are kept separate", () => {
+  const rows = [sentRow("a", 1), sentRow("b", 1), sentRow("b", 3)];
+  assert.equal(volumeFor(rows, "a")[7].outreach, 1);
+  assert.equal(volumeFor(rows, "b")[7].outreach, 2);
+});
+
+test("rows with no mailbox, no timestamp, or a junk timestamp are skipped", () => {
+  const volume = summariseVolume(
+    [
+      { mailbox_id: null, sent_at: VOLUME_NOW.toISOString(), meta: null },
+      { mailbox_id: "a", sent_at: null, meta: null },
+      { mailbox_id: "a", sent_at: "not a date", meta: null },
+    ],
+    VOLUME_NOW,
+  );
+  assert.deepEqual(volume, {});
+});
+
+test("a future timestamp counts as just-sent rather than vanishing", () => {
+  // Clock skew between the app and Postgres should not hide a send.
+  assert.equal(volumeFor([sentRow("a", -1)], "a")[7].outreach, 1);
+});
+
+test("per-day average keeps one decimal", () => {
+  assert.equal(perDay(3, 7), "0.4");
+  assert.equal(perDay(0, 30), "0.0");
+});
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
 if (failed > 0) process.exit(1);

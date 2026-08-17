@@ -3,9 +3,19 @@ import Link from "next/link";
 import { MailboxActions } from "@/components/mailbox-actions";
 import { MailboxConnectForm } from "@/components/mailbox-connect-form";
 import { MailboxPacing } from "@/components/mailbox-pacing";
+import {
+  MailboxVolume,
+  VolumeWindowProvider,
+  VolumeWindowToggle,
+} from "@/components/mailbox-volume";
 import { RunJobButton } from "@/components/run-job-button";
 import { env } from "@/lib/env";
 import { isOAuthConfigured } from "@/mail/providers/oauth";
+import {
+  MAX_VOLUME_WINDOW,
+  summariseVolume,
+  type SentRow,
+} from "@/mailboxes/volume";
 import { sendingAllowance } from "@/warmup/plan";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
@@ -48,6 +58,23 @@ export default async function MailboxesPage({
     .from("warmup_settings")
     .select("mailbox_id, enabled, current_daily_volume, target_daily_volume")
     .eq("workspace_id", session.workspace.id);
+
+  // Sent volume. Read once for the whole workspace and bucketed in memory —
+  // 7 / 14 / 30 counts for every mailbox would otherwise be dozens of queries.
+  const volumeSince = new Date(
+    Date.now() - MAX_VOLUME_WINDOW * 86_400_000,
+  ).toISOString();
+
+  const { data: sentRows } = await supabase
+    .from("messages")
+    .select("mailbox_id, sent_at, meta")
+    .eq("workspace_id", session.workspace.id)
+    .eq("direction", "outbound")
+    .eq("status", "sent")
+    .gte("sent_at", volumeSince)
+    .limit(20_000);
+
+  const volumeByMailbox = summariseVolume((sentRows ?? []) as SentRow[]);
 
   const warmupByMailbox = new Map(
     ((warmupRows ?? []) as {
@@ -190,7 +217,16 @@ export default async function MailboxesPage({
           create an App Password, and paste it above.
         </p>
       ) : (
-        <div className="grid gap-4 lg:grid-cols-2">
+        <VolumeWindowProvider>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="hint">
+              Sent volume over the last 7, 14 or 30 days — the same window for
+              every mailbox, so they can be compared.
+            </p>
+            <VolumeWindowToggle />
+          </div>
+
+          <div className="mt-4 grid gap-4 lg:grid-cols-2">
           {mailboxes.map((mailbox) => {
             const sentToday =
               mailbox.sent_today_date === today ? mailbox.sent_today : 0;
@@ -232,6 +268,8 @@ export default async function MailboxesPage({
                     />
                   </div>
                 </div>
+
+                <MailboxVolume volume={volumeByMailbox[mailbox.id]} />
 
                 <dl className="grid grid-cols-2 gap-2 text-xs text-[var(--color-muted)]">
                   <div>
@@ -313,7 +351,8 @@ export default async function MailboxesPage({
               </div>
             );
           })}
-        </div>
+          </div>
+        </VolumeWindowProvider>
       )}
 
       {mailboxes.length > 0 && (
