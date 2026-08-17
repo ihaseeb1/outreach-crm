@@ -180,6 +180,44 @@ happened.
 
 ---
 
+## The inbox showed sent mail (fixed 17 August)
+
+The user opened the inbox and found the five campaign sends sitting there as
+conversations. Sent mail must never appear — the inbox is a reply hub.
+
+**Cause.** `messages_attach_conversation` (migration 0005) creates a conversation
+row on the *first message of any direction*, outbound included. So every contact
+emailed became a conversation, and the inbox listed conversations.
+
+**Fix.** The inbox resolves the set of conversations that carry at least one
+inbound message and lists only those. Filtering on `last_direction = 'inbound'`
+would have been wrong in the other direction: replying would make a real thread
+disappear. The trigger was left alone — those rows still drive the contact
+timeline and the pipeline's "last touch".
+
+Shipped with it, from the same report:
+
+- **Which mailbox holds the thread** is shown in the list and in the header.
+- **Reply from a different mailbox** — a dropdown on the reply box, warning that
+  the recipient will see an address they have not seen before.
+- **Unread count** is now taken across every replied thread, not just the rows
+  the current tab shows.
+- **"Close" is now "Mark done"**, with a line explaining it: hides the thread
+  from Open, deletes nothing, and a new reply brings it back automatically.
+- **Logging a deal stars the thread in Gmail.** Gmail's star is the IMAP
+  `\Flagged` flag, so `flagByMessageId` on the provider does it with no API and
+  no new scope. The *received* message is flagged — starring our own copy would
+  mark it in Sent, where nobody looks — searched by Message-ID in INBOX and in
+  the `\All` folder, since the thread may already be archived. Best-effort with
+  a 15s ceiling, and the form says whether the star actually happened.
+  `src/mail/star.ts` uses the **admin client**: `encrypted_credentials` is
+  revoked from the authenticated role.
+
+**Verified:** the sent-only threads are gone from the live inbox, which now reads
+"Nothing waiting". **Not yet verified:** the mailbox picker, "Mark done", and the
+Gmail star have no replied thread to exercise them on — the last tick reported
+`replies: 0`. Check them the first time a publisher writes back.
+
 ## Features added 17 August
 
 - **Sent volume per mailbox, 7 / 14 / 30 days** (`src/mailboxes/volume.ts`,
