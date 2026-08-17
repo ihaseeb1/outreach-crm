@@ -42,7 +42,20 @@ const MAX_ATTEMPTS = 3;
 
 export async function runCampaignBatch(
   supabase: SupabaseClient,
-  options: { limit?: number; workspaceId?: string; campaignId?: string } = {},
+  options: {
+    limit?: number;
+    workspaceId?: string;
+    campaignId?: string;
+    /**
+     * Send even though the clock is outside the campaign's window.
+     *
+     * Only ever set from an explicit human "send now" — never by the cron. The
+     * window exists to stop *unattended* sends landing at bad hours; somebody
+     * pressing the button has already made that call, and refusing them means
+     * an overnight schedule cannot be tested until overnight.
+     */
+    ignoreWindow?: boolean;
+  } = {},
 ): Promise<CampaignBatchResult> {
   const budget = options.limit ?? 10;
   const result: CampaignBatchResult = {
@@ -68,12 +81,24 @@ export async function runCampaignBatch(
     if (remaining <= 0) break;
 
     const window = resolveWindow(campaign.settings);
-    if (!isWithinSendWindow(now, window)) {
+    if (!options.ignoreWindow && !isWithinSendWindow(now, window)) {
       result.notes.push(`${campaign.name}: outside sending window`);
       continue;
     }
+    if (options.ignoreWindow && !isWithinSendWindow(now, window)) {
+      result.notes.push(
+        `${campaign.name}: sent outside the window because this was a manual run`,
+      );
+    }
 
-    const used = await runCampaign(supabase, campaign, window, remaining, result);
+    const used = await runCampaign(
+      supabase,
+      campaign,
+      window,
+      remaining,
+      result,
+      options.ignoreWindow ?? false,
+    );
     remaining -= used;
   }
 
@@ -86,6 +111,7 @@ async function runCampaign(
   window: ResolvedWindow,
   budget: number,
   result: CampaignBatchResult,
+  ignoreWindow: boolean,
 ): Promise<number> {
   const steps = await loadSteps(supabase, campaign.id);
   if (steps.length === 0) {
@@ -100,15 +126,31 @@ async function runCampaign(
   }
 
   const now = new Date();
-  const { data: dueRows } = await supabase
+  const iso = now.toISOString();
+
+  let dueQuery = supabase
     .from("campaign_contacts")
     .select("*")
     .eq("campaign_id", campaign.id)
     .in("status", ["pending", "active"])
-    .lte("next_send_at", now.toISOString())
-    .or(`locked_until.is.null,locked_until.lt.${now.toISOString()}`)
+    .or(`locked_until.is.null,locked_until.lt.${iso}`)
     .order("next_send_at", { ascending: true })
     .limit(budget * 2);
+
+  if (ignoreWindow) {
+    // Enrolment parks a contact's first send at the next window opening, so a
+    // 1am-Monday campaign has nothing "due" until Monday. A manual start also
+    // releases contacts that have never been sent to (current_step 0).
+    //
+    // Follow-ups deliberately keep their next_send_at: that timestamp encodes
+    // the wait between steps, and firing step 2 early would chase somebody a
+    // day after first contact.
+    dueQuery = dueQuery.or(`next_send_at.lte.${iso},current_step.eq.0`);
+  } else {
+    dueQuery = dueQuery.lte("next_send_at", iso);
+  }
+
+  const { data: dueRows } = await dueQuery;
 
   const due = (dueRows ?? []) as CampaignContact[];
   let used = 0;

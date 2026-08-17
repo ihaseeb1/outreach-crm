@@ -18,6 +18,8 @@ export const dynamic = "force-dynamic";
 const bodySchema = z.object({
   job: z.enum(["scrape", "validate", "inbound", "campaigns", "warmup", "health"]),
   limit: z.number().int().positive().max(200).optional(),
+  /** Campaigns only: send now even though the clock is outside the window. */
+  ignoreWindow: z.boolean().optional(),
 });
 
 /**
@@ -68,6 +70,10 @@ export async function POST(request: Request) {
     const result = await runCampaignBatch(supabase, {
       workspaceId,
       limit: Math.min(parsed.data.limit ?? 10, 40),
+      // Safe here and only here: this route requires a session, so the
+      // override can only ever come from a person pressing a button. The cron
+      // routes never pass it.
+      ignoreWindow: parsed.data.ignoreWindow,
     });
     return NextResponse.json({ ok: true, job: "campaigns", ...result });
   }

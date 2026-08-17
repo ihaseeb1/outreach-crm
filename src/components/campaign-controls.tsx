@@ -20,6 +20,63 @@ function hourLabel(hour: number): string {
   return `${String(hour).padStart(2, "0")}:00 (${twelve}${suffix})`;
 }
 
+/**
+ * Manual "send now". Separate from RunJobButton because it needs the
+ * window override, which only a human-initiated run is allowed to set.
+ */
+function RunNowButton({
+  campaignId,
+  disabled,
+}: {
+  campaignId: string;
+  disabled: boolean;
+}) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function run() {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const response = await fetch("/api/jobs/run", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ job: "campaigns", limit: 40, ignoreWindow: true }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Run failed.");
+      const notes = Array.isArray(payload.notes) ? payload.notes.join(" · ") : "";
+      setMessage(
+        `Sent ${payload.sent}, skipped ${payload.skipped}, failed ${payload.failed}.${
+          notes ? ` ${notes}` : ""
+        }`,
+      );
+      router.refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  void campaignId;
+
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <button
+        className="btn-secondary"
+        type="button"
+        disabled={busy || disabled}
+        onClick={() => void run()}
+      >
+        {busy ? "Sending…" : "Send first batch now"}
+      </button>
+      {message && <span className="hint">{message}</span>}
+    </div>
+  );
+}
+
 export function CampaignControls({
   campaignId,
   status,
@@ -90,6 +147,20 @@ export function CampaignControls({
         <span className="hint">
           Status: <strong>{status}</strong>
         </span>
+      </div>
+
+      <div className="space-y-2 rounded-md border border-[var(--color-line)] p-3">
+        <p className="text-sm font-medium">Send the first batch now</p>
+        <p className="hint">
+          Ignores the window for this one run and releases contacts that have
+          never been emailed, so an overnight schedule does not mean waiting
+          until overnight to test it. The schedule below is not changed, and
+          follow-ups keep their normal spacing.
+        </p>
+        <RunNowButton campaignId={campaignId} disabled={status !== "active"} />
+        {status !== "active" && (
+          <p className="hint">Start sending first — a draft has nothing due.</p>
+        )}
       </div>
 
       <div>
