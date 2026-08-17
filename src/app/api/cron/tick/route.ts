@@ -63,18 +63,23 @@ export async function GET(request: Request) {
     results[name] = await safely(name, fn);
   }
 
-  // Ordered by consequence, not by cost.
+  // Cheap-and-consequential first, expensive last.
   //
-  // Suppression sync first: it is cheap and stops sequences for anyone who
-  // opted out. Inbound next, because a reply must be seen before the follow-up
-  // goes out — sending step 3 to somebody who already answered is the worst
-  // failure this system has. Sending third. Warmup, health, validation and
-  // scraping are all safe to slip to a later tick.
+  // Inbound polling was ordered ahead of sending on the reasoning that a reply
+  // should be seen before the next follow-up. In practice IMAP takes ~25s per
+  // mailbox, so it consumed the entire budget and campaigns were deferred on
+  // every single tick — sending never ran at all. Starving the send loop is far
+  // worse than a follow-up occasionally going out in the ten minutes before a
+  // reply is noticed, especially as follow-up steps are days apart.
+  //
+  // One mailbox per inbound tick. Seven mailboxes at ten-minute ticks means each
+  // is polled roughly hourly, which is ample for reply detection and leaves room
+  // for everything else.
   await step("suppressionSync", 3_000, () =>
     syncSuppressedCampaignContacts(supabase, { limit: 200 }),
   );
-  await step("inbound", 25_000, () => runInboundPoll(supabase, { limit: 2 }));
   await step("campaigns", 12_000, () => runCampaignBatch(supabase, { limit: 10 }));
+  await step("inbound", 22_000, () => runInboundPoll(supabase, { limit: 1 }));
   await step("warmup", 15_000, () => runWarmupBatch(supabase, { sendLimit: 3 }));
   // Skips any mailbox already checked today, so calling it every tick is cheap.
   await step("health", 8_000, () => runHealthChecks(supabase, { limit: 3 }));
