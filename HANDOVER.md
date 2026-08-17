@@ -29,13 +29,19 @@ Live at **https://crm.orankly.com**. Everything below is deployed on `main`.
 
 ---
 
-## Pending work — not started
+## Pending work
 
-1. **Mailbox sent-volume views: 7 / 14 / 30 days.** Requested twice. The
-   mailboxes page currently shows only "sent today". `messages` has `sent_at`,
-   so this is a query plus a toggle.
-2. **Duplicate campaign.** Copy name, settings, `mailbox_ids` and all
-   `sequence_steps`; do not copy enrolments.
+Both items below were **built on 17 August** and are committed on `main`.
+Nothing else is outstanding from the previous list.
+
+1. ~~Mailbox sent-volume views: 7 / 14 / 30 days.~~ Done — see below.
+2. ~~Duplicate campaign.~~ Done — see below.
+
+**Not yet verified against live data.** Everything passes typecheck, 161 smoke
+tests and a production build, but neither feature has been looked at on
+crm.orankly.com. Per the habits at the bottom of this file, that is not the same
+as working. Check the volume numbers against a mailbox's real sent folder, and
+duplicate a campaign to confirm the copy has the steps and no contacts.
 
 ---
 
@@ -140,7 +146,28 @@ happened.
 
 ---
 
-## Features added this session
+## Features added 17 August
+
+- **Sent volume per mailbox, 7 / 14 / 30 days** (`src/mailboxes/volume.ts`,
+  `mailbox-volume.tsx`). One `messages` query for the whole workspace, bucketed
+  in memory — per-mailbox counts for three windows would otherwise be dozens of
+  round trips. Windows **nest**: a send three days ago is in all three counts, so
+  "last 14" can never read lower than "last 7". Warmup is counted separately from
+  real outreach because both come through `sendEmail` into `messages` (warmup
+  carries `meta.kind = 'warmup'`) and both spend the same daily budget — a
+  mailbox at "5 / 5 today" with three real sends this week is correct, but only
+  legible if both numbers are shown. The window toggle is **one control for the
+  page**, not one per card: comparing mailboxes needs them on the same fortnight.
+- **Duplicate campaign** (`/api/campaigns/duplicate`, button on the campaign
+  page). Copies name, settings, `mailbox_ids` and every sequence step. Enrolments
+  are **not** copied and the copy starts as a draft — a duplicate is for sending
+  the same sequence to a *different* list, and carrying the old one over would
+  re-enrol people who have already had it, or have two campaigns emailing the
+  same contact mid-sequence. Copying a copy numbers it ("Outreach (copy 2)")
+  rather than stacking suffixes. If the step insert fails the new campaign is
+  deleted, because an empty campaign starts happily and sends nothing.
+
+## Features added in earlier sessions
 
 - **Send first batch now** (campaign page) — overrides the window for one run
   *and* releases `current_step = 0` contacts, because enrolment parks the first
@@ -196,7 +223,7 @@ happened.
 
 ## Verification habits that earned their keep
 
-`npm run typecheck && npm run smoke && npm run build` — **146 smoke tests**, all
+`npm run typecheck && npm run smoke && npm run build` — **161 smoke tests**, all
 pure logic, no DB or network.
 
 Static checks alone were not enough. Every one of these was found only by
