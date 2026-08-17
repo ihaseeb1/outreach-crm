@@ -6,9 +6,10 @@
  * all. Everything here is pure so it can be tested without a database; the page
  * hands it rows straight from `messages`.
  *
- * Warmup and real outreach are counted separately. They share one daily budget,
- * so a mailbox reading "5 / 5 today" with three real sends this week is doing
- * exactly what it should — but only if both numbers are visible.
+ * Warmup counts **inside** the daily limit, not on top of it: a mailbox set to 6
+ * a day sends six emails in total, warmup included. So the total is the number
+ * that matters and warmup is reported as a share of it, never as a second figure
+ * to be added on.
  */
 
 export const VOLUME_WINDOWS = [7, 14, 30] as const;

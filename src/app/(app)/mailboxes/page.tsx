@@ -221,7 +221,8 @@ export default async function MailboxesPage({
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="hint">
               Sent volume over the last 7, 14 or 30 days — the same window for
-              every mailbox, so they can be compared.
+              every mailbox, so they can be compared. Totals include warmup,
+              which spends the daily limit rather than adding to it.
             </p>
             <VolumeWindowToggle />
           </div>

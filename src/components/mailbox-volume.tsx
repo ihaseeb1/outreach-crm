@@ -74,14 +74,22 @@ export function MailboxVolume({ volume }: { volume?: Volume | null }) {
       <div className="flex items-baseline justify-between gap-2">
         <span>Sent, last {days} days</span>
         <span className="text-[var(--color-ink)]">
-          <strong>{counts.outreach}</strong> outreach
-          {counts.warmup > 0 && <> · {counts.warmup} warmup</>}
+          <strong>{total}</strong>
         </span>
       </div>
       <p className="mt-0.5">
-        {total === 0
-          ? "Nothing has left this mailbox in that period."
-          : `${perDay(total, days)} a day on average, warmup included.`}
+        {total === 0 ? (
+          "Nothing has left this mailbox in that period."
+        ) : (
+          <>
+            {perDay(total, days)} a day on average.{" "}
+            {/* A share of the total, not an addition to it — warmup spends the
+                same daily limit as real outreach. */}
+            {counts.warmup > 0
+              ? `${counts.warmup} of those ${counts.warmup === 1 ? "was" : "were"} warmup, ${counts.outreach} real outreach.`
+              : "All real outreach, no warmup."}
+          </>
+        )}
       </p>
     </div>
   );
