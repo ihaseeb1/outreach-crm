@@ -455,15 +455,47 @@ export async function runWarmupReplies(
 /** One tick of the whole warmup engine. */
 export async function runWarmupBatch(
   supabase: SupabaseClient,
-  options: { workspaceId?: string; sendLimit?: number } = {},
+  options: {
+    workspaceId?: string;
+    sendLimit?: number;
+    /** Mailboxes to open/flag/rescue per run. IMAP-bound, so keep it small. */
+    engageLimit?: number;
+    budgetMs?: number;
+  } = {},
 ): Promise<WarmupRunResult> {
+  // Engagement talks to IMAP for every mailbox it touches, which at three
+  // mailboxes a run was enough to blow the 60s function limit on its own. One
+  // per run, guarded by a budget, so a slow provider degrades this into doing
+  // less rather than into returning nothing.
+  const budgetMs = options.budgetMs ?? 40_000;
+  const startedAt = Date.now();
+  const spare = (reserve: number) => Date.now() - startedAt + reserve <= budgetMs;
+
   const ramped = await rampWarmupVolumes(supabase, options);
   const { sent, skipped } = await runWarmupSends(supabase, {
     workspaceId: options.workspaceId,
     limit: options.sendLimit ?? SEND_BATCH,
   });
-  const { engaged, rescued } = await runWarmupEngagement(supabase, options);
-  const { replied } = await runWarmupReplies(supabase, options);
+
+  let engaged = 0;
+  let rescued = 0;
+  if (spare(20_000)) {
+    const engagement = await runWarmupEngagement(supabase, {
+      workspaceId: options.workspaceId,
+      limit: options.engageLimit ?? 1,
+    });
+    engaged = engagement.engaged;
+    rescued = engagement.rescued;
+  } else {
+    skipped.push("engagement skipped — out of time this run");
+  }
+
+  let replied = 0;
+  if (spare(8_000)) {
+    replied = (await runWarmupReplies(supabase, options)).replied;
+  } else {
+    skipped.push("replies skipped — out of time this run");
+  }
 
   if (rescued > 0) {
     // Worth surfacing: warmup landing in spam is the earliest free signal that
