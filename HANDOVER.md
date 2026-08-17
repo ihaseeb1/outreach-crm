@@ -18,11 +18,32 @@ Live at **https://crm.orankly.com**. Everything below is deployed on `main`.
 - 7 Gmail mailboxes connected via app passwords. Daily limit 5 each, gap
   90–120 min. Warmup shares that same daily budget.
 
-### Two things the user must confirm are done
+### Cron is confirmed working (17 Aug)
 
-1. **`CRON_SECRET` as a GitHub repository secret** — the user said they added it.
-   Verify a green run under Actions → "Cron tick". Without it nothing ticks.
-2. **Warmup target is 5/day on every mailbox**, so all four originally checked
+`CRON_SECRET` is set as a repository secret and **Cron tick #1 ran on schedule
+and succeeded**. That green tick means something: the workflow exits 1 unless
+every endpoint returns exactly 200, so a wrong secret would have failed it. The
+log read:
+
+```
+validate / scrape / health / campaigns / warmup / inbound -> HTTP 200
+campaigns notes: ["First Campaign: outside sending window"]   # Monday, correct
+All jobs returned 200.
+```
+
+The secrets page itself never shows a status colour — the green lives under
+Actions → Cron tick.
+
+**Watch the Actions minutes.** This repo is private, so runs bill against the
+2,000 free minutes a month, and GitHub rounds every run up to a whole minute.
+`*/10` is 144 runs a day ≈ 4,300 minutes a month — the allowance is gone in
+about a fortnight, and when it goes, sending silently stops. `*/30` is 48 runs a
+day ≈ 1,450 a month and costs almost nothing in throughput, because each mailbox
+rests 120–240 minutes between sends anyway.
+
+### Still to confirm
+
+1. **Warmup target is 5/day on every mailbox**, so all four originally checked
    read "5 → 5, fully warmed". 5/day is not a warmup. The schema default is 40.
    Raise it in Deliverability. Until then `sendingAllowance` sees "warmed" and
    hands straight back to the daily limit, protecting nothing.
@@ -40,11 +61,14 @@ Nothing else is outstanding from the previous list.
 Both were verified on **crm.orankly.com** after deploying, not just in tests:
 
 - Volume figures render per mailbox against real data, and the toggle moves all
-  seven cards together. `webwarner.com@gmail.com` reads "5 / 5 today, 6 outreach
-  in 7 days"; the rest sit at 1 outreach plus 1–4 warmup, which matches a
-  workspace that has only been sending since 17 August. 7-, 14- and 30-day
-  counts are identical for now because nothing is older than a week — the
-  per-day average is what changes (0.7 → 0.2).
+  seven cards together. Most mailboxes read "5 in 7 days — 4 of those warmup,
+  1 real outreach", which matches a workspace that has only been sending since
+  17 August. 7-, 14- and 30-day counts are identical for now because nothing is
+  older than a week; the per-day average is what changes (0.7 → 0.2).
+  **The first cut showed "1 outreach · 4 warmup" side by side and the user
+  corrected it**: warmup spends the daily limit, it does not sit on top of it. A
+  mailbox set to 6 a day sends six emails in total. The total is the headline
+  now, with warmup named as a share of it.
 - Duplicating **First Campaign** produced "First Campaign (copy)": draft, all 7
   sequence steps, all 7 mailboxes, 01:00–24:00 Tue–Fri Asia/Karachi, and
   **0 contacts**. The source was untouched — still active with 56 contacts.
