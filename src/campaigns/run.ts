@@ -7,7 +7,11 @@ import {
   resolveWindow,
   type ResolvedWindow,
 } from "@/campaigns/schedule";
-import { mailboxForContact, type RotationMailbox } from "@/campaigns/rotation";
+import {
+  mailboxForContact,
+  recordSend,
+  type RotationMailbox,
+} from "@/campaigns/rotation";
 import { sendingAllowance } from "@/warmup/plan";
 import { contactVars, renderTemplate } from "@/mail/template";
 import { sendEmail } from "@/mail/send";
@@ -308,6 +312,10 @@ async function processCampaignContact(
   });
 
   if (outcome.ok) {
+    // Write the send back into the pool before the loop picks again, or this
+    // mailbox stays eligible for the rest of the batch and takes every contact.
+    recordSend(mailbox);
+
     const nextStep = steps.find(
       (candidate) => candidate.step_number === stepNumber + 1,
     );

@@ -12,6 +12,8 @@ import {
   isEligible,
   mailboxForContact,
   pickMailbox,
+  recordSend,
+  remainingCapacity,
   type RotationMailbox,
 } from "../src/campaigns/rotation";
 import {
@@ -1375,6 +1377,82 @@ test("duplicate domains are listed worst first", () => {
     { domain: "one.com", count: 3 },
     { domain: "two.com", count: 2 },
   ]);
+});
+
+
+console.log("\none send per mailbox per batch");
+
+const poolBox = (id: string): RotationMailbox => ({
+  id,
+  email: `${id}@example.com`,
+  daily_limit: 50,
+  sent_today: 0,
+  sent_today_date: new Date().toISOString().slice(0, 10),
+  min_gap_seconds: 5400,
+  max_gap_seconds: 7200,
+  last_send_at: null,
+  is_active: true,
+  health_status: "healthy",
+});
+
+test("recordSend makes a mailbox ineligible until its gap elapses", () => {
+  const box = poolBox("a");
+  const now = new Date("2026-08-17T10:00:00Z");
+  assert.equal(isEligible(box, { now }), true);
+
+  recordSend(box, now);
+  assert.equal(isEligible(box, { now }), false);
+});
+
+test("recordSend counts against the daily limit", () => {
+  const box = poolBox("a");
+  const now = new Date("2026-08-17T10:00:00Z");
+  recordSend(box, now);
+  recordSend(box, now);
+  assert.equal(remainingCapacity(box, now), 48);
+});
+
+test("a send on a new day restarts the daily count", () => {
+  const box = poolBox("a");
+  box.sent_today = 40;
+  box.sent_today_date = "2026-08-16";
+  recordSend(box, new Date("2026-08-17T10:00:00Z"));
+  assert.equal(box.sent_today, 1);
+  assert.equal(box.sent_today_date, "2026-08-17");
+});
+
+test("a batch spreads one email per mailbox instead of draining one", () => {
+  // The reported bug: five emails left a single account back to back.
+  const pool = [poolBox("a"), poolBox("b"), poolBox("c")];
+  const now = new Date("2026-08-17T10:00:00Z");
+  const used: string[] = [];
+
+  for (let i = 0; i < 5; i += 1) {
+    const picked = pickMailbox(pool, { now });
+    if (!picked) break;
+    used.push(picked.id);
+    recordSend(picked, now);
+  }
+
+  // Three mailboxes, so three sends and then nothing until the gap elapses.
+  assert.equal(used.length, 3);
+  assert.deepEqual([...used].sort(), ["a", "b", "c"]);
+});
+
+test("without recording the send the same mailbox is chosen every time", () => {
+  // Guards the regression directly: this is the old behaviour.
+  const pool = [poolBox("a"), poolBox("b"), poolBox("c")];
+  const now = new Date("2026-08-17T10:00:00Z");
+  const first = pickMailbox(pool, { now })?.id;
+  const second = pickMailbox(pool, { now })?.id;
+  assert.equal(first, second);
+});
+
+test("once the gap has elapsed the mailbox is usable again", () => {
+  const box = poolBox("a");
+  recordSend(box, new Date("2026-08-17T10:00:00Z"));
+  // max_gap_seconds is 7200, so three hours later is past any drawn gap.
+  assert.equal(isEligible(box, { now: new Date("2026-08-17T13:00:00Z") }), true);
 });
 
 

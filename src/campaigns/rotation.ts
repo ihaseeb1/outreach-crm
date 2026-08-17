@@ -66,6 +66,26 @@ export function isEligible(
   return true;
 }
 
+/**
+ * Records a send against the in-memory pool.
+ *
+ * This is not bookkeeping, it is the thing that stops a batch emptying itself
+ * down one mailbox. The pool is read from the database once per run, so without
+ * writing the send back, `sent_today` and `last_send_at` stay frozen at their
+ * starting values for the whole loop: the mailbox that just sent still looks
+ * both fully rested and completely unused, so pickMailbox chooses it again, and
+ * again. Five emails left one account back to back because of exactly this.
+ *
+ * Mutates in place, because the caller holds references into the same array
+ * that rotation reads from.
+ */
+export function recordSend(mailbox: RotationMailbox, now: Date = new Date()): void {
+  const today = now.toISOString().slice(0, 10);
+  mailbox.sent_today = sentToday(mailbox, now) + 1;
+  mailbox.sent_today_date = today;
+  mailbox.last_send_at = now.toISOString();
+}
+
 export function eligibleMailboxes(
   mailboxes: RotationMailbox[],
   options: EligibilityOptions = {},
