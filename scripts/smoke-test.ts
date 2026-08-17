@@ -19,6 +19,12 @@ import {
 import { copyName } from "../src/campaigns/duplicate";
 import { canStartAnother } from "../src/mail/poll";
 import {
+  canonicalNiche,
+  countFound,
+  parseQuote,
+  stripQuotedReply,
+} from "../src/deals/parse-quote";
+import {
   isWithinSendWindow,
   mailboxIsRested,
   nextSendAt,
@@ -1638,6 +1644,183 @@ test("a mailbox that lands exactly on the budget still starts", () => {
     }),
     true,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Reading a publisher's quote out of their reply
+// ---------------------------------------------------------------------------
+
+const TYPICAL_REPLY = `Hi Haseeb,
+
+Thanks for reaching out. Here is our price list:
+
+General - $150
+Business/Tech - $180
+Health - $250
+Casino, Gambling - $400
+CBD - $350
+
+DA: 45, DR: 52, Traffic: 25k monthly
+Turnaround: 3-5 days
+Do-follow links, maximum 2 links per post
+Article should be minimum 1000 words. You can provide the content.
+Payment via PayPal, 50% advance.
+
+Best,
+Sarah`;
+
+test("a typical rate card yields every niche price", () => {
+  const quote = parseQuote(TYPICAL_REPLY);
+  const prices = Object.fromEntries(quote.prices.map((row) => [row.niche, row.price]));
+
+  assert.equal(prices.General, 150);
+  assert.equal(prices.Business, 180);
+  assert.equal(prices.Health, 250);
+  assert.equal(prices.Casino, 400);
+  assert.equal(prices.CBD, 350);
+  assert.equal(quote.currency, "USD");
+});
+
+test("metrics and terms come off the same reply", () => {
+  const quote = parseQuote(TYPICAL_REPLY);
+
+  assert.equal(quote.da, 45);
+  assert.equal(quote.dr, 52);
+  assert.equal(quote.monthlyTraffic, 25_000);
+  assert.equal(quote.tatDays, 5, "the far end of 3-5 days is the promise");
+  assert.equal(quote.linkType, "dofollow");
+  assert.equal(quote.maxLinks, 2);
+  assert.equal(quote.wordCount, 1000);
+  assert.equal(quote.contentBy, "us");
+  assert.equal(quote.paymentMethod, "PayPal");
+  assert.equal(quote.paymentTerms, "50% advance");
+});
+
+test("every value carries the line it was read from", () => {
+  const quote = parseQuote(TYPICAL_REPLY);
+  assert.match(quote.evidence.da ?? "", /DA: 45/);
+  assert.match(quote.evidence["price:Casino"] ?? "", /Casino/);
+});
+
+test("metrics are never mistaken for prices", () => {
+  const quote = parseQuote(
+    "DA 45\nDR 52\nSpam score 2\n1000 words\n3 days TAT\n2 links max",
+  );
+  assert.deepEqual(quote.prices, []);
+  assert.equal(quote.da, 45);
+  assert.equal(quote.spamScore, 2);
+});
+
+test("prices listed inline on one line are split apart", () => {
+  const quote = parseQuote("Our rates: General $150, Casino $400, CBD $350");
+  assert.equal(quote.prices.length, 3);
+  assert.equal(quote.prices[1]?.niche, "Casino");
+  assert.equal(quote.prices[1]?.price, 400);
+});
+
+test("a comma inside one price does not split that row", () => {
+  const quote = parseQuote("Homepage link - $1,200");
+  assert.equal(quote.prices.length, 1);
+  assert.equal(quote.prices[0]?.price, 1200);
+});
+
+test("a listed pair of niches stays one price", () => {
+  const quote = parseQuote("Casino, Gambling and Betting - $400");
+  assert.equal(quote.prices.length, 1);
+  assert.equal(quote.prices[0]?.niche, "Casino");
+});
+
+test("currencies other than dollars are read", () => {
+  assert.equal(parseQuote("General - £120").currency, "GBP");
+  assert.equal(parseQuote("General - 120 EUR").currency, "EUR");
+  assert.equal(parseQuote("General - INR 8000").prices[0]?.price, 8000);
+});
+
+test("a bare number is a price only in a price-shaped row", () => {
+  assert.equal(parseQuote("General - 150").prices[0]?.price, 150);
+  assert.deepEqual(parseQuote("Turnaround - 3 days").prices, []);
+});
+
+test("hours and weeks become days", () => {
+  assert.equal(parseQuote("Delivery within 48 hours").tatDays, 2);
+  assert.equal(parseQuote("TAT: 2 weeks").tatDays, 14);
+});
+
+test("nofollow is not read as dofollow", () => {
+  assert.equal(parseQuote("All links are no-follow.").linkType, "nofollow");
+});
+
+test("whoever writes the article is worked out from their side of it", () => {
+  assert.equal(parseQuote("We will write the article ourselves.").contentBy, "publisher");
+  assert.equal(parseQuote("You can send us your article.").contentBy, "us");
+  assert.equal(
+    parseQuote("We can write it, or you provide the content — either works.").contentBy,
+    "either",
+  );
+});
+
+test("the quoted email underneath is not parsed as their quote", () => {
+  const quote = parseQuote(`Yes, $200 works for us.
+
+On Mon, 17 Aug 2026 at 10:00, Haseeb wrote:
+> We usually pay $50 for a guest post
+> General - $50`);
+
+  assert.equal(quote.prices.length, 1);
+  assert.equal(quote.prices[0]?.price, 200);
+});
+
+test("quoted lines are dropped but a reply written below one is kept", () => {
+  const stripped = stripQuotedReply("> their old line\nOur price is $300");
+  assert.match(stripped, /Our price is \$300/);
+});
+
+test("an unrecognised niche keeps the publisher's own wording", () => {
+  assert.equal(canonicalNiche("Pet care"), "Pet care");
+  assert.equal(canonicalNiche("iGaming & Sportsbook"), "Casino");
+  assert.equal(canonicalNiche("general business"), "Business");
+});
+
+test("a label naming two niches goes by the publisher's order", () => {
+  assert.equal(canonicalNiche("Business/Tech"), "Business");
+  assert.equal(canonicalNiche("Tech/Business"), "Tech");
+});
+
+test("a restricted niche sets the price wherever it appears in the label", () => {
+  assert.equal(canonicalNiche("SEO for casinos"), "Casino");
+  assert.equal(canonicalNiche("Health and CBD"), "CBD");
+});
+
+test("a sentence carrying a number is not a price row", () => {
+  const quote = parseQuote(
+    "General - £120\nWe can write the content for an extra £40.",
+  );
+  assert.equal(quote.prices.length, 1);
+  assert.equal(quote.prices[0]?.niche, "General");
+});
+
+test("a niche that shares a name with a payment method is not the payment method", () => {
+  const quote = parseQuote(
+    "Crypto & Forex: £400\nGeneral: £120\nPayment: Wise or PayPal, 50% upfront.",
+  );
+  assert.equal(quote.paymentMethod, "Wise");
+  assert.equal(quote.paymentTerms, "50% advance");
+  assert.equal(quote.prices[0]?.niche, "Crypto");
+});
+
+test("crypto is still read as a payment method when they ask to be paid in it", () => {
+  assert.equal(parseQuote("Payment in USDT only.").paymentMethod, "Crypto");
+});
+
+test("an email with no quote in it reports nothing found", () => {
+  const quote = parseQuote("Thanks for your email, I will get back to you next week.");
+  assert.equal(countFound(quote), 0);
+});
+
+test("empty input is safe", () => {
+  const quote = parseQuote("");
+  assert.equal(countFound(quote), 0);
+  assert.deepEqual(quote.prices, []);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

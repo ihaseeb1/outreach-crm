@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
+import { countFound, parseQuote, type ParsedQuote } from "@/deals/parse-quote";
 import type { DealStatus, DealWithPrices } from "@/types/db";
 
 export interface DealFormDefaults {
@@ -59,12 +60,15 @@ export function DealForm({
   existing,
   onSaved,
   compact,
+  quoteSource,
 }: {
   defaults?: DealFormDefaults;
   existing?: DealWithPrices | null;
   /** Receives the API payload, so a caller can report what else happened. */
   onSaved?: (result: DealSaveResult) => void;
   compact?: boolean;
+  /** Their reply, so the rate card can be read off it instead of retyped. */
+  quoteSource?: string | null;
 }) {
   const router = useRouter();
 
@@ -96,6 +100,70 @@ export function DealForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+
+  const [paste, setPaste] = useState("");
+  const [read, setRead] = useState<ParsedQuote | null>(null);
+  const [readNote, setReadNote] = useState<string | null>(null);
+
+  /**
+   * Fills the blanks from their email and leaves anything already typed alone.
+   *
+   * Overwriting is the one thing a shortcut like this must not do: a price
+   * corrected by hand and then silently replaced by the parser is worse than no
+   * parser at all. Everything filled stays editable, and every value is shown
+   * with the line it was read from underneath.
+   */
+  function applyQuote(text: string) {
+    const quote = parseQuote(text);
+    const found = countFound(quote);
+
+    if (found === 0) {
+      setRead(null);
+      setReadNote(
+        "Nothing recognisable in that text — no prices, metrics or terms. Fill the form in by hand.",
+      );
+      return;
+    }
+
+    const fillBlank = (
+      current: string,
+      setter: (value: string) => void,
+      value: string | number | null,
+    ) => {
+      if (value === null || current.trim()) return;
+      setter(String(value));
+    };
+
+    if (quote.currency && !existing) setCurrency(quote.currency);
+
+    // Price rows count as blank while they are still the untouched "General"
+    // placeholder the form opens with.
+    const pricesUntouched = prices.every((row) => !row.price.trim());
+    if (quote.prices.length > 0 && pricesUntouched) {
+      setPrices(quote.prices.map((row) => ({ niche: row.niche, price: String(row.price) })));
+    }
+
+    fillBlank(tat, setTat, quote.tatDays);
+    fillBlank(da, setDa, quote.da);
+    fillBlank(dr, setDr, quote.dr);
+    fillBlank(traffic, setTraffic, quote.monthlyTraffic);
+    fillBlank(spam, setSpam, quote.spamScore);
+    fillBlank(wordCount, setWordCount, quote.wordCount);
+    fillBlank(maxLinks, setMaxLinks, quote.maxLinks);
+    fillBlank(paymentTerms, setPaymentTerms, quote.paymentTerms);
+    fillBlank(paymentMethod, setPaymentMethod, quote.paymentMethod);
+
+    // These three open with a default rather than empty, so "blank" cannot be
+    // the test — an unedited default is replaced by what they actually quoted.
+    if (quote.linkType && linkType === "dofollow") setLinkType(quote.linkType);
+    if (quote.placementType && placement === "guest post") setPlacement(quote.placementType);
+    if (quote.contentBy && contentBy === "us") setContentBy(quote.contentBy);
+
+    setRead(quote);
+    setReadNote(
+      `Read ${found} value${found === 1 ? "" : "s"} from their email. Anything you had already typed was left alone — check the figures below against what they wrote.`,
+    );
+  }
 
   const num = (value: string): number | null => {
     if (!value.trim()) return null;
@@ -159,6 +227,66 @@ export function DealForm({
 
   return (
     <form onSubmit={onSubmit} className="space-y-4">
+      <fieldset className="rounded-md border border-[var(--color-line)] p-4">
+        <legend className="px-1 text-sm font-medium">Fill from their email</legend>
+        <p className="hint">
+          Reads the prices, niches and requirements straight out of what they
+          wrote — rates by niche, DA/DR, traffic, turnaround, link type, word
+          count, payment terms. Blanks only: nothing you have typed is replaced.
+        </p>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {quoteSource && (
+            <button
+              className="btn-secondary px-2.5 py-1.5 text-xs"
+              type="button"
+              onClick={() => applyQuote(quoteSource)}
+            >
+              Read their reply
+            </button>
+          )}
+          <button
+            className="btn-secondary px-2.5 py-1.5 text-xs"
+            type="button"
+            disabled={!paste.trim()}
+            onClick={() => applyQuote(paste)}
+          >
+            Read pasted text
+          </button>
+        </div>
+
+        <textarea
+          className="input mt-2 min-h-20 text-sm"
+          placeholder={
+            quoteSource
+              ? "…or paste a quote from anywhere else — Gmail, WhatsApp, a rate card."
+              : "Paste their email or rate card here."
+          }
+          value={paste}
+          onChange={(e) => setPaste(e.target.value)}
+        />
+
+        {readNote && <p className="hint mt-2">{readNote}</p>}
+
+        {read && Object.keys(read.evidence).length > 0 && (
+          <details className="mt-2">
+            <summary className="hint cursor-pointer select-none">
+              Show what each value was read from
+            </summary>
+            <ul className="mt-2 space-y-1">
+              {Object.entries(read.evidence).map(([field, line]) => (
+                <li key={field} className="text-xs text-[var(--color-muted)]">
+                  <span className="font-medium text-[var(--color-ink)]">
+                    {field.replace(/^price:/, "").replace(/([A-Z])/g, " $1").toLowerCase()}
+                  </span>{" "}
+                  — “{line}”
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </fieldset>
+
       <div className={`grid gap-3 ${compact ? "sm:grid-cols-2" : "sm:grid-cols-3"}`}>
         <div>
           <label className="label" htmlFor="deal-domain">

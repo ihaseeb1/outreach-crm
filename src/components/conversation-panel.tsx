@@ -51,6 +51,15 @@ export function ConversationPanel({
   const [dealNote, setDealNote] = useState<string | null>(null);
   const [fromMailbox, setFromMailbox] = useState(threadMailboxId ?? "");
 
+  // What they wrote, newest first, with our own emails left out — a quote is
+  // read from their words, and the last one they sent is the one that stands.
+  const quoteSource =
+    messages
+      .filter((message) => message.direction === "inbound" && message.body?.trim())
+      .reverse()
+      .map((message) => message.body)
+      .join("\n\n---\n\n") || null;
+
   async function patch(body: Record<string, unknown>) {
     await fetch("/api/conversations", {
       method: "PATCH",
@@ -139,6 +148,7 @@ export function ConversationPanel({
           </p>
           <DealForm
             compact
+            quoteSource={quoteSource}
             defaults={{
               contact_id: contactId,
               conversation_id: conversationId,
