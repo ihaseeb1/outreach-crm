@@ -1,0 +1,59 @@
+name: Cron tick
+
+# Drives every background job: campaign sends, follow-ups, inbox polling,
+# warmup, validation, health checks.
+#
+# Why this exists rather than Vercel's own cron: the Hobby plan only fires once
+# a day. That is not merely slow, it caps throughput. Each mailbox must rest
+# ~2 hours after a send, so a single tick can send at most one email per
+# mailbox — one tick a day means ~7 emails a day regardless of the daily limits
+# configured. Ticking every 10 minutes lets each mailbox work through its own
+# allowance across the sending window.
+#
+# GitHub's scheduled runs are best-effort and can be delayed by several minutes
+# under load; that is fine here because every job is idempotent and simply
+# picks up whatever is due.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  # So it can be fired by hand from the Actions tab without waiting.
+  workflow_dispatch:
+
+# A slow tick must never overlap itself: the batches claim rows with short
+# locks, and piling runs up would just contend for the same work.
+concurrency:
+  group: cron-tick
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Hit the tick endpoint
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "CRON_SECRET repository secret is not set — add it under" \
+                 "Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          response=$(mktemp)
+          code=$(curl -sS -o "$response" -w "%{http_code}" \
+            --max-time 120 \
+            -X POST https://crm.orankly.com/api/cron/tick \
+            -H "Authorization: Bearer $CRON_SECRET")
+
+          echo "HTTP $code"
+          cat "$response"
+          echo
+
+          # A non-200 is surfaced as a failed run so it shows up in the Actions
+          # tab instead of failing silently for weeks.
+          if [ "$code" != "200" ]; then
+            echo "Tick failed with HTTP $code"
+            exit 1
+          fi
