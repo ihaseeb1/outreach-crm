@@ -18,7 +18,7 @@ export async function GET(request: Request) {
 
   const supabase = createSupabaseAdminClient();
   const { polled, results } = await runInboundPoll(supabase, {
-    limit: Number.isFinite(limit) ? Math.min(limit, 10) : 3,
+    limit: Number.isFinite(limit) ? Math.min(limit, 10) : 1,
   });
 
   return jobResponse({

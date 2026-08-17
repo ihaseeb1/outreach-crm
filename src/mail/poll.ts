@@ -11,9 +11,19 @@ import type { Mailbox } from "@/types/db";
  */
 export async function runInboundPoll(
   supabase: SupabaseClient,
-  options: { limit?: number; workspaceId?: string; mailboxId?: string } = {},
-): Promise<{ polled: number; results: PollResult[] }> {
-  const limit = options.limit ?? 3;
+  options: {
+    limit?: number;
+    workspaceId?: string;
+    mailboxId?: string;
+    budgetMs?: number;
+  } = {},
+): Promise<{ polled: number; results: PollResult[]; deferred: number }> {
+  // One mailbox is ~25s of IMAP, and a busy one is more. The default of three
+  // reliably overran the 60s function limit, which threw away the results of
+  // any mailbox already polled in that run.
+  const limit = options.limit ?? 1;
+  const budgetMs = options.budgetMs ?? 40_000;
+  const startedAt = Date.now();
 
   let query = supabase
     .from("mailboxes")
@@ -31,9 +41,17 @@ export async function runInboundPoll(
   const mailboxes = (data ?? []) as Mailbox[];
 
   const results: PollResult[] = [];
+  let deferred = 0;
+
   for (const mailbox of mailboxes) {
+    // Never start another mailbox without room to finish it. Ordering is by
+    // last_polled_at, so whatever is deferred is first in line next run.
+    if (results.length > 0 && Date.now() - startedAt > budgetMs / 2) {
+      deferred = mailboxes.length - results.length;
+      break;
+    }
     results.push(await pollMailbox(supabase, mailbox));
   }
 
-  return { polled: results.length, results };
+  return { polled: results.length, results, deferred };
 }
