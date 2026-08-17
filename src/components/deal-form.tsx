@@ -38,6 +38,17 @@ const STATUSES: DealStatus[] = [
   "rejected",
 ];
 
+/** What POST /api/deals reports back, beyond the row it saved. */
+export interface DealSaveResult {
+  ok: boolean;
+  id: string;
+  stopped_sequences?: number;
+  /** Set when the thread was starred in the real mailbox. */
+  starred?: { folder: string; mailbox: string } | null;
+  /** Set when starring was attempted and could not be done. */
+  star_error?: string | null;
+}
+
 /**
  * The rate card. Everything a publisher quotes in a reply, in one form:
  * per-niche prices, turnaround, link and placement type, manual metrics, content
@@ -51,7 +62,8 @@ export function DealForm({
 }: {
   defaults?: DealFormDefaults;
   existing?: DealWithPrices | null;
-  onSaved?: () => void;
+  /** Receives the API payload, so a caller can report what else happened. */
+  onSaved?: (result: DealSaveResult) => void;
   compact?: boolean;
 }) {
   const router = useRouter();
@@ -137,7 +149,7 @@ export function DealForm({
 
       setSaved(true);
       router.refresh();
-      onSaved?.();
+      onSaved?.(payload as DealSaveResult);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

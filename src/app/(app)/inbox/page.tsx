@@ -13,12 +13,14 @@ export const dynamic = "force-dynamic";
 interface ConversationRow {
   id: string;
   contact_id: string;
+  mailbox_id: string | null;
   subject: string | null;
   last_message_at: string;
   last_direction: "inbound" | "outbound" | null;
   is_read: boolean;
   status: string;
   contacts: { email: string; domain: string | null; first_name: string | null } | null;
+  mailboxes: { email: string } | null;
 }
 
 export default async function InboxPage({
@@ -33,20 +35,64 @@ export default async function InboxPage({
 
   const supabase = await createSupabaseServerClient();
 
-  let listQuery = supabase
-    .from("conversations")
-    .select(
-      "id, contact_id, subject, last_message_at, last_direction, is_read, status, contacts(email, domain, first_name)",
-    )
+  // Only threads somebody has actually written back on.
+  //
+  // A conversation row is created by a database trigger on the first message,
+  // outbound included, so simply listing conversations put every contact we had
+  // merely emailed into the inbox — 56 sent emails read as 56 "conversations"
+  // with nothing in them. Filtering on last_direction would not do either: our
+  // own reply would make a real thread disappear again. So the set of threads
+  // with at least one received message is resolved first, and the list is drawn
+  // from that.
+  const { data: repliedRows } = await supabase
+    .from("messages")
+    .select("conversation_id")
     .eq("workspace_id", session.workspace.id)
-    .order("last_message_at", { ascending: false })
-    .limit(100);
+    .eq("direction", "inbound")
+    .not("conversation_id", "is", null)
+    .order("received_at", { ascending: false, nullsFirst: false })
+    .limit(5_000);
 
-  if (filter === "unread") listQuery = listQuery.eq("is_read", false);
-  else if (filter === "open") listQuery = listQuery.eq("status", "open");
+  const repliedIds = [
+    ...new Set(
+      ((repliedRows ?? []) as { conversation_id: string | null }[])
+        .map((row) => row.conversation_id)
+        .filter((id): id is string => Boolean(id)),
+    ),
+  ].slice(0, 500);
 
-  const { data: listData } = await listQuery;
-  const conversations = (listData ?? []) as unknown as ConversationRow[];
+  const conversationColumns =
+    "id, contact_id, mailbox_id, subject, last_message_at, last_direction, is_read, status, contacts(email, domain, first_name), mailboxes(email)";
+
+  let conversations: ConversationRow[] = [];
+
+  if (repliedIds.length > 0) {
+    let listQuery = supabase
+      .from("conversations")
+      .select(conversationColumns)
+      .eq("workspace_id", session.workspace.id)
+      .in("id", repliedIds)
+      .order("last_message_at", { ascending: false })
+      .limit(100);
+
+    if (filter === "unread") listQuery = listQuery.eq("is_read", false);
+    else if (filter === "open") listQuery = listQuery.eq("status", "open");
+
+    const { data: listData } = await listQuery;
+    conversations = (listData ?? []) as unknown as ConversationRow[];
+  }
+
+  // Counted across every replied thread, not just the ones this filter shows —
+  // an unread badge that empties when you switch tabs is worse than none.
+  const { count: unreadTotal } =
+    repliedIds.length > 0
+      ? await supabase
+          .from("conversations")
+          .select("id", { count: "exact", head: true })
+          .eq("workspace_id", session.workspace.id)
+          .in("id", repliedIds)
+          .eq("is_read", false)
+      : { count: 0 };
 
   const selected =
     conversations.find((row) => row.id === selectedId) ??
@@ -54,9 +100,7 @@ export default async function InboxPage({
       ? (((
           await supabase
             .from("conversations")
-            .select(
-              "id, contact_id, subject, last_message_at, last_direction, is_read, status, contacts(email, domain, first_name)",
-            )
+            .select(conversationColumns)
             .eq("id", selectedId)
             .eq("workspace_id", session.workspace.id)
             .maybeSingle()
@@ -65,6 +109,18 @@ export default async function InboxPage({
 
   let messages: ThreadMessage[] = [];
   let hasDeal = false;
+
+  // Every mailbox that could send a reply, so the thread can be answered from a
+  // different address when the original one is paused or at its limit.
+  const { data: mailboxRows } = await supabase
+    .from("mailboxes")
+    .select("id, email")
+    .eq("workspace_id", session.workspace.id)
+    .eq("is_active", true)
+    .neq("health_status", "paused")
+    .order("created_at", { ascending: true });
+
+  const mailboxes = (mailboxRows ?? []) as { id: string; email: string }[];
 
   if (selected) {
     const [{ data: messageRows }, { count: dealCount }] = await Promise.all([
@@ -93,7 +149,7 @@ export default async function InboxPage({
     }
   }
 
-  const unreadCount = conversations.filter((row) => !row.is_read).length;
+  const unreadCount = unreadTotal ?? 0;
 
   return (
     <div className="space-y-6">
@@ -101,8 +157,8 @@ export default async function InboxPage({
         <div>
           <h1 className="text-2xl font-semibold">Inbox</h1>
           <p className="hint mt-1">
-            Real replies from every mailbox in one place. Warmup mail, bounces and
-            autoresponders never appear here.
+            Only threads someone has replied to. Emails you have merely sent stay
+            out of here, as do warmup mail, bounces and autoresponders.
           </p>
         </div>
         <RunJobButton job="inbound" label="Check for new replies" limit={5} />
@@ -132,7 +188,9 @@ export default async function InboxPage({
         <aside className="card max-h-[70vh] overflow-y-auto">
           {conversations.length === 0 ? (
             <p className="px-4 py-6 text-sm text-[var(--color-muted)]">
-              No conversations yet. Replies land here once a prospect writes back.
+              {filter === "open"
+                ? "Nothing waiting. A thread appears here the moment somebody replies, and comes back if they reply again after you mark it done."
+                : "No replies yet. Sent emails do not appear here — only threads a prospect has written back on."}
             </p>
           ) : (
             <ul>
@@ -159,9 +217,12 @@ export default async function InboxPage({
                     <p className="truncate text-xs text-[var(--color-muted)]">
                       {row.subject ?? "(no subject)"}
                     </p>
-                    <p className="hint">
+                    <p className="hint truncate">
                       {new Date(row.last_message_at).toLocaleString()}
-                      {row.status === "closed" && " · closed"}
+                      {/* Which of the seven mailboxes this landed in — the whole
+                          point of a shared inbox is not having to guess. */}
+                      {row.mailboxes?.email && ` · ${row.mailboxes.email}`}
+                      {row.status === "closed" && " · done"}
                     </p>
                   </Link>
                 </li>
@@ -183,12 +244,22 @@ export default async function InboxPage({
                   {selected.contacts?.domain ?? "—"} ·{" "}
                   {selected.subject ?? "(no subject)"}
                 </p>
+                <p className="hint mt-1">
+                  Received by{" "}
+                  <strong className="text-[var(--color-ink)]">
+                    {selected.mailboxes?.email ?? "an unknown mailbox"}
+                  </strong>
+                  {selected.status === "closed" && " · marked done"}
+                </p>
               </div>
 
               <ConversationPanel
                 conversationId={selected.id}
                 contactId={selected.contact_id}
                 contactEmail={selected.contacts?.email ?? ""}
+                threadMailboxId={selected.mailbox_id}
+                threadMailboxEmail={selected.mailboxes?.email ?? null}
+                mailboxes={mailboxes}
                 domain={selected.contacts?.domain ?? ""}
                 isRead
                 status={selected.status}

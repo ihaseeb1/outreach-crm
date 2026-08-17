@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-import { DealForm } from "@/components/deal-form";
+import { DealForm, type DealSaveResult } from "@/components/deal-form";
 
 export interface ThreadMessage {
   id: string;
@@ -25,6 +25,9 @@ export function ConversationPanel({
   status,
   messages,
   hasDeal,
+  threadMailboxId,
+  threadMailboxEmail,
+  mailboxes,
 }: {
   conversationId: string;
   contactId: string;
@@ -34,6 +37,10 @@ export function ConversationPanel({
   status: string;
   messages: ThreadMessage[];
   hasDeal: boolean;
+  /** The mailbox this thread belongs to; replies default to it. */
+  threadMailboxId: string | null;
+  threadMailboxEmail: string | null;
+  mailboxes: { id: string; email: string }[];
 }) {
   const router = useRouter();
   const [reply, setReply] = useState("");
@@ -41,6 +48,8 @@ export function ConversationPanel({
   const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
   const [showDeal, setShowDeal] = useState(false);
+  const [dealNote, setDealNote] = useState<string | null>(null);
+  const [fromMailbox, setFromMailbox] = useState(threadMailboxId ?? "");
 
   async function patch(body: Record<string, unknown>) {
     await fetch("/api/conversations", {
@@ -61,7 +70,14 @@ export function ConversationPanel({
       const response = await fetch("/api/conversations/reply", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ conversation_id: conversationId, body: reply }),
+        body: JSON.stringify({
+          conversation_id: conversationId,
+          body: reply,
+          // Omitted when it is the thread's own mailbox, so the server keeps
+          // its existing behaviour rather than being told what it already knows.
+          mailbox_id:
+            fromMailbox && fromMailbox !== threadMailboxId ? fromMailbox : undefined,
+        }),
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error ?? "Could not send.");
@@ -90,7 +106,7 @@ export function ConversationPanel({
           type="button"
           onClick={() => patch({ status: status === "closed" ? "open" : "closed" })}
         >
-          {status === "closed" ? "Reopen" : "Close"}
+          {status === "closed" ? "Move back to Open" : "Mark done"}
         </button>
         <button
           className="btn-primary px-2.5 py-1.5 text-xs"
@@ -101,9 +117,26 @@ export function ConversationPanel({
         </button>
       </div>
 
+      <p className="hint">
+        {status === "closed"
+          ? "Marked done, so it is hidden from Open. A new reply brings it back on its own."
+          : "“Mark done” only hides the thread from the Open tab — nothing is deleted, and a new reply reopens it automatically."}
+      </p>
+
+      {dealNote && (
+        <p className="rounded-md bg-[var(--color-canvas)] px-3 py-2 text-xs text-[var(--color-muted)]">
+          {dealNote}
+        </p>
+      )}
+
       {showDeal && (
         <div className="card card-pad">
           <h3 className="mb-3 text-sm font-semibold">Rate card</h3>
+          <p className="hint mb-3">
+            Saving also stars this thread in{" "}
+            {threadMailboxEmail ?? "the mailbox that received it"}, so the deal is
+            findable from Gmail as well as from here.
+          </p>
           <DealForm
             compact
             defaults={{
@@ -111,7 +144,16 @@ export function ConversationPanel({
               conversation_id: conversationId,
               domain,
             }}
-            onSaved={() => setShowDeal(false)}
+            onSaved={(result: DealSaveResult) => {
+              setShowDeal(false);
+              setDealNote(
+                result.starred
+                  ? `Deal saved and the thread starred in ${result.starred.mailbox}.`
+                  : `Deal saved. The thread was not starred: ${
+                      result.star_error ?? "no mailbox copy found"
+                    }.`,
+              );
+            }}
           />
         </div>
       )}
@@ -147,6 +189,40 @@ export function ConversationPanel({
       </div>
 
       <form onSubmit={send} className="card card-pad space-y-3">
+        <div>
+          <label className="label" htmlFor="reply-from">
+            Reply from
+          </label>
+          <select
+            id="reply-from"
+            className="input"
+            value={fromMailbox}
+            onChange={(e) => setFromMailbox(e.target.value)}
+          >
+            {/* The thread's own mailbox may be paused or missing from the active
+                list, so it is offered explicitly rather than silently dropped. */}
+            {threadMailboxId &&
+              !mailboxes.some((mailbox) => mailbox.id === threadMailboxId) && (
+                <option value={threadMailboxId}>
+                  {threadMailboxEmail ?? "This thread's mailbox"} (received here)
+                </option>
+              )}
+            {mailboxes.map((mailbox) => (
+              <option key={mailbox.id} value={mailbox.id}>
+                {mailbox.email}
+                {mailbox.id === threadMailboxId ? " (received here)" : ""}
+              </option>
+            ))}
+          </select>
+          {fromMailbox && fromMailbox !== threadMailboxId && (
+            <p className="hint mt-1 text-[var(--color-warn)]">
+              Replying from a different address than the one they wrote to. It
+              still threads, but the reply arrives from a name they have not seen
+              before — worth a line explaining why.
+            </p>
+          )}
+        </div>
+
         <label className="label" htmlFor="reply-body">
           Reply
         </label>
@@ -165,8 +241,8 @@ export function ConversationPanel({
           {error && <span className="text-sm text-[var(--color-danger)]">{error}</span>}
         </div>
         <p className="hint">
-          Sent from the mailbox that owns this thread, so it threads properly for
-          the recipient.
+          Threaded under the last message either way, so it lands in the same
+          conversation the recipient already has.
         </p>
       </form>
     </div>

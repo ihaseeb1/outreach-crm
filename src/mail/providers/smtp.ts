@@ -244,6 +244,56 @@ export class SmtpProvider implements MailboxProvider {
     }
   }
 
+  /**
+   * Finds one message by Message-ID and flags it.
+   *
+   * Gmail's "All Mail" is searched as well as the inbox: starring has to work on
+   * a thread the user has already archived, and on Gmail a message is only ever
+   * in one place as far as IMAP is concerned. The \All special-use folder is
+   * resolved from the server rather than hardcoded as "[Gmail]/All Mail",
+   * because that name is localised.
+   */
+  async flagByMessageId(messageId: string, flags: string[]): Promise<string | null> {
+    if (!messageId) return null;
+
+    const client = await this.imapClient();
+    await client.connect();
+
+    try {
+      const folders = await client.list().catch(() => []);
+      const allMail = folders.find((folder) => folder.specialUse === "\\All");
+
+      const candidates = ["INBOX", allMail?.path].filter(
+        (path): path is string => Boolean(path),
+      );
+
+      for (const folder of candidates) {
+        const lock = await client.getMailboxLock(folder).catch(() => null);
+        if (!lock) continue;
+
+        try {
+          // imapflow normalises the angle brackets, so both forms match.
+          const uids = await client.search(
+            { header: { "message-id": messageId } },
+            { uid: true },
+          );
+          if (uids && uids.length > 0) {
+            await client.messageFlagsAdd(uids, flags, { uid: true });
+            return folder;
+          }
+        } catch {
+          // A folder that cannot be searched is skipped, not fatal.
+        } finally {
+          lock.release();
+        }
+      }
+
+      return null;
+    } finally {
+      await client.logout().catch(() => undefined);
+    }
+  }
+
   async addFlags(folder: string, uids: number[], flags: string[]): Promise<void> {
     if (uids.length === 0) return;
     await this.withFolder(folder, async (client) => {

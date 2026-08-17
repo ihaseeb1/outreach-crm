@@ -6,6 +6,7 @@ import { logActivity } from "@/lib/activity";
 import { safeEqual } from "@/lib/crypto";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { starConversationInMailbox, type StarOutcome } from "@/mail/star";
 import { getSession } from "@/lib/workspace";
 import { toApiShape } from "@/deals/export";
 import { contactEmailMap, loadDeals, parseDealFilters } from "@/deals/query";
@@ -173,6 +174,35 @@ export async function POST(request: Request) {
     meta: { domain: payload.domain, status: fields.status, prices: cleanPrices.length },
   });
 
+  // Logging a deal should leave a mark where the user actually reads mail, so
+  // the thread is starred in the mailbox it arrived in. The admin client is
+  // required: encrypted_credentials is revoked from the authenticated role, and
+  // opening the mailbox needs them.
+  //
+  // Best-effort — the deal is already saved, and a slow or offline mailbox must
+  // not turn a successful save into an error. The outcome is reported back so
+  // the form can say what happened instead of pretending it worked.
+  let starred: StarOutcome | null = null;
+  const conversationId =
+    fields.conversation_id ??
+    (fields.contact_id
+      ? ((
+          await supabase
+            .from("conversations")
+            .select("id")
+            .eq("contact_id", fields.contact_id)
+            .eq("workspace_id", session.workspace.id)
+            .maybeSingle()
+        ).data as { id: string } | null)?.id ?? null
+      : null);
+
+  if (conversationId) {
+    starred = await starConversationInMailbox(createSupabaseAdminClient(), {
+      workspaceId: session.workspace.id,
+      conversationId,
+    });
+  }
+
   // Closing a deal has to stop the follow-ups, otherwise the sequence keeps
   // chasing somebody you have already agreed terms with.
   const stop = fields.contact_id ? dealStatusStops(fields.status) : null;
@@ -190,7 +220,13 @@ export async function POST(request: Request) {
     stoppedSequences = outcome.stopped;
   }
 
-  return NextResponse.json({ ok: true, id: dealId, stopped_sequences: stoppedSequences });
+  return NextResponse.json({
+    ok: true,
+    id: dealId,
+    stopped_sequences: stoppedSequences,
+    starred: starred?.ok ? { folder: starred.folder, mailbox: starred.email } : null,
+    star_error: starred && !starred.ok ? starred.reason : null,
+  });
 }
 
 export async function DELETE(request: Request) {

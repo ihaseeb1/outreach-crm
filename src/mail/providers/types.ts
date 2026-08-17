@@ -81,6 +81,16 @@ export interface MailboxProvider {
   /** Messages in `folder` that carry the given header. */
   findByHeader(folder: string, header: string): Promise<FolderMessageRef[]>;
   addFlags(folder: string, uids: number[], flags: string[]): Promise<void>;
+  /**
+   * Flags one message by its RFC 5322 Message-ID, wherever it happens to live.
+   *
+   * Used to star a conversation in the real mailbox when a deal is logged here.
+   * Which folder a message sits in is not knowable from our side — Gmail files
+   * a reply under INBOX, but a user may have archived it — so the lookup walks
+   * the likely folders rather than assuming one. Returns the folder it flagged,
+   * or null if the message was not found.
+   */
+  flagByMessageId(messageId: string, flags: string[]): Promise<string | null>;
   /** Returns how many messages were moved. */
   moveMessages(folder: string, uids: number[], destination: string): Promise<number>;
 
