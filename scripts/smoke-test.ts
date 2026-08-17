@@ -16,6 +16,7 @@ import {
   remainingCapacity,
   type RotationMailbox,
 } from "../src/campaigns/rotation";
+import { copyName } from "../src/campaigns/duplicate";
 import {
   isWithinSendWindow,
   mailboxIsRested,
@@ -1545,6 +1546,45 @@ test("a future timestamp counts as just-sent rather than vanishing", () => {
 test("per-day average keeps one decimal", () => {
   assert.equal(perDay(3, 7), "0.4");
   assert.equal(perDay(0, 30), "0.0");
+});
+
+console.log("\ncampaign duplication");
+
+test("the first copy is suffixed", () => {
+  assert.equal(copyName("Outreach", ["Outreach"]), "Outreach (copy)");
+});
+
+test("a second copy is numbered instead of stacking suffixes", () => {
+  assert.equal(
+    copyName("Outreach", ["Outreach", "Outreach (copy)"]),
+    "Outreach (copy 2)",
+  );
+});
+
+test("duplicating a copy goes back to the root name", () => {
+  assert.equal(
+    copyName("Outreach (copy)", ["Outreach", "Outreach (copy)"]),
+    "Outreach (copy 2)",
+  );
+  assert.equal(
+    copyName("Outreach (copy 2)", ["Outreach", "Outreach (copy)", "Outreach (copy 2)"]),
+    "Outreach (copy 3)",
+  );
+});
+
+test("existing names are matched case-insensitively", () => {
+  assert.equal(copyName("Outreach", ["outreach (COPY)"]), "Outreach (copy 2)");
+});
+
+test("a long name loses its tail, not its suffix", () => {
+  const long = "x".repeat(200);
+  const name = copyName(long, []);
+  assert.ok(name.length <= 160);
+  assert.ok(name.endsWith(" (copy)"));
+});
+
+test("an empty name still produces something selectable", () => {
+  assert.equal(copyName("   ", []), "Campaign (copy)");
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

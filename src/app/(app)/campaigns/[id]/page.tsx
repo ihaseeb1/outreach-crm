@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { CampaignControls } from "@/components/campaign-controls";
+import { CampaignDuplicateButton } from "@/components/campaign-duplicate-button";
 import { CampaignEnrollForm } from "@/components/campaign-enroll-form";
 import { SequenceEditor, type EditableStep } from "@/components/sequence-editor";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -101,11 +102,14 @@ export default async function CampaignDetailPage({
 
   return (
     <div className="space-y-6">
-      <div>
-        <Link className="hint hover:underline" href="/campaigns">
-          ← Campaigns
-        </Link>
-        <h1 className="mt-1 text-2xl font-semibold">{campaign.name}</h1>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <Link className="hint hover:underline" href="/campaigns">
+            ← Campaigns
+          </Link>
+          <h1 className="mt-1 text-2xl font-semibold">{campaign.name}</h1>
+        </div>
+        <CampaignDuplicateButton campaignId={campaign.id} />
       </div>
 
       <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
