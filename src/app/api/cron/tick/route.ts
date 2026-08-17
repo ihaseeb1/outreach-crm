@@ -72,14 +72,17 @@ export async function GET(request: Request) {
   // worse than a follow-up occasionally going out in the ten minutes before a
   // reply is noticed, especially as follow-up steps are days apart.
   //
-  // One mailbox per inbound tick. Seven mailboxes at ten-minute ticks means each
-  // is polled roughly hourly, which is ample for reply detection and leaves room
-  // for everything else.
+  // Two mailboxes per inbound tick, polled at the same time rather than one
+  // after the other, so the step still fits its 22s slice. The parallel
+  // per-job endpoints are the real poller; this single-call fallback stays
+  // deliberately small.
   await step("suppressionSync", 3_000, () =>
     syncSuppressedCampaignContacts(supabase, { limit: 200 }),
   );
   await step("campaigns", 12_000, () => runCampaignBatch(supabase, { limit: 10 }));
-  await step("inbound", 22_000, () => runInboundPoll(supabase, { limit: 1 }));
+  await step("inbound", 22_000, () =>
+    runInboundPoll(supabase, { limit: 2, concurrency: 2, budgetMs: 20_000 }),
+  );
   await step("warmup", 15_000, () => runWarmupBatch(supabase, { sendLimit: 3 }));
   // Skips any mailbox already checked today, so calling it every tick is cheap.
   await step("health", 8_000, () => runHealthChecks(supabase, { limit: 3 }));

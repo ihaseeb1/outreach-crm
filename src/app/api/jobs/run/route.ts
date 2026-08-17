@@ -6,7 +6,7 @@ import { getSession } from "@/lib/workspace";
 import { runCampaignBatch } from "@/campaigns/run";
 import { syncSuppressedCampaignContacts } from "@/campaigns/enroll";
 import { runHealthChecks } from "@/health/run";
-import { runInboundPoll } from "@/mail/poll";
+import { runInboundPoll, summarisePoll } from "@/mail/poll";
 import { runScrapeBatch } from "@/scraper/run";
 import { runWarmupBatch } from "@/warmup/engine";
 import { runValidationBatch } from "@/validation/run";
@@ -20,6 +20,8 @@ const bodySchema = z.object({
   limit: z.number().int().positive().max(200).optional(),
   /** Campaigns only: send now even though the clock is outside the window. */
   ignoreWindow: z.boolean().optional(),
+  /** Inbound only: re-read this many UIDs below each mailbox's checkpoint. */
+  rescan: z.number().int().min(0).max(500).optional(),
 });
 
 /**
@@ -49,19 +51,36 @@ export async function POST(request: Request) {
   }
 
   if (parsed.data.job === "inbound") {
-    const { polled, results } = await runInboundPoll(supabase, {
+    const rescan = parsed.data.rescan ?? 0;
+
+    // "Check for new replies" means every connected account, not the one that
+    // happens to be least recently polled. Someone pressing this button is
+    // waiting on a specific reply and has no way to know which mailbox it
+    // landed in.
+    const { polled, results, deferred } = await runInboundPoll(supabase, {
       workspaceId,
-      limit: Math.min(parsed.data.limit ?? 5, 10),
+      limit: Math.min(parsed.data.limit ?? 20, 20),
+      // Every mailbox at once, in a single round. IMAP is waiting, not working,
+      // so eight accounts in parallel take about as long as one — and a second
+      // round is what would not fit under the 60s ceiling.
+      concurrency: 8,
+      budgetMs: rescan > 0 ? 48_000 : 40_000,
+      // A rescan reads far more per mailbox, so it gets a longer leash each and
+      // still only one round.
+      mailboxTimeoutMs: rescan > 0 ? 40_000 : 25_000,
+      rescanUids: rescan,
+      // It walks back over mail that is already stored, so it needs a deeper
+      // fetch to reach anything new sitting behind it.
+      fetchLimit: rescan > 0 ? Math.min(rescan, 60) : undefined,
     });
+
     return NextResponse.json({
       ok: true,
       job: "inbound",
       polled,
-      replies: results.reduce((sum, r) => sum + r.replies, 0),
-      bounces: results.reduce((sum, r) => sum + r.bounces, 0),
-      warmup: results.reduce((sum, r) => sum + r.warmup, 0),
-      ignored: results.reduce((sum, r) => sum + r.ignored, 0),
-      errors: results.filter((r) => r.error).map((r) => r.error),
+      deferred,
+      rescan,
+      ...summarisePoll(results),
     });
   }
 

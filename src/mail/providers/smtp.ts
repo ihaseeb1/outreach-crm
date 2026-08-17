@@ -135,6 +135,12 @@ export class SmtpProvider implements MailboxProvider {
       auth: await this.imapAuth(),
       logger: false,
       emitLogs: false,
+      // Without these a stalled connection waits on the OS socket timeout —
+      // minutes — which is far longer than the function is allowed to live, so
+      // the whole run dies with it and reports nothing.
+      connectionTimeout: 15_000,
+      greetingTimeout: 15_000,
+      socketTimeout: 30_000,
     });
   }
 

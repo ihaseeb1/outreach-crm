@@ -161,7 +161,21 @@ export default async function InboxPage({
             out of here, as do warmup mail, bounces and autoresponders.
           </p>
         </div>
-        <RunJobButton job="inbound" label="Check for new replies" limit={5} />
+        <div className="flex flex-col items-end gap-1">
+          <RunJobButton job="inbound" label="Check for new replies" limit={20} />
+          {/* Recovery, not routine. Inbound mail is read from a per-mailbox UID
+              checkpoint, so anything fetched during the spell when replies could
+              not be saved sits behind that mark and no ordinary poll will ever
+              reach it again. This re-reads the last 200 UIDs; already-saved mail
+              is skipped, so pressing it twice costs nothing but time. */}
+          <RunJobButton
+            job="inbound"
+            label="Rescan recent mail"
+            limit={20}
+            extra={{ rescan: 200 }}
+            variant="ghost"
+          />
+        </div>
       </div>
 
       <div className="flex flex-wrap gap-2">

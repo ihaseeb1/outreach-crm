@@ -23,7 +23,12 @@ interface TimelineMessage {
   body: string | null;
   status: string;
   is_bounce: boolean;
+  is_auto_reply: boolean;
+  from_email: string | null;
+  to_email: string | null;
   created_at: string;
+  /** Which of our own accounts sent it, or took delivery of it. */
+  mailboxes: { email: string } | null;
 }
 
 export default async function ContactPage({
@@ -62,7 +67,9 @@ export default async function ContactPage({
       .order("position", { ascending: true }),
     supabase
       .from("messages")
-      .select("id, direction, subject, body, status, is_bounce, created_at")
+      .select(
+        "id, direction, subject, body, status, is_bounce, is_auto_reply, from_email, to_email, created_at, mailboxes(email)",
+      )
       .eq("contact_id", id)
       .order("created_at", { ascending: false })
       .limit(50),
@@ -89,7 +96,7 @@ export default async function ContactPage({
       .limit(20),
     supabase
       .from("conversations")
-      .select("id")
+      .select("id, mailboxes(email)")
       .eq("contact_id", id)
       .maybeSingle(),
     supabase
@@ -100,12 +107,34 @@ export default async function ContactPage({
   ]);
 
   const stages = (stageRows ?? []) as Pick<PipelineStage, "key" | "label">[];
-  const messages = (messageRows ?? []) as TimelineMessage[];
+  const messages = (messageRows ?? []) as unknown as TimelineMessage[];
   const deals = (dealRows ?? []) as unknown as DealWithPrices[];
   const notes = (noteRows ?? []) as Note[];
   const tasks = (taskRows ?? []) as Task[];
   const activity = (activityRows ?? []) as ActivityLogEntry[];
-  const conversationId = (conversationRow as { id: string } | null)?.id ?? null;
+  const conversation = conversationRow as unknown as {
+    id: string;
+    mailboxes: { email: string } | null;
+  } | null;
+  const conversationId = conversation?.id ?? null;
+
+  // Which account is handling this contact, and which one their reply came into.
+  //
+  // "Replied" on the pipeline is useless without it: with several mailboxes in
+  // rotation there is no way to guess which Gmail to open, and no reason the
+  // answer should have to be guessed at all — every message records its mailbox.
+  const inboundMessages = messages.filter(
+    (message) => message.direction === "inbound" && !message.is_bounce,
+  );
+  const replyMailbox =
+    inboundMessages.find((message) => message.mailboxes?.email)?.mailboxes?.email ??
+    null;
+  const outreachMailbox =
+    messages.find(
+      (message) => message.direction === "outbound" && message.mailboxes?.email,
+    )?.mailboxes?.email ?? null;
+  const threadMailbox =
+    replyMailbox ?? conversation?.mailboxes?.email ?? outreachMailbox;
   const enrolments = (campaignRows ?? []) as unknown as {
     id: string;
     status: string;
@@ -169,6 +198,33 @@ export default async function ContactPage({
         />
         <Fact label="Added" value={new Date(contact.created_at).toLocaleDateString()} />
       </div>
+
+      {threadMailbox && (
+        <section className="card card-pad">
+          <h2 className="text-sm font-semibold">Your mailbox for this contact</h2>
+          <p className="mt-1 text-sm">
+            {replyMailbox ? (
+              <>
+                They replied to{" "}
+                <strong className="text-[var(--color-ink)]">{replyMailbox}</strong>
+                {" — open that account to see it in Gmail."}
+              </>
+            ) : (
+              <>
+                Emailed from{" "}
+                <strong className="text-[var(--color-ink)]">{threadMailbox}</strong>
+                . No reply received yet.
+              </>
+            )}
+          </p>
+          {replyMailbox && outreachMailbox && outreachMailbox !== replyMailbox && (
+            <p className="hint mt-1">
+              Outreach went out from {outreachMailbox}, so the reply was
+              forwarded or sent on to another of your accounts.
+            </p>
+          )}
+        </section>
+      )}
 
       {enrolments.length > 0 && (
         <section className="card card-pad space-y-2">
@@ -244,12 +300,24 @@ export default async function ContactPage({
                   <span className="text-sm font-medium">
                     {message.direction === "inbound" ? "Received" : "Sent"}
                     {message.is_bounce && " (bounce)"}
+                    {message.is_auto_reply && " (auto-reply)"}
                     {message.status === "failed" && " (failed)"}
                   </span>
                   <span className="hint">
                     {new Date(message.created_at).toLocaleString()}
                   </span>
                 </div>
+                {/* Named per message, not just once at the top: rotation means
+                    a sequence can legitimately run across two accounts. */}
+                <p className="hint">
+                  {message.direction === "inbound"
+                    ? `${message.from_email ?? "them"} → ${
+                        message.mailboxes?.email ?? message.to_email ?? "your mailbox"
+                      }`
+                    : `${
+                        message.mailboxes?.email ?? message.from_email ?? "your mailbox"
+                      } → ${message.to_email ?? contact.email}`}
+                </p>
                 <p className="text-sm">{message.subject ?? "(no subject)"}</p>
                 {message.body && (
                   <p className="hint mt-1 line-clamp-2">

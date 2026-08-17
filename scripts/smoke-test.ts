@@ -17,6 +17,7 @@ import {
   type RotationMailbox,
 } from "../src/campaigns/rotation";
 import { copyName } from "../src/campaigns/duplicate";
+import { canStartAnother } from "../src/mail/poll";
 import {
   isWithinSendWindow,
   mailboxIsRested,
@@ -1585,6 +1586,58 @@ test("a long name loses its tail, not its suffix", () => {
 
 test("an empty name still produces something selectable", () => {
   assert.equal(copyName("   ", []), "Campaign (copy)");
+});
+
+// ---------------------------------------------------------------------------
+// Inbound poll scheduling
+// ---------------------------------------------------------------------------
+
+test("the first mailbox is always polled, however tight the budget", () => {
+  assert.equal(
+    canStartAnother({
+      startedCount: 0,
+      elapsedMs: 0,
+      budgetMs: 1_000,
+      estimateMs: 25_000,
+    }),
+    true,
+  );
+});
+
+test("another mailbox starts while there is room to finish it", () => {
+  assert.equal(
+    canStartAnother({
+      startedCount: 2,
+      elapsedMs: 10_000,
+      budgetMs: 45_000,
+      estimateMs: 12_000,
+    }),
+    true,
+  );
+});
+
+test("no mailbox is started that the budget cannot finish", () => {
+  assert.equal(
+    canStartAnother({
+      startedCount: 4,
+      elapsedMs: 26_000,
+      budgetMs: 45_000,
+      estimateMs: 25_000,
+    }),
+    false,
+  );
+});
+
+test("a mailbox that lands exactly on the budget still starts", () => {
+  assert.equal(
+    canStartAnother({
+      startedCount: 1,
+      elapsedMs: 20_000,
+      budgetMs: 45_000,
+      estimateMs: 25_000,
+    }),
+    true,
+  );
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
