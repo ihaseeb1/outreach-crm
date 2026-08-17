@@ -1812,6 +1812,63 @@ test("crypto is still read as a payment method when they ask to be paid in it", 
   assert.equal(parseQuote("Payment in USDT only.").paymentMethod, "Crypto");
 });
 
+// A real reply from a bulk publisher, which looks nothing like a tidy rate
+// card: a list of domains, then products and niches mixed in one column.
+const BULK_REPLY = `Hello Below are the discounted prices of guest post for
+
+||* charfen.co.uk [charfen.co.uk], ||* postplace.co.uk [postplace.co.uk], ||* okayuj.co.uk [okayuj.co.uk],
+
+General 100
+CBD 200
+Adult 250
+30 Days Footer Text Link 30
+30 Days Banner 50
+Link insertion 150
+
+Let me know if you are interested.`;
+
+test("a price list with no separators and no currency is read", () => {
+  const prices = Object.fromEntries(
+    parseQuote(BULK_REPLY).prices.map((row) => [row.niche, row.price]),
+  );
+
+  assert.equal(prices.General, 100);
+  assert.equal(prices.CBD, 200);
+  assert.equal(prices.Adult, 250);
+  assert.equal(prices["Link insertion"], 150);
+});
+
+test("a product whose name starts with a number keeps it", () => {
+  const prices = Object.fromEntries(
+    parseQuote(BULK_REPLY).prices.map((row) => [row.niche, row.price]),
+  );
+
+  assert.equal(prices["30 Days Footer Text Link"], 30);
+  assert.equal(prices["30 Days Banner"], 50);
+});
+
+test("the placement is the one they lead with, not a line item further down", () => {
+  // "prices of guest post" opens the email; a link insertion is one row in it.
+  assert.equal(parseQuote(BULK_REPLY).placementType, "guest post");
+});
+
+test("the same list with dashes reads identically", () => {
+  const dashed = parseQuote(BULK_REPLY.replace(/^(\D[^\n]*?) (\d+)$/gm, "$1 - $2"));
+  const prices = Object.fromEntries(dashed.prices.map((row) => [row.niche, row.price]));
+
+  assert.equal(prices.General, 100);
+  assert.equal(prices["Link insertion"], 150);
+});
+
+test("a metric label is never a price, even with the separator optional", () => {
+  const quote = parseQuote(
+    "DA 45\nDR 52\nSpam score 2\nTraffic 40000\nWord count 1000\nMax links 2",
+  );
+  assert.deepEqual(quote.prices, []);
+  assert.equal(quote.monthlyTraffic, 40_000);
+  assert.equal(quote.wordCount, 1000);
+});
+
 test("an email with no quote in it reports nothing found", () => {
   const quote = parseQuote("Thanks for your email, I will get back to you next week.");
   assert.equal(countFound(quote), 0);

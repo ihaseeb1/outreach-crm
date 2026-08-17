@@ -74,6 +74,14 @@ export interface MailboxProvider {
   verify(): Promise<VerifyResult>;
   send(message: OutboundMessage): Promise<SendResult>;
   fetchInbound(options?: FetchInboundOptions): Promise<InboundMessage[]>;
+  /**
+   * Messages the user has starred, newest first.
+   *
+   * Starring in Gmail is the one signal a person gives by hand that says "this
+   * reply matters" — it is how the good publisher quotes get marked, and it
+   * costs no extra scope, being the IMAP `\Flagged` flag.
+   */
+  fetchFlagged(options?: { limit?: number }): Promise<InboundMessage[]>;
 
   // --- Folder operations, used by warmup engagement -------------------
   /** The provider's spam folder (\Junk special-use), if it has one. */

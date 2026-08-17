@@ -182,6 +182,45 @@ export class SmtpProvider implements MailboxProvider {
   }
 
   /**
+   * The starred mail in the inbox, newest first.
+   *
+   * INBOX only, deliberately: a star elsewhere is usually the user's own
+   * bookkeeping, and searching All Mail on a busy account is slow enough to
+   * cost the whole request.
+   */
+  async fetchFlagged(options: { limit?: number } = {}): Promise<InboundMessage[]> {
+    const limit = options.limit ?? 10;
+    const client = await this.imapClient();
+    const results: InboundMessage[] = [];
+
+    await client.connect();
+    const lock = await client.getMailboxLock("INBOX");
+
+    try {
+      const uids = await client.search({ flagged: true }, { uid: true });
+      if (!uids || uids.length === 0) return [];
+
+      // Highest UIDs are the most recent, and they are what a person has just
+      // starred while looking for help with a quote.
+      const newest = uids.slice(-limit);
+
+      for await (const item of client.fetch(
+        newest,
+        { uid: true, source: true, envelope: true, internalDate: true },
+        { uid: true },
+      )) {
+        if (!item.source) continue;
+        results.push(toInboundMessage(item.uid, await simpleParser(item.source)));
+      }
+    } finally {
+      lock.release();
+      await client.logout().catch(() => undefined);
+    }
+
+    return results.reverse();
+  }
+
+  /**
    * Runs `fn` against a connected, locked mailbox and always tears the
    * connection down afterwards.
    */

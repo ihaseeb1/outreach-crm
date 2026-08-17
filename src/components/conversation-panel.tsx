@@ -50,12 +50,18 @@ export function ConversationPanel({
   const [showDeal, setShowDeal] = useState(false);
   const [dealNote, setDealNote] = useState<string | null>(null);
   const [fromMailbox, setFromMailbox] = useState(threadMailboxId ?? "");
+  const [showSent, setShowSent] = useState(false);
+
+  const received = messages.filter((message) => message.direction === "inbound");
+  const sentCount = messages.length - received.length;
+  const shown = showSent ? messages : received;
 
   // What they wrote, newest first, with our own emails left out — a quote is
   // read from their words, and the last one they sent is the one that stands.
   const quoteSource =
-    messages
-      .filter((message) => message.direction === "inbound" && message.body?.trim())
+    received
+      .filter((message) => message.body?.trim())
+      .slice()
       .reverse()
       .map((message) => message.body)
       .join("\n\n---\n\n") || null;
@@ -168,8 +174,30 @@ export function ConversationPanel({
         </div>
       )}
 
+      {/* What they wrote, and only that.
+          The outreach and its follow-ups are already known — they were written
+          here — and on a long sequence they bury the one message worth reading.
+          The sent mail is not gone: it is one click away, and still on the
+          contact's timeline in full. */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold">
+          {sentCount > 0 && !showSent ? "Their replies" : "Full thread"}
+        </h3>
+        {sentCount > 0 && (
+          <button
+            className="hint hover:underline"
+            type="button"
+            onClick={() => setShowSent((current) => !current)}
+          >
+            {showSent
+              ? "Hide what I sent"
+              : `Show what I sent (${sentCount})`}
+          </button>
+        )}
+      </div>
+
       <div className="space-y-3">
-        {messages.map((message) => (
+        {shown.map((message) => (
           <article
             key={message.id}
             className={`rounded-md border p-4 ${

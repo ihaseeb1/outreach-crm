@@ -6,6 +6,15 @@ import { useState } from "react";
 import { countFound, parseQuote, type ParsedQuote } from "@/deals/parse-quote";
 import type { DealStatus, DealWithPrices } from "@/types/db";
 
+interface StarredMessage {
+  mailbox?: string;
+  from: string;
+  fromName: string | null;
+  subject: string | null;
+  receivedAt: string;
+  text: string;
+}
+
 export interface DealFormDefaults {
   id?: string;
   contact_id?: string | null;
@@ -29,7 +38,51 @@ const COMMON_NICHES = [
   "CBD",
   "Adult",
   "Dating",
+  // Publishers price these alongside the niches, in the same list, so they
+  // belong in the same suggestions: a rate card that says "Link insertion 150"
+  // is quoting a product, not a subject.
+  "Link insertion",
+  "Niche edit",
+  "Homepage link",
+  "Footer text link",
+  "Banner",
+  "Press release",
 ];
+
+/** Options for the fields that have a fixed set of answers. */
+const OPTIONS = {
+  currency: ["USD", "GBP", "EUR", "INR", "PKR", "AUD", "CAD", "AED", "SGD"],
+  linkType: ["dofollow", "nofollow", "sponsored", "ugc", "mixed"],
+  placement: [
+    "guest post",
+    "niche edit",
+    "link insertion",
+    "homepage",
+    "press release",
+    "banner",
+    "footer link",
+    "sidebar link",
+  ],
+  contentBy: ["us", "publisher", "either"],
+  paymentMethod: [
+    "PayPal",
+    "Wise",
+    "Payoneer",
+    "Bank transfer",
+    "Stripe",
+    "Revolut",
+    "Crypto",
+  ],
+  paymentTerms: [
+    "100% advance",
+    "50% advance",
+    "30% advance",
+    "Payment after publication",
+    "Net 15",
+    "Net 30",
+    "Net 45",
+  ],
+};
 
 const STATUSES: DealStatus[] = [
   "negotiating",
@@ -104,6 +157,47 @@ export function DealForm({
   const [paste, setPaste] = useState("");
   const [read, setRead] = useState<ParsedQuote | null>(null);
   const [readNote, setReadNote] = useState<string | null>(null);
+  const [starred, setStarred] = useState<StarredMessage[] | null>(null);
+  const [loadingStarred, setLoadingStarred] = useState(false);
+
+  /**
+   * Pulls in whatever the user has starred in Gmail.
+   *
+   * A quote often predates the mailbox being connected, or sits behind the
+   * poller's checkpoint, so it is in no thread this app can offer. Starring it
+   * is what the user already does by hand; this makes that reachable.
+   */
+  async function loadStarred() {
+    setLoadingStarred(true);
+    setReadNote(null);
+    try {
+      const response = await fetch("/api/mailboxes/starred?limit=5");
+      const body = await response.text();
+      const payload = JSON.parse(body) as {
+        results?: { mailbox: string; error: string | null; messages: StarredMessage[] }[];
+      };
+
+      const messages = (payload.results ?? []).flatMap((entry) =>
+        entry.messages.map((message) => ({ ...message, mailbox: entry.mailbox })),
+      );
+      const failed = (payload.results ?? []).filter((entry) => entry.error);
+
+      setStarred(messages);
+      if (messages.length === 0) {
+        setReadNote(
+          failed.length > 0
+            ? `No starred mail could be read. ${failed
+                .map((entry) => `${entry.mailbox}: ${entry.error}`)
+                .join(" · ")}`
+            : "Nothing starred in any connected mailbox. Star a publisher's reply in Gmail and try again.",
+        );
+      }
+    } catch (err) {
+      setReadNote(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoadingStarred(false);
+    }
+  }
 
   /**
    * Fills the blanks from their email and leaves anything already typed alone.
@@ -253,7 +347,52 @@ export function DealForm({
           >
             Read pasted text
           </button>
+          <button
+            className="btn-secondary px-2.5 py-1.5 text-xs"
+            type="button"
+            disabled={loadingStarred}
+            onClick={loadStarred}
+          >
+            {loadingStarred ? "Checking mailboxes…" : "Load starred emails"}
+          </button>
         </div>
+
+        {starred && starred.length > 0 && (
+          <ul className="mt-3 space-y-1">
+            {starred.map((message, index) => (
+              <li
+                key={`${message.mailbox}-${index}`}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[var(--color-line)] px-3 py-2"
+              >
+                <span className="min-w-0 text-xs">
+                  <span className="font-medium">{message.from}</span>
+                  <span className="text-[var(--color-muted)]">
+                    {" "}
+                    — {message.subject ?? "(no subject)"} ·{" "}
+                    {new Date(message.receivedAt).toLocaleDateString()} ·{" "}
+                    {message.mailbox}
+                  </span>
+                </span>
+                <span className="flex gap-2">
+                  <button
+                    className="hint hover:underline"
+                    type="button"
+                    onClick={() => setPaste(message.text)}
+                  >
+                    Show text
+                  </button>
+                  <button
+                    className="text-xs font-medium text-[var(--color-brand)] hover:underline"
+                    type="button"
+                    onClick={() => applyQuote(message.text)}
+                  >
+                    Use this
+                  </button>
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
 
         <textarea
           className="input mt-2 min-h-20 text-sm"
@@ -318,17 +457,12 @@ export function DealForm({
             ))}
           </select>
         </div>
-        <div>
-          <label className="label" htmlFor="deal-currency">
-            Currency
-          </label>
-          <input
-            id="deal-currency"
-            className="input"
-            value={currency}
-            onChange={(e) => setCurrency(e.target.value.toUpperCase())}
-          />
-        </div>
+        <OptionField
+          label="Currency"
+          value={currency}
+          onChange={(value) => setCurrency(value.toUpperCase())}
+          options={OPTIONS.currency}
+        />
       </div>
 
       <fieldset className="rounded-md border border-[var(--color-line)] p-4">
@@ -399,25 +533,18 @@ export function DealForm({
       </fieldset>
 
       <div className="grid gap-3 sm:grid-cols-4">
-        <Field label="Link type" value={linkType} onChange={setLinkType} list="link-types" />
-        <datalist id="link-types">
-          <option value="dofollow" />
-          <option value="nofollow" />
-          <option value="sponsored" />
-        </datalist>
-        <Field
+        <OptionField
+          label="Link type"
+          value={linkType}
+          onChange={setLinkType}
+          options={OPTIONS.linkType}
+        />
+        <OptionField
           label="Placement"
           value={placement}
           onChange={setPlacement}
-          list="placement-types"
+          options={OPTIONS.placement}
         />
-        <datalist id="placement-types">
-          <option value="guest post" />
-          <option value="niche edit" />
-          <option value="link insertion" />
-          <option value="homepage" />
-          <option value="press release" />
-        </datalist>
         <Field label="TAT (days)" value={tat} onChange={setTat} type="number" />
         <Field label="Max links" value={maxLinks} onChange={setMaxLinks} type="number" />
       </div>
@@ -441,29 +568,23 @@ export function DealForm({
           onChange={setWordCount}
           type="number"
         />
-        <Field label="Content by" value={contentBy} onChange={setContentBy} list="content-by" />
-        <datalist id="content-by">
-          <option value="us" />
-          <option value="publisher" />
-          <option value="either" />
-        </datalist>
-        <Field
+        <OptionField
+          label="Content by"
+          value={contentBy}
+          onChange={setContentBy}
+          options={OPTIONS.contentBy}
+        />
+        <OptionField
           label="Payment method"
           value={paymentMethod}
           onChange={setPaymentMethod}
-          list="payment-methods"
+          options={OPTIONS.paymentMethod}
         />
-        <datalist id="payment-methods">
-          <option value="PayPal" />
-          <option value="Wise" />
-          <option value="Bank transfer" />
-          <option value="Payoneer" />
-          <option value="Crypto" />
-        </datalist>
-        <Field
+        <OptionField
           label="Payment terms"
           value={paymentTerms}
           onChange={setPaymentTerms}
+          options={OPTIONS.paymentTerms}
         />
       </div>
 
@@ -488,6 +609,81 @@ export function DealForm({
         {error && <span className="text-sm text-[var(--color-danger)]">{error}</span>}
       </div>
     </form>
+  );
+}
+
+/**
+ * A dropdown that cannot lose an answer it does not know.
+ *
+ * Publishers quote things no fixed list anticipates, and the parser reads their
+ * wording verbatim. So a value that is not one of the options is added as one,
+ * and "Other…" turns the control into a text box rather than forcing a choice.
+ */
+function OptionField({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: string[];
+}) {
+  const id = `field-${label.toLowerCase().replace(/[^a-z]+/g, "-")}`;
+  const [custom, setCustom] = useState(false);
+
+  const known = options.some(
+    (option) => option.toLowerCase() === value.trim().toLowerCase(),
+  );
+  const all = value && !known ? [value, ...options] : options;
+
+  if (custom) {
+    return (
+      <div>
+        <label className="label" htmlFor={id}>
+          {label}
+        </label>
+        <input
+          id={id}
+          className="input"
+          autoFocus
+          value={value}
+          placeholder="Type it as they wrote it"
+          onChange={(e) => onChange(e.target.value)}
+          onBlur={() => setCustom(false)}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <label className="label" htmlFor={id}>
+        {label}
+      </label>
+      <select
+        id={id}
+        className="input"
+        value={value}
+        onChange={(e) => {
+          if (e.target.value === "__other__") {
+            setCustom(true);
+            onChange("");
+            return;
+          }
+          onChange(e.target.value);
+        }}
+      >
+        <option value="">—</option>
+        {all.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+        <option value="__other__">Other…</option>
+      </select>
+    </div>
   );
 }
 

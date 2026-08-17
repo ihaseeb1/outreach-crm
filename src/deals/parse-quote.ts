@@ -105,8 +105,16 @@ const PLACEMENTS: [RegExp, string][] = [
  * words" are not a price; a number wearing a currency is, whatever it sits next
  * to.
  */
-const NOT_MONEY =
-  /\b(da|dr|pa|ur|tf|cf|traffic|words?|word\s*count|day|days|hour|hours|hrs|week|weeks|link|links|spam|score|month|months|year|years|tat|turnaround|discount|%)\b/i;
+/**
+ * Labels that name a metric rather than a product.
+ *
+ * Anchored whole, not searched for. Banning the *word* "link" anywhere threw
+ * away "Link insertion 150" and "30 Days Footer Text Link 30" — real products
+ * with real prices — while what actually needs rejecting is a label that is
+ * nothing but the metric: "Max links 2", "DA 45".
+ */
+const METRIC_LABEL =
+  /^(da|dr|pa|ur|tf|cf|ds|domain\s*(authority|rating)|moz\s*da|ahrefs\s*dr|spam(\s*score)?|traffic|(monthly|organic)\s*traffic|words?|word\s*count|min(imum)?\s*words?|article\s*length|tat|turn\s*around|turnaround|delivery|deadline|(max(imum)?|no\.?\s*of|number\s*of)\s*links?|links?|copyright|since|est)$/i;
 
 /**
  * Wording that makes a line a sentence rather than a rate-card row.
@@ -205,7 +213,7 @@ function readPrices(lines: string[], quote: ParsedQuote): void {
       const money = readMoney(segment);
       if (!money) continue;
 
-      const label = labelFor(segment, money.raw);
+      const label = labelFor(segment, money.at, money.raw.length);
       if (!label) continue;
 
       const niche = canonicalNiche(label);
@@ -246,6 +254,14 @@ interface Money {
   currency: string | null;
   /** The exact matched text, so the label can be taken from around it. */
   raw: string;
+  /**
+   * Where in the segment that text starts.
+   *
+   * Searching for it instead found the wrong one: "30 Days Footer Text Link 30"
+   * priced at 30 matched the *leading* 30 and took everything after it as the
+   * label, which named the product "Days Footer Text Link 30".
+   */
+  at: number;
 }
 
 function readMoney(segment: string): Money | null {
@@ -259,6 +275,7 @@ function readMoney(segment: string): Money | null {
       amount: toAmount(digits, /k\b/i.test(raw)),
       currency: CURRENCY_SYMBOLS[symbol] ?? null,
       raw,
+      at: withSymbol.index,
     };
   }
 
@@ -268,7 +285,7 @@ function readMoney(segment: string): Money | null {
   ).exec(segment);
   if (withCode) {
     const [raw, digits = "", code = ""] = withCode;
-    return { amount: toAmount(digits, false), currency: code.toUpperCase(), raw };
+    return { amount: toAmount(digits, false), currency: code.toUpperCase(), raw, at: withCode.index };
   }
 
   const codeFirst = new RegExp(
@@ -277,18 +294,29 @@ function readMoney(segment: string): Money | null {
   ).exec(segment);
   if (codeFirst) {
     const [raw, code = "", digits = ""] = codeFirst;
-    return { amount: toAmount(digits, false), currency: code.toUpperCase(), raw };
+    return { amount: toAmount(digits, false), currency: code.toUpperCase(), raw, at: codeFirst.index };
   }
 
-  // No currency anywhere: only a plain "Label - 150" row counts, and only when
-  // nothing on the line suggests the number is a metric.
-  const bare = /^[\s*•\-–—\d.)]*([^:\-–—|]{2,40})[\s:|]*[-–—:|]\s*(\d{2,6})(?:\s*(?:\/|per)\s*\w+)?\s*$/i.exec(
-    segment,
-  );
+  // No currency anywhere. A whole line that is a label and then a number is a
+  // rate-card row: "General - 100", and equally "General 100", which is how a
+  // pasted table arrives. The separator is optional because publishers often
+  // have none; what keeps this honest is that the number must end the line and
+  // the label must not read as a metric — "DA 45" and "Max 2 links" are caught
+  // by NOT_MONEY below.
+  const bare =
+    /^[\s*•]*([^:\-–—|]{2,40}?)\s*[-–—:|]?\s+(\d{2,6})(?:\s*(?:\/|per)\s*\w+)?\s*$/i.exec(
+      segment,
+    );
   if (bare) {
     const [, label = "", digits = ""] = bare;
-    if (digits && !NOT_MONEY.test(label)) {
-      return { amount: Number(digits), currency: null, raw: digits };
+    if (digits && !METRIC_LABEL.test(label.trim())) {
+      // The price is the last number on the line, never a leading one.
+      return {
+        amount: Number(digits),
+        currency: null,
+        raw: digits,
+        at: bare.index + bare[0].lastIndexOf(digits),
+      };
     }
   }
 
@@ -301,10 +329,9 @@ function toAmount(digits: string, thousands: boolean): number {
 }
 
 /** The words around the amount, cleaned of bullets and connecting words. */
-function labelFor(segment: string, raw: string): string | null {
-  const at = segment.indexOf(raw);
+function labelFor(segment: string, at: number, length: number): string | null {
   const before = segment.slice(0, at);
-  const after = segment.slice(at + raw.length);
+  const after = segment.slice(at + length);
 
   const candidate = before.replace(/[^\p{L}\p{N}\s/&()+'-]/gu, " ").trim()
     ? before
@@ -317,7 +344,11 @@ function labelFor(segment: string, raw: string): string | null {
 
   const label = tail
     .replace(/[*•]/g, " ")
-    .replace(/^[\s\d.)]+/, "")
+    // A leading number is list numbering ("1. General") — unless a word follows
+    // that makes it part of the name. "30 Days Footer Text Link" is a product,
+    // and stripping its 30 left "Days Footer Text Link", which means nothing.
+    .replace(/^[\s.)]*\d+[.)]\s+/, "")
+    .replace(/^[\s.)]+/, "")
     .replace(/[\s:|=–—-]+$/, "")
     .replace(/^[\s:|=–—-]+/, "")
     .replace(/\b(price|cost|rate|charges?|fee|for|is|are|starts?\s+(?:at|from)|only|per\s+post|each)\b/gi, " ")
@@ -403,17 +434,25 @@ function readMetrics(text: string, quote: ParsedQuote): void {
     );
   }
 
+  // Horizontal whitespace only, throughout. With plain \s these patterns match
+  // across a line break: "Traffic 40000" followed by "Word count 1000" read as
+  // "40000 words", because \s* happily swallowed the newline between them.
   const words =
-    /\b(?:min(?:imum)?|at\s*least|around|approx\w*)?\s*(\d{3,5})\s*(?:\+|-|–|to)?\s*(?:\d{3,5})?\s*words?\b/i.exec(
+    // "800 words", "800-1200 words", "min 800 words"
+    /\b(?:min(?:imum)?|at[^\S\n]*least|around|approx\w*)?[^\S\n]*(\d{3,5})[^\S\n]*(?:\+|-|–|to)?[^\S\n]*(?:\d{3,5})?[^\S\n]*words?\b/i.exec(
+      text,
+    ) ??
+    // …and the label-first form a rate card uses: "Word count 1000".
+    /\b(?:word[^\S\n]*count|article[^\S\n]*length)\b[^\S\n]*[:=-]?[^\S\n]*(\d{3,5})/i.exec(
       text,
     );
   if (words) set(quote, "wordCount", Number(words[1]), lineAround(text, words.index));
 
   const maxLinks =
-    /\b(?:max(?:imum)?|up\s*to|allow\w*|include[ds]?)\D{0,15}?(\d{1,2})\s*(?:do-?\s?follow\s*)?links?\b/i.exec(
+    /\b(?:max(?:imum)?|up[^\S\n]*to|allow\w*|include[ds]?)[^\d\n]{0,15}?(\d{1,2})[^\S\n]*(?:do-?[^\S\n]?follow[^\S\n]*)?links?\b/i.exec(
       text,
     ) ??
-    /\b(\d{1,2})\s*links?\s*(?:are\s*)?(?:per|allowed|max|maximum|included|permitted)\b/i.exec(
+    /\b(\d{1,2})[^\S\n]*links?[^\S\n]*(?:are[^\S\n]*)?(?:per|allowed|max|maximum|included|permitted)\b/i.exec(
       text,
     );
   if (maxLinks) {
@@ -476,12 +515,23 @@ function readTerms(text: string, quote: ParsedQuote): void {
 
   if (linkType) set(quote, "linkType", linkType.value, lineAround(text, linkType.at));
 
-  for (const [pattern, placement] of PLACEMENTS) {
-    const match = pattern.exec(text);
-    if (match) {
-      set(quote, "placementType", placement, lineAround(text, match.index));
-      break;
-    }
+  // The placement they lead with, not whichever this list happens to name first.
+  //
+  // A real reply opened "Below are the discounted prices of guest post for…" and
+  // listed a link insertion as one line item near the bottom; scanning in list
+  // order recorded the whole deal as a link insertion. What a publisher offers
+  // is what they say first — the rest are extras, and they are kept as their own
+  // priced rows.
+  const placements = PLACEMENTS.map(([pattern, placement]) => {
+    const match = new RegExp(pattern.source, "i").exec(text);
+    return match ? { at: match.index, placement } : null;
+  })
+    .filter((entry): entry is { at: number; placement: string } => Boolean(entry))
+    .sort((a, b) => a.at - b.at);
+
+  const leading = placements[0];
+  if (leading) {
+    set(quote, "placementType", leading.placement, lineAround(text, leading.at));
   }
 
   // "We" is the publisher and "you" is us — the text being read is theirs.
