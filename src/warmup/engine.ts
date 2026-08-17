@@ -12,6 +12,7 @@ import {
   poolIsViable,
   quotaRemaining,
   shouldRampToday,
+  shouldContinueThread,
   shouldReply,
   type PeerCandidate,
 } from "@/warmup/plan";
@@ -288,6 +289,46 @@ export async function runWarmupEngagement(
   return { engaged, rescued };
 }
 
+/**
+ * Walks up the in_reply_to chain to find how deep a thread is and what started
+ * it. Bounded at MAX_THREAD_WALK hops: a conversation never needs to be longer
+ * than that, and a bound means a corrupt chain cannot loop forever.
+ */
+const MAX_THREAD_WALK = 6;
+
+async function threadContext(
+  supabase: SupabaseClient,
+  row: { message_id: string | null; in_reply_to: string | null; workspace_id: string },
+): Promise<{ depth: number; rootMessageId: string | null }> {
+  if (!row.in_reply_to) {
+    return { depth: 1, rootMessageId: row.message_id };
+  }
+
+  let depth = 1;
+  let parentId: string | null = row.in_reply_to;
+  let rootMessageId: string | null = row.in_reply_to;
+
+  for (let hop = 0; hop < MAX_THREAD_WALK && parentId; hop += 1) {
+    depth += 1;
+    rootMessageId = parentId;
+
+    // Annotated rather than inferred: parentId feeds the query whose result
+    // reassigns it, and TypeScript reports that as circular otherwise.
+    const parent: { in_reply_to: string | null } | null = (
+      await supabase
+        .from("warmup_messages")
+        .select("in_reply_to")
+        .eq("workspace_id", row.workspace_id)
+        .eq("message_id", parentId)
+        .maybeSingle()
+    ).data as { in_reply_to: string | null } | null;
+
+    parentId = parent?.in_reply_to ?? null;
+  }
+
+  return { depth, rootMessageId };
+}
+
 /** Replies to a realistic fraction of received warmup mail. */
 export async function runWarmupReplies(
   supabase: SupabaseClient,
@@ -295,12 +336,15 @@ export async function runWarmupReplies(
 ): Promise<{ replied: number }> {
   const limit = options.limit ?? 3;
 
+  // Replies are candidates too now, so a thread can go a few turns deep.
+  // shouldContinueThread decides which ones actually continue.
   let query = supabase
     .from("warmup_messages")
-    .select("id, workspace_id, from_mailbox_id, to_mailbox_id, subject, message_id")
+    .select(
+      "id, workspace_id, from_mailbox_id, to_mailbox_id, subject, message_id, is_reply, in_reply_to",
+    )
     .eq("opened", true)
     .eq("replied", false)
-    .eq("is_reply", false)
     .order("sent_at", { ascending: true })
     .limit(limit * 4);
   if (options.workspaceId) query = query.eq("workspace_id", options.workspaceId);
@@ -313,6 +357,8 @@ export async function runWarmupReplies(
     to_mailbox_id: string;
     subject: string | null;
     message_id: string | null;
+    is_reply: boolean;
+    in_reply_to: string | null;
   }[];
 
   let replied = 0;
@@ -329,7 +375,22 @@ export async function runWarmupReplies(
     const settings = settingsRow as { reply_rate: number; enabled: boolean } | null;
     if (!settings?.enabled) continue;
 
-    if (!shouldReply(settings.reply_rate)) {
+    const thread = await threadContext(supabase, row);
+
+    if (!shouldContinueThread(thread.depth, thread.rootMessageId)) {
+      // A one-off thread that has already had its single reply. Mark it done so
+      // it stops being re-examined on every tick.
+      await supabase
+        .from("warmup_messages")
+        .update({ replied: true, replied_at: null })
+        .eq("id", row.id);
+      continue;
+    }
+
+    // reply_rate only governs whether a thread gets going at all. Once a
+    // conversation is under way, abandoning it halfway would leave exactly the
+    // dead-end thread this feature exists to avoid.
+    if (thread.depth === 1 && !shouldReply(settings.reply_rate)) {
       // Deliberately left unreplied — a 100% reply rate is itself a tell.
       await supabase
         .from("warmup_messages")

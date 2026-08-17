@@ -106,6 +106,65 @@ export function shouldReply(replyRate: number, random: () => number = Math.rando
  * Warmup needs at least two mailboxes to form a loop. More is better — a larger
  * pool means less repetition between the same pair, which reads more naturally.
  */
+/**
+ * Multi-turn warmup threads.
+ *
+ * A mailbox whose entire history is isolated one-reply exchanges does not look
+ * like a mailbox anyone uses. Real correspondence has some back-and-forth. But
+ * doing it on every thread is its own tell, and it burns daily volume fast —
+ * every extra turn is another send against the same cap.
+ *
+ * So roughly one thread in four becomes a short conversation of two or three
+ * replies; the rest stay single-reply. The choice is derived from the root
+ * message id rather than a coin flip, so a thread's fate is stable no matter
+ * how many ticks it takes to play out — a random draw per tick would make the
+ * same thread continue or stop depending on when it was looked at.
+ */
+export const CONVERSATION_IN_EVERY = 4;
+
+function hashOf(value: string): number {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
+  }
+  return hash;
+}
+
+export function isConversationThread(
+  rootMessageId: string | null,
+  everyN: number = CONVERSATION_IN_EVERY,
+): boolean {
+  if (!rootMessageId || everyN <= 1) return Boolean(rootMessageId);
+  return hashOf(rootMessageId) % everyN === 0;
+}
+
+/**
+ * Total messages a conversation thread should reach, counting the original.
+ * Three or four — that is two or three replies on top.
+ */
+export function conversationLength(rootMessageId: string): number {
+  return 3 + (hashOf(rootMessageId) % 2);
+}
+
+/**
+ * Whether a received warmup message should be replied to, given where it sits
+ * in its thread. `depth` is how many messages already exist in the thread.
+ *
+ * Depth 1 — the original — is always eligible; that is the ordinary single
+ * reply, still subject to reply_rate. Beyond that, only conversation threads
+ * continue, and only until they reach their target length.
+ */
+export function shouldContinueThread(
+  depth: number,
+  rootMessageId: string | null,
+  everyN: number = CONVERSATION_IN_EVERY,
+): boolean {
+  if (depth < 1) return false;
+  if (depth === 1) return true;
+  if (!rootMessageId || !isConversationThread(rootMessageId, everyN)) return false;
+  return depth < conversationLength(rootMessageId);
+}
+
 export const MIN_POOL_SIZE = 2;
 
 export function poolIsViable(size: number): boolean {

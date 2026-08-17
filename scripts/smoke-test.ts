@@ -44,8 +44,11 @@ import {
   pickPeer,
   poolIsViable,
   quotaRemaining,
+  conversationLength,
+  isConversationThread,
   resumeVolume,
   sendingAllowance,
+  shouldContinueThread,
   shouldRampToday,
   shouldReply,
 } from "../src/warmup/plan";
@@ -1202,6 +1205,75 @@ test("a first send with no assignment is not a switch", () => {
   const result = mailboxForContact(null, [healthyBox("a")], { ignoreRest: true });
   assert.equal(result.mailbox?.id, "a");
   assert.equal(result.switched, false);
+});
+
+
+console.log("\nwarmup conversation threads");
+
+test("the original message is always eligible for its single reply", () => {
+  // Depth 1 is the ordinary case and must not depend on the conversation draw.
+  assert.equal(shouldContinueThread(1, "anything@example.com"), true);
+  assert.equal(shouldContinueThread(1, null), true);
+});
+
+test("a one-off thread stops after that first reply", () => {
+  // everyN of 1000 makes the conversation draw effectively never fire.
+  assert.equal(shouldContinueThread(2, "some-id@example.com", 1000), false);
+});
+
+test("roughly one thread in four is picked for a conversation", () => {
+  let picked = 0;
+  const total = 4000;
+  for (let i = 0; i < total; i += 1) {
+    if (isConversationThread(`msg-${i}@example.com`)) picked += 1;
+  }
+  const share = picked / total;
+  // Hash-derived, so not exactly 25% — but it must be in the right region,
+  // not 0% (never converses) or 100% (always does).
+  assert.ok(share > 0.15 && share < 0.35, `share was ${share}`);
+});
+
+test("the decision for one thread is stable across repeated calls", () => {
+  const id = "stable-thread@example.com";
+  const first = isConversationThread(id);
+  for (let i = 0; i < 50; i += 1) {
+    assert.equal(isConversationThread(id), first);
+  }
+});
+
+test("a conversation runs to three or four messages, never more", () => {
+  for (let i = 0; i < 500; i += 1) {
+    const id = `len-${i}@example.com`;
+    const length = conversationLength(id);
+    assert.ok(length === 3 || length === 4, `length was ${length}`);
+  }
+});
+
+test("a conversation continues while short and stops at its target", () => {
+  // Find an id that was actually drawn as a conversation.
+  let id = "";
+  for (let i = 0; i < 1000; i += 1) {
+    const candidate = `conv-${i}@example.com`;
+    if (isConversationThread(candidate)) {
+      id = candidate;
+      break;
+    }
+  }
+  assert.ok(id, "expected at least one conversation thread in 1000 ids");
+
+  const target = conversationLength(id);
+  assert.equal(shouldContinueThread(target - 1, id), true);
+  assert.equal(shouldContinueThread(target, id), false);
+  assert.equal(shouldContinueThread(target + 1, id), false);
+});
+
+test("a thread with no root id never becomes a conversation", () => {
+  assert.equal(shouldContinueThread(2, null), false);
+  assert.equal(isConversationThread(null), false);
+});
+
+test("depth below one is not repliable", () => {
+  assert.equal(shouldContinueThread(0, "x@example.com"), false);
 });
 
 
