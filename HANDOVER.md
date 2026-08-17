@@ -34,12 +34,14 @@ All jobs returned 200.
 The secrets page itself never shows a status colour — the green lives under
 Actions → Cron tick.
 
-**Watch the Actions minutes.** This repo is private, so runs bill against the
-2,000 free minutes a month, and GitHub rounds every run up to a whole minute.
-`*/10` is 144 runs a day ≈ 4,300 minutes a month — the allowance is gone in
-about a fortnight, and when it goes, sending silently stops. `*/30` is 48 runs a
-day ≈ 1,450 a month and costs almost nothing in throughput, because each mailbox
-rests 120–240 minutes between sends anyway.
+**The tick is now every 30 minutes, not every 10.** This repo is private, so runs
+bill against the 2,000 free minutes a month and GitHub rounds every run up to a
+whole minute. `*/10` is 144 runs a day ≈ 4,300 minutes a month — the allowance
+would have gone in about a fortnight, and when it goes sending stops without
+saying so. `*/30` is 48 runs a day ≈ 1,450 a month and costs almost nothing in
+throughput, because each mailbox rests 120–240 minutes between sends anyway.
+If a tick ever needs to run sooner, Actions → Cron tick → "Run workflow" fires
+it by hand.
 
 ### Still to confirm
 
