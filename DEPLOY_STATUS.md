@@ -7,6 +7,11 @@ Last updated: 2026-08-16.
 `https://outreach-crm-sandy.vercel.app`). Hosting is done; what is left is
 first-run setup inside the app.
 
+> **Start with `HANDOVER.md`** (17 Aug 2026) for the current state of the
+> campaign, the pending work, and the scheduling rework. The scheduler section
+> below is superseded: ticks now come from GitHub Actions every 10 minutes, not
+> cron-job.org.
+
 ## Decisions made
 
 - **Host: Vercel.** Not Cloudflare Workers — Cloudflare blocks outbound SMTP
@@ -64,12 +69,13 @@ first-run setup inside the app.
    Supabase "Confirm email" is off, signup returns a session immediately and
    lands on `/dashboard` — no confirmation mail, no waiting.
 
-2. **Scheduler** — point cron-job.org (free) at
-   `https://crm.orankly.com/api/cron/tick`, method **POST**, every 5–10 minutes,
-   with header `Authorization: Bearer <CRON_SECRET>`. `vercel.json` also
-   declares a daily Vercel cron as a safety net (Hobby rejects anything more
-   frequent than once a day — an hourly expression made the whole deployment
-   fail validation).
+2. ~~**Scheduler** — cron-job.org.~~ Superseded 17 Aug. Ticks come from
+   `.github/workflows/tick.yml` every 10 minutes, calling the six per-job
+   endpoints in parallel. No third-party account needed; it only requires the
+   `CRON_SECRET` repository secret. `vercel.json` keeps a daily Vercel cron at
+   `0 7 * * *` (noon Pakistan) as a safety net — Hobby rejects anything more
+   frequent than daily, and an hourly expression made the very first deployment
+   fail validation. See `HANDOVER.md` for why parallel rather than one tick.
 
 3. **First run**: Settings → set the sending postal address (campaigns are
    hard-blocked until it is set) → connect **two or more** mailboxes → turn
