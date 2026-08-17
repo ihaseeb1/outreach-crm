@@ -54,6 +54,7 @@ import {
 } from "../src/warmup/plan";
 import { isValidWarmupToken, newWarmupToken } from "../src/warmup/token";
 import { domainFromUrl, isRoleAccount, normalizeUrl, splitName } from "../src/lib/email";
+import { addressRank, duplicateDomains, planDomainDedupe } from "../src/lib/domain-dedupe";
 import { pairColumns, parseContactImport } from "../src/lib/import-parse";
 import {
   classifyInbound,
@@ -1274,6 +1275,106 @@ test("a thread with no root id never becomes a conversation", () => {
 
 test("depth below one is not repliable", () => {
   assert.equal(shouldContinueThread(0, "x@example.com"), false);
+});
+
+
+console.log("\nper-domain address selection");
+
+const c = (email: string, domain: string | null = null) => ({
+  id: email,
+  email,
+  domain: domain ?? email.split("@")[1] ?? null,
+});
+
+test("a named person outranks every shared inbox", () => {
+  assert.ok(addressRank("jane.doe@site.com") < addressRank("editor@site.com"));
+  assert.ok(addressRank("jane.doe@site.com") < addressRank("info@site.com"));
+});
+
+test("editorial contacts outrank generic ones", () => {
+  assert.ok(addressRank("editor@site.com") < addressRank("info@site.com"));
+  assert.ok(addressRank("content@site.com") < addressRank("support@site.com"));
+});
+
+test("addresses that should never be pitched rank last", () => {
+  assert.ok(addressRank("noreply@site.com") > addressRank("support@site.com"));
+  assert.ok(addressRank("privacy@site.com") > addressRank("info@site.com"));
+  assert.ok(addressRank("webmaster@site.com") > addressRank("admin@site.com"));
+});
+
+test("trailing digits do not defeat role detection", () => {
+  assert.equal(addressRank("info2@site.com"), addressRank("info@site.com"));
+});
+
+test("keeps the best one per domain and drops the rest", () => {
+  const plan = planDomainDedupe([
+    c("info@site.com"),
+    c("jane@site.com"),
+    c("noreply@site.com"),
+    c("editor@site.com"),
+  ]);
+  assert.equal(plan.keep.length, 1);
+  assert.equal(plan.keep[0]?.email, "jane@site.com");
+  assert.equal(plan.drop.length, 3);
+});
+
+test("keeping two per domain takes the top two by rank", () => {
+  const plan = planDomainDedupe(
+    [c("info@site.com"), c("jane@site.com"), c("editor@site.com")],
+    2,
+  );
+  assert.deepEqual(
+    plan.keep.map((row) => row.email),
+    ["jane@site.com", "editor@site.com"],
+  );
+  assert.equal(plan.drop.length, 1);
+});
+
+test("a domain with a single address never lands in drop", () => {
+  const plan = planDomainDedupe([c("info@one.com"), c("info@two.com")]);
+  assert.equal(plan.keep.length, 2);
+  assert.equal(plan.drop.length, 0);
+});
+
+test("contacts with no domain are always kept", () => {
+  const plan = planDomainDedupe([
+    { id: "a", email: "someone@x.com", domain: null },
+    { id: "b", email: "other@x.com", domain: null },
+  ]);
+  assert.equal(plan.keep.length, 2);
+  assert.equal(plan.drop.length, 0);
+});
+
+test("domains are matched case-insensitively", () => {
+  const plan = planDomainDedupe([
+    c("a@site.com", "Site.com"),
+    c("b@site.com", "site.com"),
+  ]);
+  assert.equal(plan.keep.length, 1);
+  assert.equal(plan.drop.length, 1);
+});
+
+test("the same input always splits the same way", () => {
+  const input = [c("info@site.com"), c("hello@site.com"), c("team@site.com")];
+  const first = planDomainDedupe(input).keep[0]?.email;
+  for (let i = 0; i < 20; i += 1) {
+    assert.equal(planDomainDedupe(input).keep[0]?.email, first);
+  }
+});
+
+test("duplicate domains are listed worst first", () => {
+  const dupes = duplicateDomains([
+    c("a@one.com"),
+    c("b@one.com"),
+    c("c@one.com"),
+    c("a@two.com"),
+    c("b@two.com"),
+    c("a@three.com"),
+  ]);
+  assert.deepEqual(dupes, [
+    { domain: "one.com", count: 3 },
+    { domain: "two.com", count: 2 },
+  ]);
 });
 
 

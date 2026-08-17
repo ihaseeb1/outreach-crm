@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
+import { planDomainDedupe } from "@/lib/domain-dedupe";
 import type { Contact, ValidationStatus } from "@/types/db";
 
 const VALIDATION_STYLES: Record<ValidationStatus, string> = {
@@ -45,6 +46,29 @@ export function ContactsTable({
   const allSelected = contacts.length > 0 && selected.size === contacts.length;
   const stageLabel = (key: string) =>
     stages.find((stage) => stage.key === key)?.label ?? key;
+
+  /**
+   * Ticks the surplus addresses so they can be reviewed before anything is
+   * deleted. Deliberately a selection and not a delete: which of five
+   * addresses is the real editor is a judgement worth eyeballing, and the
+   * ranking is a heuristic.
+   */
+  function selectExtras(keepPerDomain: number) {
+    const { drop } = planDomainDedupe(
+      contacts.map((contact) => ({
+        id: contact.id,
+        email: contact.email,
+        domain: contact.domain,
+      })),
+      keepPerDomain,
+    );
+    setSelected(new Set(drop.map((row) => row.id)));
+    setMessage(
+      drop.length === 0
+        ? `Nothing surplus on this page at ${keepPerDomain} per domain.`
+        : `Selected ${drop.length} surplus address(es), keeping the best ${keepPerDomain} per domain. Review, then delete.`,
+    );
+  }
 
   function toggle(id: string) {
     setSelected((current) => {
@@ -147,6 +171,31 @@ export function ContactsTable({
           <span className="hint">{selected.size} selected</span>
         )}
         {message && <span className="hint">{message}</span>}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 border-t border-[var(--color-line)] pt-2">
+        <span className="hint">One site, several addresses?</span>
+        <button
+          className="btn-secondary px-2.5 py-1.5 text-xs"
+          type="button"
+          disabled={busy}
+          onClick={() => selectExtras(1)}
+        >
+          Select extras, keep 1 per domain
+        </button>
+        <button
+          className="btn-secondary px-2.5 py-1.5 text-xs"
+          type="button"
+          disabled={busy}
+          onClick={() => selectExtras(2)}
+        >
+          Keep 2 per domain
+        </button>
+        <span className="hint">
+          Keeps a named person over a shared inbox, an editorial address over a
+          generic one, and never keeps noreply or privacy addresses. Selects
+          only — nothing is deleted until you press delete.
+        </span>
       </div>
 
       <div className="table-wrap">
