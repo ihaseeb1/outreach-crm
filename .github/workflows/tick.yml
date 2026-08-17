@@ -19,10 +19,18 @@ name: Cron tick
 # GitHub's scheduled runs are best-effort and can be delayed by several minutes
 # under load; that is fine here because every job is idempotent and simply
 # picks up whatever is due.
+#
+# Why every 30 minutes and not every 10: this repo is private, so runs bill
+# against the 2,000 free Actions minutes a month and GitHub rounds each run up
+# to a whole minute. Every 10 minutes is 144 runs a day — roughly 4,300 minutes
+# a month, which exhausts the allowance in a fortnight and then stops sending
+# without saying so. Every 30 minutes is ~1,450 a month and costs almost nothing
+# in throughput: a mailbox rests 120–240 minutes between sends, so a half-hourly
+# tick still catches every mailbox as soon as it is due.
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/30 * * * *"
   # So it can be fired by hand from the Actions tab without waiting.
   workflow_dispatch:
 
