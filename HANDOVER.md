@@ -37,11 +37,19 @@ Nothing else is outstanding from the previous list.
 1. ~~Mailbox sent-volume views: 7 / 14 / 30 days.~~ Done — see below.
 2. ~~Duplicate campaign.~~ Done — see below.
 
-**Not yet verified against live data.** Everything passes typecheck, 161 smoke
-tests and a production build, but neither feature has been looked at on
-crm.orankly.com. Per the habits at the bottom of this file, that is not the same
-as working. Check the volume numbers against a mailbox's real sent folder, and
-duplicate a campaign to confirm the copy has the steps and no contacts.
+Both were verified on **crm.orankly.com** after deploying, not just in tests:
+
+- Volume figures render per mailbox against real data, and the toggle moves all
+  seven cards together. `webwarner.com@gmail.com` reads "5 / 5 today, 6 outreach
+  in 7 days"; the rest sit at 1 outreach plus 1–4 warmup, which matches a
+  workspace that has only been sending since 17 August. 7-, 14- and 30-day
+  counts are identical for now because nothing is older than a week — the
+  per-day average is what changes (0.7 → 0.2).
+- Duplicating **First Campaign** produced "First Campaign (copy)": draft, all 7
+  sequence steps, all 7 mailboxes, 01:00–24:00 Tue–Fri Asia/Karachi, and
+  **0 contacts**. The source was untouched — still active with 56 contacts.
+
+That draft copy is still there. Delete it whenever; it was the test.
 
 ---
 
