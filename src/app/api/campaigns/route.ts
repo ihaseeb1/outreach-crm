@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
+import { nextSendAt, resolveWindow } from "@/campaigns/schedule";
 import { logActivity } from "@/lib/activity";
+import type { CampaignSettings } from "@/types/db";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getSession } from "@/lib/workspace";
 
@@ -159,7 +161,40 @@ export async function PATCH(request: Request) {
     });
   }
 
-  return NextResponse.json({ ok: true });
+  // Editing the schedule has to move the contacts waiting on it.
+  //
+  // Each enrolment stores its own next_send_at, computed from the window at the
+  // time it was enrolled. Without this, changing the window changed nothing for
+  // anybody already queued: a contact parked at "next Monday 01:00" stayed
+  // there even after the campaign was reset to weekday afternoons, and the
+  // schedule shown on screen was not the schedule those contacts would follow.
+  //
+  // Only contacts that have never been sent to (current_step 0) are moved.
+  // A contact mid-sequence has a next_send_at that encodes the delay since its
+  // last email, and recomputing that would drag follow-ups forward.
+  let rescheduled = 0;
+
+  if (patch.settings) {
+    const window = resolveWindow(patch.settings as CampaignSettings);
+    const next = nextSendAt({
+      from: new Date(),
+      delayDays: 0,
+      window,
+    }).toISOString();
+
+    const { data: moved } = await supabase
+      .from("campaign_contacts")
+      .update({ next_send_at: next })
+      .eq("campaign_id", id)
+      .eq("workspace_id", session.workspace.id)
+      .eq("current_step", 0)
+      .in("status", ["pending", "active"])
+      .select("id");
+
+    rescheduled = (moved ?? []).length;
+  }
+
+  return NextResponse.json({ ok: true, rescheduled });
 }
 
 export async function DELETE(request: Request) {

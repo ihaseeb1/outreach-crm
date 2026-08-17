@@ -94,6 +94,7 @@ export function CampaignControls({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [rescheduled, setRescheduled] = useState<number | null>(null);
 
   const [startHour, setStartHour] = useState(settings.send_window_start ?? 9);
   const [endHour, setEndHour] = useState(settings.send_window_end ?? 17);
@@ -114,6 +115,9 @@ export function CampaignControls({
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error ?? "Failed.");
       setSaved(true);
+      setRescheduled(
+        typeof payload.rescheduled === "number" ? payload.rescheduled : null,
+      );
       if (thenRefresh) router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -321,7 +325,14 @@ export function CampaignControls({
         >
           {busy ? "Saving…" : "Save settings"}
         </button>
-        {saved && <span className="hint text-[var(--color-ok)]">Saved.</span>}
+        {saved && (
+          <span className="hint text-[var(--color-ok)]">
+            Saved.
+            {rescheduled !== null && rescheduled > 0 && (
+              <> Moved {rescheduled} waiting contact(s) onto the new schedule.</>
+            )}
+          </span>
+        )}
         {error && <span className="text-sm text-[var(--color-danger)]">{error}</span>}
       </div>
     </section>
