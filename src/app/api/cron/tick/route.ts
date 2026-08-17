@@ -17,13 +17,23 @@ export const dynamic = "force-dynamic";
 /**
  * Single dispatcher for every recurring job.
  *
- * Vercel's Hobby plan only allows a couple of once-a-day crons, which is far
- * too coarse for outreach. So this one endpoint runs a slice of each job and
- * is designed to be polled every few minutes by any free scheduler
- * (cron-job.org, GitHub Actions, Cloudflare Worker cron, or Vercel Cron on Pro).
+ * Vercel's Hobby plan only allows a once-a-day cron, which is far too coarse for
+ * outreach, so this endpoint runs a slice of each job and is polled every 10
+ * minutes by the GitHub Actions workflow in .github/workflows/tick.yml.
  *
- * Every job is a bounded, idempotent batch — overlapping ticks are safe.
+ * It works to a deadline rather than trying to finish everything. Running all
+ * seven jobs unconditionally overran the 60s function limit and the whole tick
+ * died with FUNCTION_INVOCATION_TIMEOUT — losing the work of every job that had
+ * already succeeded, including sends, because nothing was reported back.
+ *
+ * Every job is a bounded, idempotent batch, so a job deferred here is simply
+ * picked up by the next tick ten minutes later. Finishing and reporting beats
+ * attempting everything and returning nothing.
  */
+
+/** Leaves headroom under maxDuration for the response itself. */
+const BUDGET_MS = 45_000;
+
 export async function GET(request: Request) {
   const unauthorized = assertCronAuthorized(request);
   if (unauthorized) return unauthorized;
@@ -31,33 +41,50 @@ export async function GET(request: Request) {
   const supabase = createSupabaseAdminClient();
   const started = Date.now();
   const results: Record<string, unknown> = {};
+  const deferred: string[] = [];
 
-  results.scrape = await safely("scrape", () =>
-    runScrapeBatch(supabase, { limit: 5 }),
-  );
-  results.validate = await safely("validate", () =>
-    runValidationBatch(supabase, { limit: 100 }),
-  );
-  results.inbound = await safely("inbound", () =>
-    runInboundPoll(supabase, { limit: 3 }),
-  );
-  results.suppressionSync = await safely("suppressionSync", () =>
+  const elapsed = () => Date.now() - started;
+
+  /**
+   * Runs a job only if there is plausibly time for it. `reserveMs` is a rough
+   * worst case for that job — polling IMAP across mailboxes is far slower than
+   * a couple of Postgres queries, and treating them alike would either defer
+   * cheap jobs needlessly or start expensive ones too late.
+   */
+  async function step<T>(
+    name: string,
+    reserveMs: number,
+    fn: () => Promise<T>,
+  ): Promise<void> {
+    if (elapsed() + reserveMs > BUDGET_MS) {
+      deferred.push(name);
+      return;
+    }
+    results[name] = await safely(name, fn);
+  }
+
+  // Ordered by consequence, not by cost.
+  //
+  // Suppression sync first: it is cheap and stops sequences for anyone who
+  // opted out. Inbound next, because a reply must be seen before the follow-up
+  // goes out — sending step 3 to somebody who already answered is the worst
+  // failure this system has. Sending third. Warmup, health, validation and
+  // scraping are all safe to slip to a later tick.
+  await step("suppressionSync", 3_000, () =>
     syncSuppressedCampaignContacts(supabase, { limit: 200 }),
   );
-  results.campaigns = await safely("campaigns", () =>
-    runCampaignBatch(supabase, { limit: 10 }),
-  );
-  results.warmup = await safely("warmup", () =>
-    runWarmupBatch(supabase, { sendLimit: 4 }),
-  );
+  await step("inbound", 25_000, () => runInboundPoll(supabase, { limit: 2 }));
+  await step("campaigns", 12_000, () => runCampaignBatch(supabase, { limit: 10 }));
+  await step("warmup", 15_000, () => runWarmupBatch(supabase, { sendLimit: 3 }));
   // Skips any mailbox already checked today, so calling it every tick is cheap.
-  results.health = await safely("health", () =>
-    runHealthChecks(supabase, { limit: 3 }),
-  );
+  await step("health", 8_000, () => runHealthChecks(supabase, { limit: 3 }));
+  await step("validate", 8_000, () => runValidationBatch(supabase, { limit: 50 }));
+  await step("scrape", 10_000, () => runScrapeBatch(supabase, { limit: 5 }));
 
   return NextResponse.json({
     ok: true,
-    durationMs: Date.now() - started,
+    durationMs: elapsed(),
+    deferred,
     results,
   });
 }

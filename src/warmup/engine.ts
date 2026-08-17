@@ -346,7 +346,10 @@ export async function runWarmupReplies(
     .eq("opened", true)
     .eq("replied", false)
     .order("sent_at", { ascending: true })
-    .limit(limit * 4);
+    // Was limit * 4. Each candidate costs a settings lookup and, for replies, a
+    // walk up the in_reply_to chain, and scanning a wide pool to reply to three
+    // of them is what pushed the tick past its function timeout.
+    .limit(limit * 2);
   if (options.workspaceId) query = query.eq("workspace_id", options.workspaceId);
 
   const { data } = await query;
