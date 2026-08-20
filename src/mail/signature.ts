@@ -1,5 +1,11 @@
 /**
- * Mailbox signatures, and the social icon row underneath them.
+ * The social icon row, and the optional personal sign-off above it.
+ *
+ * **The icons render in the footer, not here** — `buildFooterHtml` puts them
+ * between the postal address and the unsubscribe line, so an email ends with one
+ * closing block carrying the company's address, its links and the opt-out. An
+ * earlier cut hung them under the mailbox signature instead, which put a second
+ * signature on every message.
  *
  * The profiles are Orankly's own, taken from the footer of orankly.com so a
  * publisher who clicks one lands where the website would have sent them. They
@@ -12,7 +18,9 @@
  * have none.
  *
  * Everything here is pure and string-in/string-out, so the markup a publisher
- * actually receives is covered by tests rather than eyeballed once.
+ * actually receives is covered by tests rather than eyeballed once. It is also
+ * free of node built-ins, so the mailbox editor can import it and preview the
+ * exact block that will be sent.
  */
 import { escapeHtml, linkifyHtml } from "@/lib/html";
 
@@ -139,9 +147,6 @@ export function renderSocialRowText(keys: SocialKey[]): string {
 export interface SignatureInput {
   /** `mailboxes.signature` — plain text, may be null. */
   signature: string | null | undefined;
-  socials: SocialKey[];
-  /** Absolute origin the icons are served from, e.g. https://crm.orankly.com. */
-  baseUrl: string;
 }
 
 export interface RenderedSignature {
@@ -152,32 +157,72 @@ export interface RenderedSignature {
 }
 
 /**
- * Builds both halves of the signature block.
+ * The personal sign-off, if there is one.
  *
- * The icon row is only rendered when there is a signature to hang it under. A
- * bare row of social buttons at the end of an otherwise plain, personal cold
- * email reads as a marketing blast, which is exactly the impression this app
- * spends its whole compliance path avoiding.
+ * Deliberately *not* where the social icons go. They live in the footer,
+ * alongside the postal address — see `buildFooterHtml`. One closing block at the
+ * end of the message, carrying the company's details and its links, is what a
+ * publisher expects; a sign-off with its own icon row followed by an address
+ * block with none reads as two signatures, which is exactly what it looked like.
+ *
+ * So this is for a genuinely personal line — "Best, Haseeb" — above that block,
+ * and most mailboxes will leave it empty.
  */
 export function buildSignature(input: SignatureInput): RenderedSignature {
   const signature = (input.signature ?? "").trim();
   if (!signature) return { text: "", html: "" };
 
-  const socialText = renderSocialRowText(input.socials);
-  const socialHtml = renderSocialRowHtml(input.socials, input.baseUrl);
-
   return {
-    text: socialText ? `\n\n${signature}\n\n${socialText}` : `\n\n${signature}`,
-    html: `${signatureBlockHtml(signature)}${socialHtml}`,
+    text: `\n\n${signature}`,
+    html: signatureBlockHtml(signature),
   };
 }
 
 /**
- * The signature text itself. Deliberately not `textToHtml` — that wraps every
- * block in a 16px-bottom paragraph, which puts a gap between the sign-off and
- * the icons that belong to it.
+ * The sign-off text itself. Deliberately not `textToHtml` — that wraps every
+ * block in a 16px-bottom paragraph, and a sign-off wants to sit tight under the
+ * last line of the message rather than a paragraph away from it.
  */
 function signatureBlockHtml(signature: string): string {
   const body = linkifyHtml(escapeHtml(signature).replace(/\n/g, "<br />"));
   return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#14181f;line-height:1.55">${body}</div>`;
+}
+
+/**
+ * Does the mailbox signature just repeat the postal address?
+ *
+ * If so the signature is not printed and the footer is left to do it, because
+ * the footer is the block that carries the icons and the opt-out — one closing
+ * block per email. This is what stops the same sign-off appearing twice, once
+ * under the body and once above the unsubscribe line.
+ *
+ * Compared on a normalised form, because the same address is never typed the
+ * same way twice: "N1 7AA" against "N1  7AA", commas and line breaks moved
+ * around, "UK" capitalised or not. Everything that is not a letter or a digit
+ * collapses to a single space and the whole thing is lowercased, so only the
+ * words and numbers have to match.
+ *
+ * Conservative on purpose: anything it is not sure about returns false, and a
+ * false answer only ever means "print the sign-off as well". The footer prints
+ * the address either way, so a wrong guess here can never lose the address the
+ * law requires.
+ */
+export function signatureCarriesAddress(
+  signature: string | null | undefined,
+  postalAddress: string | null | undefined,
+): boolean {
+  const address = normaliseForCompare(postalAddress);
+  const signed = normaliseForCompare(signature);
+
+  // Too short to be a real address, so a chance match means nothing.
+  if (address.length < 12 || !signed) return false;
+
+  return signed.includes(address);
+}
+
+function normaliseForCompare(value: string | null | undefined): string {
+  return (value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }

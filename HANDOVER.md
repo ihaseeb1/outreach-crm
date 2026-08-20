@@ -224,12 +224,13 @@ Gmail star have no replied thread to exercise them on — the last tick reported
 Six things the user asked for after living with the app for three days. All of
 them are UI-reachable; nothing here needed a migration.
 
-- **Mailbox signatures, with Orankly's social icons**
+- **Orankly's social icons in the email footer**
   (`src/mail/signature.ts`, `mailbox-signature.tsx`, `public/signature/*.png`).
-  `mailboxes.signature` had existed since migration 0002 and **no screen ever
-  set it**, so every email that had gone out was unsigned. The editor is on each
-  mailbox card, with **Save to every mailbox** for the normal case — one company,
-  seven addresses.
+  They render in the closing block with the postal address — see "Where the icons
+  go" below, which is the part to read before touching any of this. The editor is
+  on each mailbox card, with **Save to every mailbox** for the normal case — one
+  company, seven addresses. It also finally exposes `mailboxes.signature`, which
+  had existed since migration 0002 with **no screen ever setting it**.
 
   The icon row is WhatsApp → LinkedIn → Facebook → Instagram, the same four
   links and the same order as the footer of orankly.com
@@ -245,7 +246,7 @@ them are UI-reachable; nothing here needed a migration.
   - **A table, not flex.** Outlook's Word renderer ignores the layout CSS but has
     always laid out tables. Every `<img>` carries explicit width/height and real
     alt text, so images-off shows the network names.
-  - **Warmup gets the signature but not the icons.** Peer mail between your own
+  - **Warmup gets neither the footer nor the icons.** Peer mail between your own
     mailboxes fetching four remote images every time is pointless and a
     distinctive fingerprint.
 
@@ -314,24 +315,63 @@ them are UI-reachable; nothing here needed a migration.
   ancestor and would scroll the page too, which is the jumping-about the layout
   exists to stop.
 
-**Signature and footer were printing the same text twice.** The CAN-SPAM footer
-renders the workspace postal address, and the whole sign-off had been pasted into
-that Settings field as well as into the signature, so the email ended with the
-same block twice. `signatureCarriesAddress` in `mail/unsubscribe.ts` now decides
-whether the footer prints the address at all: if the signature already contains
-it, the footer is just the opt-out line, and the email ends with one closing
-block — sign-off, icons, Unsubscribe. Matched on a normalised form (everything
-that is not a letter or digit collapses to one space, lowercased) because the
-same address is never typed the same way twice. **Conservative by design:**
-anything it is unsure of returns false and the address is printed. A duplicated
-address is untidy; a missing one is a compliance failure. The postal address is
-still *required* — `canSend` refuses to send without one.
+**Where the icons go — got this wrong twice, so it is worth being explicit.**
 
-**Verification:** `npm run typecheck`, `npm run smoke` (227 tests, 52 of them
-new), `npm run build` all clean. The four icons were rendered and looked at.
+The email must end with **one** closing block, and it is the CAN-SPAM footer:
+
+```
+—
+<sending postal address, from Settings>
+[WhatsApp] [LinkedIn] [Facebook] [Instagram]
+Unsubscribe — you will not be contacted again.
+```
+
+The first cut hung the icon row under `mailboxes.signature` instead. That put a
+dark sign-off with icons directly beneath the body, and then the grey address
+block with the unsubscribe line underneath it — **two signatures on every
+email**, and the user rejected it twice. The second cut only stopped the address
+repeating, which was still the icons in the wrong place.
+
+So: `renderSocialRowHtml` / `renderSocialRowText` are called from
+`buildFooterHtml` / `buildFooterText`, not from `buildSignature`. `buildSignature`
+now renders the sign-off text and nothing else.
+
+`mailboxes.signature` survives as an **optional personal line** ("Best, Haseeb")
+above that block, and should normally be empty — the footer already carries the
+company name, both offices and both phone numbers. When the signature only
+repeats the postal address, `signatureCarriesAddress` suppresses it and the
+footer alone closes the email. That comparison is normalised (everything that is
+not a letter or a digit collapses to one space, lowercased) because the same
+address is never typed the same way twice, and it lives in `mail/signature.ts`
+rather than `mail/unsubscribe.ts` **so the mailbox editor can import it** —
+`unsubscribe.ts` pulls in `node:crypto` for the HMAC and cannot cross into a
+client component.
+
+It is conservative in a direction that cannot hurt: unsure means false, and false
+only ever means "print the sign-off as well". The footer prints the address
+either way, so a wrong guess can never lose the address the law requires. The
+address is still *required* — `canSend` refuses to send without one.
+
+The editor on each mailbox card renders that exact block as a live preview,
+sharing `signatureCarriesAddress` with the send path, so what it says about a
+sign-off being skipped is what will actually happen. It needs
+`workspaces.sending_postal_address` passed in from the page for that.
+
+Warmup passes `includeFooter: false`, so it gets no footer, no icons and no
+opt-out — peer mail between your own mailboxes fetching four remote images every
+time would be pointless and a distinctive fingerprint.
+
+**Verification:** `npm run typecheck`, `npm run smoke` (231 tests, 56 of them
+new), `npm run build` all clean. Among the new ones: the closing block asserts
+the address comes before the icons and the icons before the opt-out, that the
+whole email contains the address once, four images and one "Unsubscribe", and
+that the block is a single element a mail client cannot split. The four icons
+were rendered and looked at, and the assembled email was rendered through the
+send path's own functions with the PNGs inlined.
+
 **Not verified against live data** — per the habit below, that means firing a
 real send and reading what a publisher receives. The first campaign email after
-this deploy is the one to check: signature present, four icons visible, and the
+this deploy is the one to check: one closing block, four icons visible, and the
 text/plain part listing the four networks by name.
 
 ## Features added 17 August

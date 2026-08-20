@@ -5,12 +5,15 @@ import { env } from "@/lib/env";
 import { canSend, type BlockCode, type SendKind } from "@/mail/guard";
 import { loadMailboxProvider } from "@/mail/providers";
 import { CAMPAIGN_HEADER } from "@/mail/inbound-classify";
-import { buildSignature, parseSocialKeys } from "@/mail/signature";
+import {
+  buildSignature,
+  parseSocialKeys,
+  signatureCarriesAddress,
+} from "@/mail/signature";
 import { textToHtml } from "@/mail/template";
 import {
   buildFooterHtml,
   buildFooterText,
-  signatureCarriesAddress,
   unsubscribeHeaders,
 } from "@/mail/unsubscribe";
 import type { Message } from "@/types/db";
@@ -112,25 +115,13 @@ export async function sendEmail(
   let text = input.body;
   let html = input.html ?? textToHtml(input.body);
 
-  // Signature, and the social icon row under it. This is the one place outbound
-  // mail carries images; mail/signature.ts explains why they have to be hosted
-  // PNGs rather than the inline SVG the website uses.
-  //
-  // Warmup gets the signature but not the icons. Peer traffic between your own
-  // mailboxes fetching four remote images every time is both pointless and a
-  // distinctive fingerprint — the opposite of what warmup is for.
-  const signature = buildSignature({
-    signature: mailbox.signature,
-    socials: kind === "warmup" ? [] : parseSocialKeys(mailbox.meta),
-    baseUrl: env.appUrl(),
-  });
-  text += signature.text;
-  html += signature.html;
-
   const headers: Record<string, string> = { ...input.extraHeaders };
 
+  // The postal address is resolved before the sign-off, because whether the
+  // sign-off is printed at all depends on it.
+  let postal: string | null = null;
   if (includeFooter) {
-    const postal =
+    postal =
       input.postalAddress ??
       (await fetchPostalAddress(supabase, input.workspaceId));
     if (!postal) {
@@ -142,16 +133,33 @@ export async function sendEmail(
           "Set a sending postal address in Settings before sending (CAN-SPAM).",
       };
     }
-    // The address is still required — the check above refuses to send without
-    // one — but it is only printed here if the signature has not printed it
-    // already. Otherwise the sign-off appears twice, once as itself and once as
-    // the footer, which is what a full sign-off pasted into Settings produces.
+  }
+
+  // A personal sign-off above the closing block — skipped when it only repeats
+  // the address that block already prints, which is what put the same text on
+  // the email twice.
+  const signature = buildSignature({
+    signature: signatureCarriesAddress(mailbox.signature, postal)
+      ? null
+      : mailbox.signature,
+  });
+  text += signature.text;
+  html += signature.html;
+
+  if (postal) {
+    // The closing block: address, the company's links, opt-out. This is the one
+    // place outbound mail carries images; mail/signature.ts explains why they
+    // have to be hosted PNGs rather than the inline SVG the website uses.
+    //
+    // Warmup never reaches here — includeFooter is false for it — so peer mail
+    // between your own mailboxes does not fetch four remote images every time,
+    // which would be both pointless and a distinctive fingerprint.
     const footerInput = {
       workspaceId: input.workspaceId,
       recipientEmail: toEmail,
-      postalAddress: signatureCarriesAddress(mailbox.signature, postal)
-        ? null
-        : postal,
+      postalAddress: postal,
+      socials: parseSocialKeys(mailbox.meta),
+      baseUrl: env.appUrl(),
     };
     text += buildFooterText(footerInput);
     html += buildFooterHtml(footerInput);

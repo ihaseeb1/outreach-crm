@@ -72,11 +72,15 @@ import {
   parseBounceBody,
   WARMUP_HEADER,
 } from "../src/mail/inbound-classify";
-import { contactVars, renderTemplate, templateVariables } from "../src/mail/template";
+import {
+  contactVars,
+  renderTemplate,
+  templateVariables,
+  textToHtml,
+} from "../src/mail/template";
 import {
   buildFooterHtml,
   buildFooterText,
-  signatureCarriesAddress,
   unsubscribeHeaders,
   unsubscribeUrl,
   verifyUnsubscribeParams,
@@ -99,6 +103,9 @@ import {
   SOCIAL_KEYS,
   buildSignature,
   parseSocialKeys,
+  renderSocialRowHtml,
+  renderSocialRowText,
+  signatureCarriesAddress,
 } from "../src/mail/signature";
 import { parseReportRange, resolveReportRange } from "../src/reports/ranges";
 
@@ -1902,90 +1909,27 @@ console.log("\nsignature and social icons");
 const ICON_BASE = "https://crm.orankly.com";
 
 test("no signature means nothing is appended", () => {
-  const rendered = buildSignature({
-    signature: null,
-    socials: SOCIAL_KEYS,
-    baseUrl: ICON_BASE,
-  });
+  const rendered = buildSignature({ signature: null });
   assert.equal(rendered.text, "");
   assert.equal(rendered.html, "");
 });
 
 test("whitespace is not a signature", () => {
-  const rendered = buildSignature({
-    signature: "   \n  ",
-    socials: SOCIAL_KEYS,
-    baseUrl: ICON_BASE,
-  });
-  assert.equal(rendered.html, "");
+  assert.equal(buildSignature({ signature: "   \n  " }).html, "");
 });
 
-test("a signature with no icons carries no images", () => {
-  const rendered = buildSignature({
-    signature: "Haseeb Butt\nOrankly",
-    socials: [],
-    baseUrl: ICON_BASE,
-  });
-  assert.ok(rendered.text.includes("Haseeb Butt"));
-  assert.ok(rendered.html.includes("Haseeb Butt<br />Orankly"));
+test("the sign-off carries no icons of its own", () => {
+  // They belong to the footer. A sign-off with its own icon row above an address
+  // block with none is what read as two signatures.
+  const rendered = buildSignature({ signature: "Best,\nHaseeb" });
+  assert.ok(rendered.html.includes("Best,<br />Haseeb"));
   assert.ok(!rendered.html.includes("<img"));
-});
-
-test("all four icons render, in the order the website lists them", () => {
-  const rendered = buildSignature({
-    signature: "Haseeb Butt",
-    socials: SOCIAL_KEYS,
-    baseUrl: ICON_BASE,
-  });
-  const order = [...rendered.html.matchAll(/signature\/([a-z]+)\.png/g)].map(
-    (match) => match[1],
-  );
-  assert.deepEqual(order, ["whatsapp", "linkedin", "facebook", "instagram"]);
-});
-
-test("icon URLs are absolute — a mail client has no page to resolve against", () => {
-  const rendered = buildSignature({
-    signature: "Haseeb",
-    socials: ["whatsapp"],
-    baseUrl: `${ICON_BASE}/`,
-  });
-  assert.ok(rendered.html.includes(`src="${ICON_BASE}/signature/whatsapp.png"`));
-  // A trailing slash on the base must not double up.
-  assert.ok(!rendered.html.includes("//signature"));
-});
-
-test("every icon is a link with alt text, so blocked images still say what it is", () => {
-  const rendered = buildSignature({
-    signature: "Haseeb",
-    socials: ["linkedin"],
-    baseUrl: ICON_BASE,
-  });
-  assert.ok(
-    rendered.html.includes('href="https://www.linkedin.com/company/orankly/"'),
-  );
-  assert.ok(rendered.html.includes('alt="LinkedIn"'));
-});
-
-test("the plain-text part names each network next to its link", () => {
-  const rendered = buildSignature({
-    signature: "Haseeb",
-    socials: ["whatsapp", "instagram"],
-    baseUrl: ICON_BASE,
-  });
-  assert.ok(rendered.text.includes("WhatsApp: https://wa.me/12819694177"));
-  assert.ok(
-    rendered.text.includes(
-      "Instagram: https://www.instagram.com/webwarnerofficial/",
-    ),
-  );
-  assert.ok(!rendered.text.includes("LinkedIn"));
+  assert.ok(!rendered.text.includes("WhatsApp"));
 });
 
 test("a signature cannot inject markup into the email", () => {
   const rendered = buildSignature({
     signature: '<script>alert("x")</script> & "quoted"',
-    socials: [],
-    baseUrl: ICON_BASE,
   });
   assert.ok(!rendered.html.includes("<script>"));
   assert.ok(rendered.html.includes("&lt;script&gt;"));
@@ -1993,12 +1937,43 @@ test("a signature cannot inject markup into the email", () => {
 });
 
 test("a URL in the signature becomes a link", () => {
-  const rendered = buildSignature({
-    signature: "Haseeb\nhttps://orankly.com",
-    socials: [],
-    baseUrl: ICON_BASE,
-  });
+  const rendered = buildSignature({ signature: "Haseeb\nhttps://orankly.com" });
   assert.ok(rendered.html.includes('<a href="https://orankly.com"'));
+});
+
+test("all four icons render, in the order the website lists them", () => {
+  const row = renderSocialRowHtml(SOCIAL_KEYS, ICON_BASE);
+  const order = [...row.matchAll(/signature\/([a-z]+)\.png/g)].map(
+    (match) => match[1],
+  );
+  assert.deepEqual(order, ["whatsapp", "linkedin", "facebook", "instagram"]);
+});
+
+test("icon URLs are absolute — a mail client has no page to resolve against", () => {
+  const row = renderSocialRowHtml(["whatsapp"], `${ICON_BASE}/`);
+  assert.ok(row.includes(`src="${ICON_BASE}/signature/whatsapp.png"`));
+  // A trailing slash on the base must not double up.
+  assert.ok(!row.includes("//signature"));
+});
+
+test("every icon is a link with alt text, so blocked images still say what it is", () => {
+  const row = renderSocialRowHtml(["linkedin"], ICON_BASE);
+  assert.ok(row.includes('href="https://www.linkedin.com/company/orankly/"'));
+  assert.ok(row.includes('alt="LinkedIn"'));
+});
+
+test("no icons means no empty table left behind", () => {
+  assert.equal(renderSocialRowHtml([], ICON_BASE), "");
+  assert.equal(renderSocialRowText([]), "");
+});
+
+test("the plain-text row names each network next to its link", () => {
+  const row = renderSocialRowText(["whatsapp", "instagram"]);
+  assert.ok(row.includes("WhatsApp: https://wa.me/12819694177"));
+  assert.ok(
+    row.includes("Instagram: https://www.instagram.com/webwarnerofficial/"),
+  );
+  assert.ok(!row.includes("LinkedIn"));
 });
 
 test("an unconfigured mailbox gets every icon", () => {
@@ -2171,10 +2146,11 @@ test("a window that was never computed reads as zero, not undefined", () => {
   assert.equal(countsFor(undefined, 7).warmup, 0);
 });
 
-console.log("\nfooter and signature deduplication");
+console.log("\nthe closing block");
 
-// The user's real sign-off, pasted into both the mailbox signature and the
-// Settings postal address — which is what printed it twice.
+// The user's real sign-off, which is also what is in Settings as the sending
+// postal address — pasting it into the mailbox signature as well is what put it
+// on the email twice.
 const FULL_SIGN_OFF = `Best Regards,
 Team Orankly (Brand by Web Warner LTD)
 Address: 275 New North Road, London, UK, N1 7AA
@@ -2184,9 +2160,63 @@ Phone: +1 281 969 4177 | +44 7456 164477`;
 const FOOTER_BASE = {
   workspaceId: "11111111-1111-1111-1111-111111111111",
   recipientEmail: "editor@example.com",
+  postalAddress: FULL_SIGN_OFF,
 };
 
-test("a sign-off that already prints the address is recognised", () => {
+test("the icons sit in the footer, between the address and the opt-out", () => {
+  const html = buildFooterHtml({
+    ...FOOTER_BASE,
+    socials: SOCIAL_KEYS,
+    baseUrl: ICON_BASE,
+  });
+
+  const address = html.indexOf("New North Road");
+  const icon = html.indexOf("<img ");
+  const optOut = html.indexOf("Unsubscribe");
+
+  assert.ok(address >= 0 && icon >= 0 && optOut >= 0);
+  assert.ok(address < icon, "address must come before the icons");
+  assert.ok(icon < optOut, "icons must come before the opt-out");
+  assert.equal([...html.matchAll(/<img /g)].length, 4);
+});
+
+test("the footer is one element, so a mail client cannot split the block", () => {
+  const html = buildFooterHtml({
+    ...FOOTER_BASE,
+    socials: SOCIAL_KEYS,
+    baseUrl: ICON_BASE,
+  });
+  assert.equal([...html.matchAll(/border-top/g)].length, 1);
+  assert.ok(html.startsWith("<div"));
+  assert.ok(html.endsWith("</div>"));
+});
+
+test("the address and the opt-out survive with no icons selected", () => {
+  const html = buildFooterHtml({ ...FOOTER_BASE, socials: [], baseUrl: ICON_BASE });
+  assert.ok(html.includes("New North Road"));
+  assert.ok(html.includes("Unsubscribe"));
+  assert.ok(!html.includes("<img"));
+});
+
+test("icons are skipped rather than broken when no base URL is given", () => {
+  const html = buildFooterHtml({ ...FOOTER_BASE, socials: SOCIAL_KEYS });
+  assert.ok(!html.includes("<img"));
+  assert.ok(html.includes("Unsubscribe"));
+});
+
+test("the text part lists the address, then the links, then the opt-out", () => {
+  const text = buildFooterText({ ...FOOTER_BASE, socials: SOCIAL_KEYS });
+  const address = text.indexOf("New North Road");
+  const link = text.indexOf("WhatsApp: https://wa.me/");
+  const optOut = text.indexOf("Unsubscribe: http");
+
+  assert.ok(address < link);
+  assert.ok(link < optOut);
+  // No stranded blank runs where a section is absent.
+  assert.ok(!buildFooterText({ ...FOOTER_BASE, socials: [] }).includes("\n\n\n"));
+});
+
+test("a sign-off that only repeats the address is recognised", () => {
   assert.equal(signatureCarriesAddress(FULL_SIGN_OFF, FULL_SIGN_OFF), true);
 });
 
@@ -2200,72 +2230,53 @@ test("the address is recognised however the whitespace and case fall", () => {
   );
 });
 
-test("an address the signature does not mention is not claimed", () => {
-  assert.equal(
-    signatureCarriesAddress(FULL_SIGN_OFF, "9 Someplace Street, Berlin, 10115"),
-    false,
-  );
+test("a personal sign-off is kept — it is not a duplicate of anything", () => {
+  assert.equal(signatureCarriesAddress("Best,\nHaseeb", FULL_SIGN_OFF), false);
 });
 
-test("no signature never suppresses the address", () => {
+test("no signature is not a duplicate either", () => {
   assert.equal(signatureCarriesAddress(null, FULL_SIGN_OFF), false);
   assert.equal(signatureCarriesAddress("", FULL_SIGN_OFF), false);
   assert.equal(signatureCarriesAddress("   ", FULL_SIGN_OFF), false);
 });
 
 test("an address too short to be one is never matched by chance", () => {
-  // "UK" appears inside the sign-off, but two letters prove nothing.
+  // "UK" and "London" both appear in the sign-off, and prove nothing.
   assert.equal(signatureCarriesAddress(FULL_SIGN_OFF, "UK"), false);
   assert.equal(signatureCarriesAddress(FULL_SIGN_OFF, "London"), false);
 });
 
-test("the footer drops the address block when the signature carries it", () => {
-  const html = buildFooterHtml({ ...FOOTER_BASE, postalAddress: null });
-  assert.ok(!html.includes("New North Road"));
-  assert.ok(!html.includes("Best Regards"));
-  // The opt-out is not optional, whatever else is dropped.
-  assert.ok(html.includes("Unsubscribe"));
-  assert.ok(html.includes("/api/unsubscribe?"));
-});
-
-test("the footer still prints the address when nothing else has", () => {
-  const html = buildFooterHtml({
-    ...FOOTER_BASE,
-    postalAddress: "275 New North Road, London, UK, N1 7AA",
-  });
-  assert.ok(html.includes("275 New North Road"));
-  assert.ok(html.includes("Unsubscribe"));
-});
-
-test("the text part drops the address block too, keeping the opt-out", () => {
-  const withAddress = buildFooterText({
-    ...FOOTER_BASE,
-    postalAddress: "275 New North Road, London, UK, N1 7AA",
-  });
-  const without = buildFooterText({ ...FOOTER_BASE, postalAddress: null });
-
-  assert.ok(withAddress.includes("275 New North Road"));
-  assert.ok(!without.includes("275 New North Road"));
-  assert.ok(without.includes("Unsubscribe: http"));
-  // No stranded blank lines where the address used to be.
-  assert.ok(!without.includes("\n\n\n"));
-});
-
-test("dropping the address leaves one closing block, not two", () => {
+test("the whole email ends with one block, not two", () => {
+  // What the send path assembles: body, sign-off (suppressed here because it
+  // only repeats the address), then the closing block.
   const signature = buildSignature({
-    signature: FULL_SIGN_OFF,
-    socials: SOCIAL_KEYS,
-    baseUrl: "https://crm.orankly.com",
+    signature: signatureCarriesAddress(FULL_SIGN_OFF, FULL_SIGN_OFF)
+      ? null
+      : FULL_SIGN_OFF,
   });
   const email =
-    signature.html + buildFooterHtml({ ...FOOTER_BASE, postalAddress: null });
+    textToHtml("Hi Sarah,\n\nWould you consider a guest contribution?") +
+    signature.html +
+    buildFooterHtml({ ...FOOTER_BASE, socials: SOCIAL_KEYS, baseUrl: ICON_BASE });
 
-  // The sign-off appears once, the icons sit inside that one block, and the
-  // only thing after them is the opt-out line.
   assert.equal(email.split("Best Regards").length - 1, 1);
   assert.equal(email.split("New North Road").length - 1, 1);
   assert.equal([...email.matchAll(/<img /g)].length, 4);
-  assert.ok(email.indexOf("<img ") < email.indexOf("Unsubscribe"));
+  assert.equal([...email.matchAll(/Unsubscribe/g)].length, 1);
+});
+
+test("a personal sign-off still prints above the closing block", () => {
+  const signature = buildSignature({
+    signature: signatureCarriesAddress("Best,\nHaseeb", FULL_SIGN_OFF)
+      ? null
+      : "Best,\nHaseeb",
+  });
+  const email =
+    signature.html +
+    buildFooterHtml({ ...FOOTER_BASE, socials: SOCIAL_KEYS, baseUrl: ICON_BASE });
+
+  assert.ok(email.indexOf("Haseeb") < email.indexOf("New North Road"));
+  assert.equal([...email.matchAll(/<img /g)].length, 4);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

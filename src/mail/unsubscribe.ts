@@ -3,6 +3,11 @@ import crypto from "node:crypto";
 import { env } from "@/lib/env";
 import { normalizeEmail } from "@/lib/email";
 import { escapeHtml } from "@/lib/html";
+import {
+  renderSocialRowHtml,
+  renderSocialRowText,
+  type SocialKey,
+} from "@/mail/signature";
 
 /**
  * Stateless one-click unsubscribe links.
@@ -74,22 +79,35 @@ export function unsubscribeHeaders(
 export interface FooterInput {
   workspaceId: string;
   recipientEmail: string;
+  postalAddress: string;
   /**
-   * Null when the signature above already prints it — see
-   * `signatureCarriesAddress`. The address still has to be *in* the email; this
-   * only decides whether the footer is the thing that puts it there.
+   * Social icons, rendered inside this block between the address and the
+   * opt-out. They belong here rather than under a sign-off higher up: this is
+   * the message's one closing block, and splitting the company's details from
+   * its links puts two signatures on every email.
    */
-  postalAddress: string | null;
+  socials?: SocialKey[];
+  /** Absolute origin the icon PNGs are served from. Needed if `socials` is set. */
+  baseUrl?: string;
   senderName?: string | null;
 }
 
-/** CAN-SPAM footer: physical address + a working opt-out, on every campaign email. */
+/**
+ * CAN-SPAM footer: physical address, the company's links, and a working opt-out.
+ * On every campaign email — warmup passes `includeFooter: false` and gets none
+ * of it.
+ */
 export function buildFooterText(input: FooterInput): string {
-  const address = input.postalAddress?.trim();
+  const socials = renderSocialRowText(input.socials ?? []);
   return [
+    // Two blank lines before the rule. With no sign-off in between, one left the
+    // last sentence of the message sitting directly on top of the divider.
+    "",
     "",
     "—",
-    ...(address ? [address, ""] : []),
+    input.postalAddress.trim(),
+    ...(socials ? ["", socials] : []),
+    "",
     `Don't want to hear from me again? Unsubscribe: ${unsubscribeUrl(
       input.workspaceId,
       input.recipientEmail,
@@ -99,57 +117,23 @@ export function buildFooterText(input: FooterInput): string {
 
 export function buildFooterHtml(input: FooterInput): string {
   const url = unsubscribeUrl(input.workspaceId, input.recipientEmail);
-  const address = input.postalAddress?.trim();
+  const socials =
+    input.socials && input.baseUrl
+      ? renderSocialRowHtml(input.socials, input.baseUrl)
+      : "";
+
   return [
-    // 16px rather than 24: with the address gone this sits directly under the
-    // signature's icon row, and they read as one closing block instead of two.
-    '<div style="margin-top:16px;padding-top:12px;border-top:1px solid #e3e6ea;',
+    '<div style="margin-top:24px;padding-top:12px;border-top:1px solid #e3e6ea;',
     'color:#5c6675;font-size:12px;line-height:1.5;font-family:Arial,sans-serif">',
-    ...(address
-      ? [escapeHtml(address).replace(/\n/g, "<br />"), "<br /><br />"]
-      : []),
+    escapeHtml(input.postalAddress.trim()).replace(/\n/g, "<br />"),
+    socials,
+    // The icon row brings its own top margin, so the gap before the opt-out only
+    // needs one break after it rather than the two a bare address needs.
+    socials ? "<br />" : "<br /><br />",
     `<a href="${url}" style="color:#5c6675">Unsubscribe</a>`,
     " — you will not be contacted again.",
     "</div>",
   ].join("");
-}
-
-/**
- * Does the signature already print the postal address?
- *
- * CAN-SPAM wants a physical address in the message, not in a particular place.
- * Once somebody writes a proper sign-off it almost always *is* the address —
- * name, company, offices, phone — and printing the Settings value again turned
- * one signature into two, which is what this exists to stop.
- *
- * Compared on a normalised form, because the same address is never typed the
- * same way twice: "N1 7AA" against "N1  7AA", commas and line breaks moved
- * around, "UK" capitalised or not. Everything that is not a letter or a digit
- * collapses to a single space and the whole thing is lowercased, so only the
- * words and numbers have to match.
- *
- * Conservative on purpose: anything it is not sure about returns false and the
- * footer prints the address. A duplicated address is untidy; a missing one is a
- * compliance failure.
- */
-export function signatureCarriesAddress(
-  signature: string | null | undefined,
-  postalAddress: string | null | undefined,
-): boolean {
-  const address = normaliseForCompare(postalAddress);
-  const signed = normaliseForCompare(signature);
-
-  // Too short to be a real address, so a chance match means nothing.
-  if (address.length < 12 || !signed) return false;
-
-  return signed.includes(address);
-}
-
-function normaliseForCompare(value: string | null | undefined): string {
-  return (value ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
 }
 
 export { escapeHtml };

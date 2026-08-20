@@ -4,7 +4,11 @@ import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-import { SOCIAL_PROFILES, type SocialKey } from "@/mail/signature";
+import {
+  SOCIAL_PROFILES,
+  signatureCarriesAddress,
+  type SocialKey,
+} from "@/mail/signature";
 
 /**
  * Same-origin path to an icon, so next/image serves it locally rather than
@@ -14,24 +18,28 @@ import { SOCIAL_PROFILES, type SocialKey } from "@/mail/signature";
 const localIcon = (key: SocialKey) => `/signature/${key}.png`;
 
 /**
- * The sign-off every email from this mailbox carries, and which of Orankly's
- * social profiles ride underneath it.
+ * Which social icons ride in the footer of this mailbox's outbound mail, and an
+ * optional personal sign-off above it.
  *
- * The profiles themselves are fixed (see mail/signature.ts) — the choice here is
- * only which ones appear, because the four URLs are the company's, not this
- * mailbox's. "Save to every mailbox" is the common case: one company, one
- * sign-off, seven addresses.
+ * The preview is the point of this panel. The icons go in the closing block with
+ * the postal address from Settings — not under the sign-off — and the only way to
+ * make that obvious was to render the block exactly as it will be sent. It shares
+ * `signatureCarriesAddress` with the send path, so what it says about a sign-off
+ * being skipped is what will actually happen.
  */
 export function MailboxSignature({
   id,
   email,
   signature,
   socials,
+  postalAddress,
 }: {
   id: string;
   email: string;
   signature: string | null;
   socials: SocialKey[];
+  /** `workspaces.sending_postal_address` — what the footer prints. */
+  postalAddress: string | null;
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -41,6 +49,11 @@ export function MailboxSignature({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+
+  const chosen = SOCIAL_PROFILES.filter((profile) =>
+    selected.includes(profile.key),
+  );
+  const duplicated = signatureCarriesAddress(text, postalAddress);
 
   function toggle(key: SocialKey) {
     setMessage(null);
@@ -69,9 +82,7 @@ export function MailboxSignature({
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error ?? "Could not save.");
       const updated = Number(payload.updated ?? 1);
-      setMessage(
-        updated > 1 ? `Saved to ${updated} mailboxes.` : "Saved.",
-      );
+      setMessage(updated > 1 ? `Saved to ${updated} mailboxes.` : "Saved.");
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -81,16 +92,14 @@ export function MailboxSignature({
   }
 
   if (!open) {
-    const summary = signature
-      ? `${socials.length} icon${socials.length === 1 ? "" : "s"}`
-      : "none set";
     return (
       <button
         className="text-xs text-[var(--color-brand)] hover:underline"
         type="button"
         onClick={() => setOpen(true)}
       >
-        Signature: {summary} — edit
+        Email footer: {socials.length} icon{socials.length === 1 ? "" : "s"}
+        {signature ? ", sign-off set" : ""} — edit
       </button>
     );
   }
@@ -98,7 +107,7 @@ export function MailboxSignature({
   return (
     <div className="space-y-3 rounded-md border border-[var(--color-line)] p-3">
       <div className="flex items-center justify-between">
-        <p className="text-xs font-semibold">Signature</p>
+        <p className="text-xs font-semibold">Email footer</p>
         <button
           className="hint hover:underline"
           type="button"
@@ -106,26 +115,6 @@ export function MailboxSignature({
         >
           Close
         </button>
-      </div>
-
-      <div>
-        <label className="label text-xs" htmlFor={`signature-${id}`}>
-          Sign-off
-        </label>
-        <textarea
-          id={`signature-${id}`}
-          className="input min-h-24 font-mono text-xs"
-          maxLength={2000}
-          placeholder={"Haseeb Butt\nFounder, Orankly\n+1 281 969 4177\nhttps://orankly.com"}
-          value={text}
-          onChange={(e) => {
-            setText(e.target.value);
-            setMessage(null);
-          }}
-        />
-        <p className="hint mt-1">
-          Plain text. Line breaks are kept and any URL becomes a link.
-        </p>
       </div>
 
       <fieldset>
@@ -153,24 +142,68 @@ export function MailboxSignature({
           ))}
         </div>
         <p className="hint mt-1.5">
-          Linking to Orankly&apos;s own profiles — WhatsApp{" "}
-          <span className="font-mono">wa.me/12819694177</span>, LinkedIn{" "}
-          <span className="font-mono">/company/orankly</span>, Facebook and
-          Instagram <span className="font-mono">webwarner</span>. Same links as
-          the footer of orankly.com.
+          These sit in the footer of every campaign email — under your postal
+          address from Settings, above the unsubscribe line. Orankly&apos;s own
+          profiles: WhatsApp <span className="font-mono">wa.me/12819694177</span>,
+          LinkedIn <span className="font-mono">/company/orankly</span>, Facebook
+          and Instagram <span className="font-mono">webwarner</span>. The same
+          links as the footer of orankly.com.
         </p>
       </fieldset>
 
-      {text.trim() && (
-        <div>
-          <p className="label text-xs">Preview</p>
-          <div className="rounded-md border border-[var(--color-line)] bg-white p-3">
-            <p className="whitespace-pre-wrap text-sm leading-relaxed">{text}</p>
-            {selected.length > 0 && (
+      <div>
+        <label className="label text-xs" htmlFor={`signature-${id}`}>
+          Sign-off above it (optional)
+        </label>
+        <textarea
+          id={`signature-${id}`}
+          className="input min-h-16 font-mono text-xs"
+          maxLength={2000}
+          placeholder={"Best,\nHaseeb"}
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value);
+            setMessage(null);
+          }}
+        />
+        <p className="hint mt-1">
+          A personal line under the message, for when the footer alone is too
+          impersonal. Leave it empty and the footer is the whole close — which is
+          usually what you want, since the footer already carries the company name,
+          both addresses and the phone numbers.
+        </p>
+        {duplicated && (
+          <p className="mt-1.5 rounded-md bg-amber-50 px-2.5 py-1.5 text-xs text-[var(--color-warn)]">
+            This repeats your postal address, so it will not be printed — you
+            would have seen it twice. Only the footer below will show.
+          </p>
+        )}
+      </div>
+
+      <div>
+        <p className="label text-xs">What a publisher receives at the end</p>
+        <div className="rounded-md border border-[var(--color-line)] bg-white p-3">
+          <p className="text-sm text-[var(--color-muted)]">…your message.</p>
+
+          {text.trim() && !duplicated && (
+            <p className="mt-3 whitespace-pre-wrap text-sm leading-relaxed">
+              {text}
+            </p>
+          )}
+
+          <div className="mt-4 border-t border-[var(--color-line)] pt-3 text-xs leading-relaxed text-[var(--color-muted)]">
+            {postalAddress ? (
+              <p className="whitespace-pre-wrap">{postalAddress}</p>
+            ) : (
+              <p className="text-[var(--color-warn)]">
+                No sending postal address set — add one in Settings, or campaign
+                sends stay blocked.
+              </p>
+            )}
+
+            {chosen.length > 0 && (
               <div className="mt-3 flex gap-2">
-                {SOCIAL_PROFILES.filter((profile) =>
-                  selected.includes(profile.key),
-                ).map((profile) => (
+                {chosen.map((profile) => (
                   <Image
                     key={profile.key}
                     src={localIcon(profile.key)}
@@ -183,9 +216,18 @@ export function MailboxSignature({
                 ))}
               </div>
             )}
+
+            <p className="mt-3">
+              <span className="underline">Unsubscribe</span> — you will not be
+              contacted again.
+            </p>
           </div>
         </div>
-      )}
+        <p className="hint mt-1">
+          The address and the unsubscribe link are required by CAN-SPAM and cannot
+          be turned off. Warmup mail gets neither, so it never fetches the icons.
+        </p>
+      </div>
 
       <label className="flex items-start gap-2 text-xs">
         <input
@@ -203,12 +245,6 @@ export function MailboxSignature({
         </span>
       </label>
 
-      <p className="hint">
-        The icons are hosted images, so a recipient with images switched off sees
-        the network names as text instead. Nothing here tracks anything — there
-        is no pixel, and the URLs are the public profiles.
-      </p>
-
       <div className="flex items-center gap-3">
         <button
           className="btn-primary px-2.5 py-1.5 text-xs"
@@ -216,7 +252,7 @@ export function MailboxSignature({
           disabled={busy}
           onClick={() => void save()}
         >
-          {busy ? "Saving…" : "Save signature"}
+          {busy ? "Saving…" : "Save"}
         </button>
         {message && <span className="text-xs text-[var(--color-ok)]">{message}</span>}
         {error && <span className="text-xs text-[var(--color-danger)]">{error}</span>}

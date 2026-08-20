@@ -351,6 +351,7 @@ export default async function MailboxesPage({
                   email={mailbox.email}
                   signature={mailbox.signature}
                   socials={parseSocialKeys(mailbox.meta)}
+                  postalAddress={session.workspace.sending_postal_address}
                 />
 
                 <MailboxActions
