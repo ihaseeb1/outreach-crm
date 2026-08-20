@@ -74,7 +74,9 @@ import {
 } from "../src/mail/inbound-classify";
 import { contactVars, renderTemplate, templateVariables } from "../src/mail/template";
 import {
+  buildFooterHtml,
   buildFooterText,
+  signatureCarriesAddress,
   unsubscribeHeaders,
   unsubscribeUrl,
   verifyUnsubscribeParams,
@@ -2167,6 +2169,103 @@ test("a window that was never computed reads as zero, not undefined", () => {
   assert.equal(countsFor(volume, 7).outreach, 1);
   assert.equal(countsFor(volume, 90).outreach, 0);
   assert.equal(countsFor(undefined, 7).warmup, 0);
+});
+
+console.log("\nfooter and signature deduplication");
+
+// The user's real sign-off, pasted into both the mailbox signature and the
+// Settings postal address — which is what printed it twice.
+const FULL_SIGN_OFF = `Best Regards,
+Team Orankly (Brand by Web Warner LTD)
+Address: 275 New North Road, London, UK, N1 7AA
+118 Vintage Park Blvd W, Houston, TX 77070, USA
+Phone: +1 281 969 4177 | +44 7456 164477`;
+
+const FOOTER_BASE = {
+  workspaceId: "11111111-1111-1111-1111-111111111111",
+  recipientEmail: "editor@example.com",
+};
+
+test("a sign-off that already prints the address is recognised", () => {
+  assert.equal(signatureCarriesAddress(FULL_SIGN_OFF, FULL_SIGN_OFF), true);
+});
+
+test("the address is recognised however the whitespace and case fall", () => {
+  assert.equal(
+    signatureCarriesAddress(
+      FULL_SIGN_OFF,
+      "275 New   North Road,\nLONDON, uk, n1  7aa",
+    ),
+    true,
+  );
+});
+
+test("an address the signature does not mention is not claimed", () => {
+  assert.equal(
+    signatureCarriesAddress(FULL_SIGN_OFF, "9 Someplace Street, Berlin, 10115"),
+    false,
+  );
+});
+
+test("no signature never suppresses the address", () => {
+  assert.equal(signatureCarriesAddress(null, FULL_SIGN_OFF), false);
+  assert.equal(signatureCarriesAddress("", FULL_SIGN_OFF), false);
+  assert.equal(signatureCarriesAddress("   ", FULL_SIGN_OFF), false);
+});
+
+test("an address too short to be one is never matched by chance", () => {
+  // "UK" appears inside the sign-off, but two letters prove nothing.
+  assert.equal(signatureCarriesAddress(FULL_SIGN_OFF, "UK"), false);
+  assert.equal(signatureCarriesAddress(FULL_SIGN_OFF, "London"), false);
+});
+
+test("the footer drops the address block when the signature carries it", () => {
+  const html = buildFooterHtml({ ...FOOTER_BASE, postalAddress: null });
+  assert.ok(!html.includes("New North Road"));
+  assert.ok(!html.includes("Best Regards"));
+  // The opt-out is not optional, whatever else is dropped.
+  assert.ok(html.includes("Unsubscribe"));
+  assert.ok(html.includes("/api/unsubscribe?"));
+});
+
+test("the footer still prints the address when nothing else has", () => {
+  const html = buildFooterHtml({
+    ...FOOTER_BASE,
+    postalAddress: "275 New North Road, London, UK, N1 7AA",
+  });
+  assert.ok(html.includes("275 New North Road"));
+  assert.ok(html.includes("Unsubscribe"));
+});
+
+test("the text part drops the address block too, keeping the opt-out", () => {
+  const withAddress = buildFooterText({
+    ...FOOTER_BASE,
+    postalAddress: "275 New North Road, London, UK, N1 7AA",
+  });
+  const without = buildFooterText({ ...FOOTER_BASE, postalAddress: null });
+
+  assert.ok(withAddress.includes("275 New North Road"));
+  assert.ok(!without.includes("275 New North Road"));
+  assert.ok(without.includes("Unsubscribe: http"));
+  // No stranded blank lines where the address used to be.
+  assert.ok(!without.includes("\n\n\n"));
+});
+
+test("dropping the address leaves one closing block, not two", () => {
+  const signature = buildSignature({
+    signature: FULL_SIGN_OFF,
+    socials: SOCIAL_KEYS,
+    baseUrl: "https://crm.orankly.com",
+  });
+  const email =
+    signature.html + buildFooterHtml({ ...FOOTER_BASE, postalAddress: null });
+
+  // The sign-off appears once, the icons sit inside that one block, and the
+  // only thing after them is the opt-out line.
+  assert.equal(email.split("Best Regards").length - 1, 1);
+  assert.equal(email.split("New North Road").length - 1, 1);
+  assert.equal([...email.matchAll(/<img /g)].length, 4);
+  assert.ok(email.indexOf("<img ") < email.indexOf("Unsubscribe"));
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

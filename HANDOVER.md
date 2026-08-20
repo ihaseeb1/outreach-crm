@@ -3,10 +3,8 @@
 Read this first, then `DEPLOY_STATUS.md` for hosting and `BUILD_LOG.md` for the
 original seven build phases.
 
-Live at **https://crm.orankly.com**. Everything here is on `main` and deployed,
-**except** the six items under "Features added 20 August" — those are written
-and tested but were left uncommitted pending a look, because pushing `main`
-deploys straight to production.
+Live at **https://crm.orankly.com**. Everything here is on `main` and deployed.
+Pushing `main` deploys straight to production, so ask before pushing.
 
 ---
 
@@ -316,7 +314,20 @@ them are UI-reachable; nothing here needed a migration.
   ancestor and would scroll the page too, which is the jumping-about the layout
   exists to stop.
 
-**Verification:** `npm run typecheck`, `npm run smoke` (218 tests, 43 of them
+**Signature and footer were printing the same text twice.** The CAN-SPAM footer
+renders the workspace postal address, and the whole sign-off had been pasted into
+that Settings field as well as into the signature, so the email ended with the
+same block twice. `signatureCarriesAddress` in `mail/unsubscribe.ts` now decides
+whether the footer prints the address at all: if the signature already contains
+it, the footer is just the opt-out line, and the email ends with one closing
+block — sign-off, icons, Unsubscribe. Matched on a normalised form (everything
+that is not a letter or digit collapses to one space, lowercased) because the
+same address is never typed the same way twice. **Conservative by design:**
+anything it is unsure of returns false and the address is printed. A duplicated
+address is untidy; a missing one is a compliance failure. The postal address is
+still *required* — `canSend` refuses to send without one.
+
+**Verification:** `npm run typecheck`, `npm run smoke` (227 tests, 52 of them
 new), `npm run build` all clean. The four icons were rendered and looked at.
 **Not verified against live data** — per the habit below, that means firing a
 real send and reading what a publisher receives. The first campaign email after

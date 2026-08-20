@@ -10,6 +10,7 @@ import { textToHtml } from "@/mail/template";
 import {
   buildFooterHtml,
   buildFooterText,
+  signatureCarriesAddress,
   unsubscribeHeaders,
 } from "@/mail/unsubscribe";
 import type { Message } from "@/types/db";
@@ -141,10 +142,16 @@ export async function sendEmail(
           "Set a sending postal address in Settings before sending (CAN-SPAM).",
       };
     }
+    // The address is still required — the check above refuses to send without
+    // one — but it is only printed here if the signature has not printed it
+    // already. Otherwise the sign-off appears twice, once as itself and once as
+    // the footer, which is what a full sign-off pasted into Settings produces.
     const footerInput = {
       workspaceId: input.workspaceId,
       recipientEmail: toEmail,
-      postalAddress: postal,
+      postalAddress: signatureCarriesAddress(mailbox.signature, postal)
+        ? null
+        : postal,
     };
     text += buildFooterText(footerInput);
     html += buildFooterHtml(footerInput);
