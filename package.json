@@ -9,6 +9,7 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "smoke": "tsx scripts/smoke-test.ts",
+    "signature-icons": "tsx scripts/build-signature-icons.ts",
     "scrape-worker": "tsx scripts/scrape-worker.ts"
   },
   "dependencies": {

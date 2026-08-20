@@ -4,7 +4,7 @@ import { createContext, useContext, useState, type ReactNode } from "react";
 
 import {
   VOLUME_WINDOWS,
-  emptyVolume,
+  countsFor,
   perDay,
   type MailboxVolume as Volume,
   type VolumeWindow,
@@ -66,7 +66,7 @@ export function VolumeWindowToggle() {
 
 export function MailboxVolume({ volume }: { volume?: Volume | null }) {
   const { days } = useVolumeWindow();
-  const counts = (volume ?? emptyVolume())[days];
+  const counts = countsFor(volume ?? undefined, days);
   const total = counts.outreach + counts.warmup;
 
   return (

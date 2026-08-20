@@ -239,6 +239,21 @@ export async function DELETE(request: Request) {
   if (!id) return NextResponse.json({ error: "Missing id." }, { status: 400 });
 
   const supabase = await createSupabaseServerClient();
+
+  // Read the domain before deleting it — the activity log is the only trace a
+  // removed rate card leaves, and "deal deleted, id 8f3c…" tells nobody which
+  // publisher went missing. deal_prices cascades with the row (migration 0005).
+  const { data: existing } = await supabase
+    .from("deals")
+    .select("domain, status")
+    .eq("id", id)
+    .eq("workspace_id", session.workspace.id)
+    .maybeSingle();
+
+  if (!existing) {
+    return NextResponse.json({ error: "Deal not found." }, { status: 404 });
+  }
+
   const { error } = await supabase
     .from("deals")
     .delete()
@@ -246,5 +261,15 @@ export async function DELETE(request: Request) {
     .eq("workspace_id", session.workspace.id);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  await logActivity(supabase, {
+    workspaceId: session.workspace.id,
+    actorId: session.userId,
+    action: "deal.deleted",
+    entityType: "deal",
+    entityId: id,
+    meta: existing as Record<string, unknown>,
+  });
+
   return NextResponse.json({ ok: true });
 }

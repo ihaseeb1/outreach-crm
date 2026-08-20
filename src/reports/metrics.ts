@@ -86,6 +86,57 @@ export function buildDailySeries(
   return series;
 }
 
+export interface SeriesPoint extends DailyPoint {
+  /**
+   * Last day the bucket covers. Equal to `date` for daily buckets, so a
+   * consumer can render one tooltip format for both.
+   */
+  endDate: string;
+  /** Days actually in this bucket — the oldest weekly one can be a stub. */
+  days: number;
+}
+
+/**
+ * The volume chart's data, bucketed by day or by week.
+ *
+ * A 12-month report has 365 days in it. Rendered as one bar each inside a card
+ * a few hundred pixels wide, every bar is sub-pixel and the chart reads as a
+ * solid block — so long ranges are folded into weeks instead.
+ *
+ * Weeks are aligned to the **end** of the range, not to Mondays: the rightmost
+ * bucket must end today, or the chart's last bar is a partial week that looks
+ * like a collapse in sending. The leftmost bucket takes the remainder.
+ */
+export function buildSeries(
+  days: number,
+  input: { sent: string[]; replies: string[]; bounces: string[] },
+  bucket: "day" | "week" = "day",
+  today: Date = new Date(),
+): SeriesPoint[] {
+  const daily = buildDailySeries(days, input, today);
+
+  if (bucket === "day") {
+    return daily.map((point) => ({ ...point, endDate: point.date, days: 1 }));
+  }
+
+  const points: SeriesPoint[] = [];
+  // Walk backwards in sevens from the last day, then reverse — that is what
+  // pins the final bucket to today rather than to the start of the range.
+  for (let end = daily.length; end > 0; end -= 7) {
+    const chunk = daily.slice(Math.max(0, end - 7), end);
+    points.push({
+      date: chunk[0]!.date,
+      endDate: chunk[chunk.length - 1]!.date,
+      days: chunk.length,
+      sent: sum(chunk, (point) => point.sent),
+      replies: sum(chunk, (point) => point.replies),
+      bounces: sum(chunk, (point) => point.bounces),
+    });
+  }
+
+  return points.reverse();
+}
+
 export interface NichePrice {
   niche: string;
   price: number;

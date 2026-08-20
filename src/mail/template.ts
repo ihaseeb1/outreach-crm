@@ -1,4 +1,4 @@
-import { escapeHtml } from "@/lib/html";
+import { escapeHtml, linkifyHtml } from "@/lib/html";
 import type { Contact } from "@/types/db";
 
 /**
@@ -63,16 +63,9 @@ export function textToHtml(text: string): string {
     .map((block) => escapeHtml(block).replace(/\n/g, "<br />"))
     .map(
       (block) =>
-        `<p style="margin:0 0 16px 0;line-height:1.55">${linkify(block)}</p>`,
+        `<p style="margin:0 0 16px 0;line-height:1.55">${linkifyHtml(block)}</p>`,
     )
     .join("");
 
   return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#14181f">${paragraphs}</div>`;
-}
-
-function linkify(html: string): string {
-  return html.replace(
-    /\bhttps?:\/\/[^\s<]+/g,
-    (url) => `<a href="${url}" style="color:#2563eb">${url}</a>`,
-  );
 }

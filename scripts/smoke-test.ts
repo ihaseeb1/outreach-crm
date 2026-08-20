@@ -43,6 +43,7 @@ import { rate, scoreMailbox, type HealthSignals } from "../src/health/score";
 import {
   buildDailySeries,
   buildFunnel,
+  buildSeries,
   summariseByNiche,
   totals,
 } from "../src/reports/metrics";
@@ -82,11 +83,22 @@ import { extractFromHtml, isJunkEmail } from "../src/scraper/extract";
 import { isAllowed, parseRobots } from "../src/scraper/robots";
 import { isDisposableDomain } from "../src/validation/disposable";
 import {
+  MAX_REPORT_MAILBOX_WINDOW,
   MAX_VOLUME_WINDOW,
+  REPORT_MAILBOX_WINDOWS,
+  countsFor,
   summariseVolume,
   perDay,
   type SentRow,
+  type VolumeWindow,
+  type WindowCounts,
 } from "../src/mailboxes/volume";
+import {
+  SOCIAL_KEYS,
+  buildSignature,
+  parseSocialKeys,
+} from "../src/mail/signature";
+import { parseReportRange, resolveReportRange } from "../src/reports/ranges";
 
 // Set before any test runs; env values are read lazily inside the functions.
 process.env.APP_ENCRYPTION_KEY ??= "0".repeat(64);
@@ -1489,7 +1501,10 @@ function sentRow(
 function volumeFor(rows: SentRow[], mailbox: string) {
   const volume = summariseVolume(rows, VOLUME_NOW)[mailbox];
   assert.ok(volume, `no volume recorded for ${mailbox}`);
-  return volume;
+  // The windows are a parameter now, so the return type is keyed by any number.
+  // Called without them it is exactly these three, which lets the assertions
+  // below index it directly instead of guarding each one.
+  return volume as Record<VolumeWindow, WindowCounts>;
 }
 
 test("windows nest — a recent send is in all three counts", () => {
@@ -1878,6 +1893,280 @@ test("empty input is safe", () => {
   const quote = parseQuote("");
   assert.equal(countFound(quote), 0);
   assert.deepEqual(quote.prices, []);
+});
+
+console.log("\nsignature and social icons");
+
+const ICON_BASE = "https://crm.orankly.com";
+
+test("no signature means nothing is appended", () => {
+  const rendered = buildSignature({
+    signature: null,
+    socials: SOCIAL_KEYS,
+    baseUrl: ICON_BASE,
+  });
+  assert.equal(rendered.text, "");
+  assert.equal(rendered.html, "");
+});
+
+test("whitespace is not a signature", () => {
+  const rendered = buildSignature({
+    signature: "   \n  ",
+    socials: SOCIAL_KEYS,
+    baseUrl: ICON_BASE,
+  });
+  assert.equal(rendered.html, "");
+});
+
+test("a signature with no icons carries no images", () => {
+  const rendered = buildSignature({
+    signature: "Haseeb Butt\nOrankly",
+    socials: [],
+    baseUrl: ICON_BASE,
+  });
+  assert.ok(rendered.text.includes("Haseeb Butt"));
+  assert.ok(rendered.html.includes("Haseeb Butt<br />Orankly"));
+  assert.ok(!rendered.html.includes("<img"));
+});
+
+test("all four icons render, in the order the website lists them", () => {
+  const rendered = buildSignature({
+    signature: "Haseeb Butt",
+    socials: SOCIAL_KEYS,
+    baseUrl: ICON_BASE,
+  });
+  const order = [...rendered.html.matchAll(/signature\/([a-z]+)\.png/g)].map(
+    (match) => match[1],
+  );
+  assert.deepEqual(order, ["whatsapp", "linkedin", "facebook", "instagram"]);
+});
+
+test("icon URLs are absolute — a mail client has no page to resolve against", () => {
+  const rendered = buildSignature({
+    signature: "Haseeb",
+    socials: ["whatsapp"],
+    baseUrl: `${ICON_BASE}/`,
+  });
+  assert.ok(rendered.html.includes(`src="${ICON_BASE}/signature/whatsapp.png"`));
+  // A trailing slash on the base must not double up.
+  assert.ok(!rendered.html.includes("//signature"));
+});
+
+test("every icon is a link with alt text, so blocked images still say what it is", () => {
+  const rendered = buildSignature({
+    signature: "Haseeb",
+    socials: ["linkedin"],
+    baseUrl: ICON_BASE,
+  });
+  assert.ok(
+    rendered.html.includes('href="https://www.linkedin.com/company/orankly/"'),
+  );
+  assert.ok(rendered.html.includes('alt="LinkedIn"'));
+});
+
+test("the plain-text part names each network next to its link", () => {
+  const rendered = buildSignature({
+    signature: "Haseeb",
+    socials: ["whatsapp", "instagram"],
+    baseUrl: ICON_BASE,
+  });
+  assert.ok(rendered.text.includes("WhatsApp: https://wa.me/12819694177"));
+  assert.ok(
+    rendered.text.includes(
+      "Instagram: https://www.instagram.com/webwarnerofficial/",
+    ),
+  );
+  assert.ok(!rendered.text.includes("LinkedIn"));
+});
+
+test("a signature cannot inject markup into the email", () => {
+  const rendered = buildSignature({
+    signature: '<script>alert("x")</script> & "quoted"',
+    socials: [],
+    baseUrl: ICON_BASE,
+  });
+  assert.ok(!rendered.html.includes("<script>"));
+  assert.ok(rendered.html.includes("&lt;script&gt;"));
+  assert.ok(rendered.html.includes("&amp;"));
+});
+
+test("a URL in the signature becomes a link", () => {
+  const rendered = buildSignature({
+    signature: "Haseeb\nhttps://orankly.com",
+    socials: [],
+    baseUrl: ICON_BASE,
+  });
+  assert.ok(rendered.html.includes('<a href="https://orankly.com"'));
+});
+
+test("an unconfigured mailbox gets every icon", () => {
+  assert.deepEqual(parseSocialKeys(null), [
+    "whatsapp",
+    "linkedin",
+    "facebook",
+    "instagram",
+  ]);
+  assert.deepEqual(parseSocialKeys({}), SOCIAL_KEYS);
+});
+
+test("an explicit empty list means the user switched them off", () => {
+  assert.deepEqual(parseSocialKeys({ socials: [] }), []);
+});
+
+test("stored icons come back in website order, deduplicated, junk dropped", () => {
+  assert.deepEqual(
+    parseSocialKeys({
+      socials: ["facebook", "whatsapp", "facebook", "myspace"],
+    }),
+    ["whatsapp", "facebook"],
+  );
+});
+
+console.log("\nreport ranges");
+
+// A Thursday in August, mid-afternoon UTC — so a range that ignores the time of
+// day and one that does not give different answers.
+const RANGE_NOW = new Date("2026-08-20T14:30:00.000Z");
+
+test("a day range covers whole days, starting at midnight", () => {
+  const range = resolveReportRange("30", RANGE_NOW);
+  assert.equal(range.days, 30);
+  assert.equal(range.bucket, "day");
+  // 30 days counting today: 22 July through 20 August.
+  assert.equal(range.since, "2026-07-22T00:00:00.000Z");
+});
+
+test("the shortest range is still seven whole days", () => {
+  const range = resolveReportRange("7", RANGE_NOW);
+  assert.equal(range.since, "2026-08-14T00:00:00.000Z");
+});
+
+test("long ranges switch the chart to weekly bars", () => {
+  assert.equal(resolveReportRange("90", RANGE_NOW).bucket, "day");
+  assert.equal(resolveReportRange("180", RANGE_NOW).bucket, "week");
+  assert.equal(resolveReportRange("365", RANGE_NOW).bucket, "week");
+});
+
+test("year to date runs from 1 January", () => {
+  const range = resolveReportRange("ytd", RANGE_NOW);
+  // 212 days to 31 July, plus 20 in August.
+  assert.equal(range.days, 232);
+  assert.equal(range.since, "2026-01-01T00:00:00.000Z");
+  assert.equal(range.bucket, "week");
+});
+
+test("year to date on 1 January is one day, not an empty report", () => {
+  const range = resolveReportRange("ytd", new Date("2026-01-01T09:00:00.000Z"));
+  assert.equal(range.days, 1);
+  assert.equal(range.since, "2026-01-01T00:00:00.000Z");
+});
+
+test("year to date counts the leap day", () => {
+  const range = resolveReportRange("ytd", new Date("2028-03-01T00:00:00.000Z"));
+  // 31 + 29 + 1.
+  assert.equal(range.days, 61);
+});
+
+test("a range key from the URL is validated, never trusted", () => {
+  assert.equal(parseReportRange("14"), "14");
+  assert.equal(parseReportRange("ytd"), "ytd");
+  assert.equal(parseReportRange("9999"), "30");
+  assert.equal(parseReportRange(undefined), "30");
+  assert.equal(parseReportRange(["7"]), "30");
+});
+
+console.log("\nreport series bucketing");
+
+const SERIES_TODAY = new Date("2026-08-20T14:30:00.000Z");
+
+test("a daily series is one point per day", () => {
+  const series = buildSeries(
+    7,
+    { sent: [], replies: [], bounces: [] },
+    "day",
+    SERIES_TODAY,
+  );
+  assert.equal(series.length, 7);
+  assert.equal(series[0]!.date, "2026-08-14");
+  assert.equal(series[6]!.date, "2026-08-20");
+  // Daily buckets report the same day both ends, so one tooltip format works.
+  assert.equal(series[6]!.endDate, "2026-08-20");
+  assert.equal(series[6]!.days, 1);
+});
+
+test("weekly buckets end today, not on a Monday", () => {
+  const series = buildSeries(
+    365,
+    { sent: [], replies: [], bounces: [] },
+    "week",
+    SERIES_TODAY,
+  );
+  assert.equal(series.length, 53);
+  assert.equal(series[52]!.endDate, "2026-08-20");
+  assert.equal(series[52]!.days, 7);
+  // The oldest bucket takes the remainder — 365 is not a whole number of weeks.
+  assert.equal(series[0]!.days, 1);
+});
+
+test("folding into weeks loses nothing", () => {
+  const sent = [
+    "2026-08-20T01:00:00Z",
+    "2026-08-19T01:00:00Z",
+    "2026-06-01T01:00:00Z",
+  ];
+  const daily = buildSeries(
+    180,
+    { sent, replies: [], bounces: [] },
+    "day",
+    SERIES_TODAY,
+  );
+  const weekly = buildSeries(
+    180,
+    { sent, replies: [], bounces: [] },
+    "week",
+    SERIES_TODAY,
+  );
+  assert.equal(totals(daily).sent, 3);
+  assert.equal(totals(weekly).sent, totals(daily).sent);
+});
+
+test("two sends on the same day land in the same weekly bucket", () => {
+  const series = buildSeries(
+    180,
+    {
+      sent: ["2026-08-20T01:00:00Z", "2026-08-20T23:00:00Z"],
+      replies: [],
+      bounces: [],
+    },
+    "week",
+    SERIES_TODAY,
+  );
+  assert.equal(series[series.length - 1]!.sent, 2);
+});
+
+console.log("\nmailbox volume over report windows");
+
+test("the report windows reach three months back", () => {
+  assert.deepEqual(
+    REPORT_MAILBOX_WINDOWS.map((window) => window.days),
+    [7, 14, 30, 60, 90],
+  );
+  assert.equal(MAX_REPORT_MAILBOX_WINDOW, 90);
+});
+
+test("a send from six weeks ago is in the 2- and 3-month counts only", () => {
+  const windows = REPORT_MAILBOX_WINDOWS.map((window) => window.days);
+  const volume = summariseVolume([sentRow("a", 42)], VOLUME_NOW, windows).a;
+  assert.equal(countsFor(volume, 30).outreach, 0);
+  assert.equal(countsFor(volume, 60).outreach, 1);
+  assert.equal(countsFor(volume, 90).outreach, 1);
+});
+
+test("a window that was never computed reads as zero, not undefined", () => {
+  const volume = summariseVolume([sentRow("a", 1)], VOLUME_NOW, [7]).a;
+  assert.equal(countsFor(volume, 7).outreach, 1);
+  assert.equal(countsFor(volume, 90).outreach, 0);
+  assert.equal(countsFor(undefined, 7).warmup, 0);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

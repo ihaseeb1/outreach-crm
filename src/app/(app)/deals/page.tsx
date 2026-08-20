@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { DealRowActions } from "@/components/deal-row-actions";
 import { DealsToolbar } from "@/components/deals-toolbar";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
@@ -152,6 +153,7 @@ export default async function DealsPage({
                   {niches.map((niche) => (
                     <th key={niche}>{niche}</th>
                   ))}
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -187,6 +189,9 @@ export default async function DealsPage({
                           </td>
                         );
                       })}
+                      <td>
+                        <DealRowActions deal={deal} />
+                      </td>
                     </tr>
                   );
                 })}

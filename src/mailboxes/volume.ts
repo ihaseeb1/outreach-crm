@@ -19,6 +19,24 @@ export type VolumeWindow = (typeof VOLUME_WINDOWS)[number];
 /** Widest window, so the page and this module agree on how far back to read. */
 export const MAX_VOLUME_WINDOW = Math.max(...VOLUME_WINDOWS) as VolumeWindow;
 
+/**
+ * The windows are a parameter rather than a constant because Reports asks the
+ * same question over a longer span — 7 / 14 / 30 days plus 2 and 3 months. Two
+ * copies of this bucketing would be two places for "does 30 days include a send
+ * from exactly 30 days ago" to be answered differently.
+ */
+export const REPORT_MAILBOX_WINDOWS = [
+  { days: 7, label: "7 days" },
+  { days: 14, label: "14 days" },
+  { days: 30, label: "30 days" },
+  { days: 60, label: "2 months" },
+  { days: 90, label: "3 months" },
+] as const;
+
+export const MAX_REPORT_MAILBOX_WINDOW = Math.max(
+  ...REPORT_MAILBOX_WINDOWS.map((window) => window.days),
+);
+
 /** The columns of `messages` this needs — nothing else is read. */
 export interface SentRow {
   mailbox_id: string | null;
@@ -31,16 +49,32 @@ export interface WindowCounts {
   warmup: number;
 }
 
-export type MailboxVolume = Record<VolumeWindow, WindowCounts>;
+/** Keyed by window length in days — whichever windows were asked for. */
+export type MailboxVolume = Record<number, WindowCounts>;
 
 const DAY_MS = 86_400_000;
 
-export function emptyVolume(): MailboxVolume {
-  return {
-    7: { outreach: 0, warmup: 0 },
-    14: { outreach: 0, warmup: 0 },
-    30: { outreach: 0, warmup: 0 },
-  };
+export function emptyVolume(
+  windows: readonly number[] = VOLUME_WINDOWS,
+): MailboxVolume {
+  const volume: MailboxVolume = {};
+  for (const window of windows) volume[window] = { outreach: 0, warmup: 0 };
+  return volume;
+}
+
+/**
+ * Counts for one window, zeroed when there are none.
+ *
+ * Since the windows became a parameter, a lookup can miss two ways: no sends
+ * from that mailbox at all, or a window this summary was never asked to compute.
+ * Both mean "nothing to show", and a caller that has to spell that out at every
+ * use site will eventually forget at one of them.
+ */
+export function countsFor(
+  volume: MailboxVolume | undefined,
+  days: number,
+): WindowCounts {
+  return volume?.[days] ?? { outreach: 0, warmup: 0 };
 }
 
 /**
@@ -55,8 +89,10 @@ export function emptyVolume(): MailboxVolume {
 export function summariseVolume(
   rows: SentRow[],
   now: Date = new Date(),
+  windows: readonly number[] = VOLUME_WINDOWS,
 ): Record<string, MailboxVolume> {
   const nowMs = now.getTime();
+  const widest = Math.max(...windows);
   const byMailbox: Record<string, MailboxVolume> = {};
 
   for (const row of rows) {
@@ -68,15 +104,17 @@ export function summariseVolume(
     // Negative for a future timestamp — clock skew still counts as "just now"
     // rather than being dropped.
     const ageDays = (nowMs - at) / DAY_MS;
-    if (ageDays > MAX_VOLUME_WINDOW) continue;
+    if (ageDays > widest) continue;
 
     // Every send records its kind; anything else is real outreach, so an older
     // row with no kind is never miscounted as warmup.
     const bucket = row.meta?.kind === "warmup" ? "warmup" : "outreach";
 
-    const volume = (byMailbox[row.mailbox_id] ??= emptyVolume());
-    for (const window of VOLUME_WINDOWS) {
-      if (ageDays <= window) volume[window][bucket] += 1;
+    const volume = (byMailbox[row.mailbox_id] ??= emptyVolume(windows));
+    for (const window of windows) {
+      // Present by construction — emptyVolume seeded exactly these keys.
+      const counts = volume[window];
+      if (counts && ageDays <= window) counts[bucket] += 1;
     }
   }
 

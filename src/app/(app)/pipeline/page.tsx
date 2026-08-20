@@ -115,8 +115,14 @@ export default async function PipelinePage() {
         <PipelineEditor initial={editable} />
       </div>
 
-      <div className="card card-pad space-y-2 text-sm">
-        <h2 className="text-sm font-semibold">What moves on its own</h2>
+      {/* Collapsed by default. It is read once and then never again, and open it
+          took a third of the screen away from the board — which is exactly the
+          space the columns need before their headings scroll out of sight. */}
+      <details className="card card-pad text-sm">
+        <summary className="cursor-pointer text-sm font-semibold">
+          What moves on its own
+        </summary>
+        <div className="mt-3 space-y-2">
         <ul className="ml-4 list-disc space-y-1 text-[var(--color-muted)]">
           <li>
             <strong className="text-[var(--color-ink)]">{firstLabel} → {contactedLabel}</strong>{" "}
@@ -155,7 +161,8 @@ export default async function PipelinePage() {
             )}
           </p>
         )}
-      </div>
+        </div>
+      </details>
 
       {boardStages.length === 0 ? (
         <p className="card card-pad text-sm text-[var(--color-muted)]">

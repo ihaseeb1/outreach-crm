@@ -1,9 +1,12 @@
-# Handover — 17 August 2026
+# Handover — 17 and 20 August 2026
 
 Read this first, then `DEPLOY_STATUS.md` for hosting and `BUILD_LOG.md` for the
 original seven build phases.
 
-Live at **https://crm.orankly.com**. Everything below is deployed on `main`.
+Live at **https://crm.orankly.com**. Everything here is on `main` and deployed,
+**except** the six items under "Features added 20 August" — those are written
+and tested but were left uncommitted pending a look, because pushing `main`
+deploys straight to production.
 
 ---
 
@@ -217,6 +220,108 @@ Shipped with it, from the same report:
 "Nothing waiting". **Not yet verified:** the mailbox picker, "Mark done", and the
 Gmail star have no replied thread to exercise them on — the last tick reported
 `replies: 0`. Check them the first time a publisher writes back.
+
+## Features added 20 August
+
+Six things the user asked for after living with the app for three days. All of
+them are UI-reachable; nothing here needed a migration.
+
+- **Mailbox signatures, with Orankly's social icons**
+  (`src/mail/signature.ts`, `mailbox-signature.tsx`, `public/signature/*.png`).
+  `mailboxes.signature` had existed since migration 0002 and **no screen ever
+  set it**, so every email that had gone out was unsigned. The editor is on each
+  mailbox card, with **Save to every mailbox** for the normal case — one company,
+  seven addresses.
+
+  The icon row is WhatsApp → LinkedIn → Facebook → Instagram, the same four
+  links and the same order as the footer of orankly.com
+  (`wa.me/12819694177`, `/company/orankly`, `webwarner`, `webwarnerofficial`).
+  They are **constants, not settings**: a URL field per network per mailbox would
+  be twenty-eight chances to typo four links.
+
+  Three decisions worth keeping:
+  - **Hosted PNGs, not inline SVG.** Gmail, Outlook and Yahoo strip `<svg>` from
+    a message body, and Gmail's image proxy refuses an `.svg` in `<img>`. The
+    marks are rasterised from the website's own paths by
+    `npm run signature-icons` and committed, so a deploy never runs sharp.
+  - **A table, not flex.** Outlook's Word renderer ignores the layout CSS but has
+    always laid out tables. Every `<img>` carries explicit width/height and real
+    alt text, so images-off shows the network names.
+  - **Warmup gets the signature but not the icons.** Peer mail between your own
+    mailboxes fetching four remote images every time is pointless and a
+    distinctive fingerprint.
+
+  Which icons appear is stored on `mailboxes.meta.socials`. An **absent** key
+  means all four (the request was that mail carries them; defaulting to none
+  would mean seven mailboxes to visit before anything changed); an **empty
+  array** means somebody switched them off, and is respected.
+
+- **Edit and delete a deal** (`deal-row-actions.tsx`, Actions column on
+  `/deals`). No new endpoint: `POST /api/deals` with an `id` already updated in
+  place — the inbox uses it when a publisher revises a quote — there was simply
+  no way to reach it from the page the deals are on. The editor opens in an
+  overlay rather than expanding the row, because a rate card is a thirty-field
+  form and the table already scrolls sideways. `DELETE` now reads the domain
+  before removing the row so the activity log says *which* publisher went
+  (`deal.deleted`); `deal_prices` cascades with it.
+
+- **Enrolled contacts paginate** (`/campaigns/[id]?page=`). It was a bare
+  `.limit(100)` with nothing to click, so a 400-contact campaign silently showed
+  a quarter of itself. 50 a page, `count: "exact"` on the same query so "of 56"
+  comes from the table rather than from the `campaign_stats` view, which lags a
+  just-finished enrolment. **A second `.order("id")` is load-bearing:** hundreds
+  of rows share the same `next_send_at` (or share null), and Postgres may return
+  equal rows in any order — without a tiebreak the same contact appears on two
+  pages while another never appears at all.
+
+- **Reports cover a window you choose** (`src/reports/ranges.ts`,
+  `report-range-picker.tsx`). 7 / 14 / 30 days, 3 / 6 / 12 months, and year to
+  date. The range lives in the **URL**, so the numbers are fetched server-side
+  for the window asked for — a client-side filter would ship a year of rows to
+  show a week of them — and a view stays linkable across a refresh.
+  `since` is **midnight UTC** on the first day, not "now minus N × 24h": the
+  chart buckets by UTC calendar day, so a mid-afternoon cutoff gave the earliest
+  bar part of its traffic and made it look like a quiet day.
+
+- **The volume chart folds into weeks past ~13 weeks** (`buildSeries` in
+  `reports/metrics.ts`). 365 daily bars in a card a few hundred pixels wide are
+  each sub-pixel and read as a solid block. Weeks are aligned to the **end** of
+  the range, not to Mondays — the rightmost bucket must end today, or the last
+  bar is a partial week that looks like sending collapsed.
+
+- **Reports' mailbox table has its own windows: 7 / 14 / 30 days, 2 and 3
+  months** (`report-mailbox-table.tsx`). Independent of the page range on
+  purpose — picking "7 days" at the top must not empty the "3 months" column
+  underneath. `summariseVolume` took the windows as a parameter for this rather
+  than being copied, so "does 30 days include a send from exactly 30 days ago"
+  has one answer. The rows are read back over whichever is wider, the page range
+  or 90 days. Health, score and bounce rate stay **current, not windowed** —
+  they describe the mailbox now.
+
+- **The pipeline board is its own scroll region** (`pipeline-board.tsx`). With a
+  tall column the page used to scroll away from the stage headings, so once you
+  were far enough down and far enough right nothing on screen said which column
+  you were in — "I can't see Agreed". Bounding the board's height lets the
+  headings be `sticky` and keeps the horizontal scrollbar reachable. Four ways to
+  reach a far column now: **← →** buttons that step one column, **stage chips**
+  above the board that scroll a named stage to the left edge, the board
+  **scrolling itself** when a drag is held near an edge, and the per-card
+  dropdown on touch. The explainer card is collapsed to a `<details>` — it is
+  read once and it was taking a third of the screen the columns needed.
+
+  Two details: the edge auto-scroll is an **interval**, not a reaction to
+  `dragover`, because `dragover` stops firing when the pointer holds still,
+  which is exactly what somebody does while waiting for the board to come to
+  them. And the stage chips do not use `scrollIntoView` — that walks up every
+  ancestor and would scroll the page too, which is the jumping-about the layout
+  exists to stop.
+
+**Verification:** `npm run typecheck`, `npm run smoke` (218 tests, 43 of them
+new), `npm run build` all clean. The four icons were rendered and looked at.
+**Not verified against live data** — per the habit below, that means firing a
+real send and reading what a publisher receives. The first campaign email after
+this deploy is the one to check: signature present, four icons visible, and the
+text/plain part listing the four networks by name.
 
 ## Features added 17 August
 

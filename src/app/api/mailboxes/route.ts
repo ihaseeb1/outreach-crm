@@ -183,6 +183,14 @@ const patchSchema = z.object({
   daily_limit: z.number().int().min(1).max(2000).optional(),
   from_name: z.string().max(120).nullable().optional(),
   signature: z.string().max(2000).nullable().optional(),
+  /** Which social icons ride under the signature. Stored on `meta.socials`. */
+  socials: z.array(z.enum(["whatsapp", "linkedin", "facebook", "instagram"])).optional(),
+  /**
+   * Copies the signature and icon selection to every mailbox in the workspace.
+   * One company, seven mailboxes — without this, changing a sign-off means
+   * seven near-identical edits and one of them will drift.
+   */
+  apply_to_all: z.boolean().optional(),
   // Up to 24h either side: a slow-drip mailbox sending twice a day is a
   // legitimate warmup posture, and the old 1h ceiling made it unexpressible.
   min_gap_seconds: z.number().int().min(10).max(86_400).optional(),
@@ -200,7 +208,7 @@ export async function PATCH(request: Request) {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
-  const { id, ...patch } = parsed.data;
+  const { id, socials, apply_to_all: applyToAll, ...patch } = parsed.data;
 
   // A max below the min would make randomGapMs collapse to the min silently.
   // Rejecting is better than quietly ignoring half of what was asked for.
@@ -217,14 +225,54 @@ export async function PATCH(request: Request) {
 
   const supabase = await createSupabaseServerClient();
 
-  const { error } = await supabase
-    .from("mailboxes")
-    .update(patch)
-    .eq("id", id)
-    .eq("workspace_id", session.workspace.id);
+  // Which rows this patch lands on. Only the signature fields are ever applied
+  // workspace-wide; pacing and the active flag stay per mailbox, because those
+  // are exactly the settings that differ between a warm mailbox and a new one.
+  const targets = applyToAll
+    ? (
+        ((
+          await supabase
+            .from("mailboxes")
+            .select("id")
+            .eq("workspace_id", session.workspace.id)
+        ).data ?? []) as { id: string }[]
+      ).map((row) => row.id)
+    : [id];
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json({ ok: true });
+  // `meta` is a whole jsonb column, so writing socials into it means reading it
+  // back first. Anything else living in meta — set by the health job, or by a
+  // later feature — would otherwise be dropped on the floor by this update.
+  let metaById = new Map<string, Record<string, unknown>>();
+  if (socials !== undefined) {
+    const { data: metaRows } = await supabase
+      .from("mailboxes")
+      .select("id, meta")
+      .eq("workspace_id", session.workspace.id)
+      .in("id", targets);
+
+    metaById = new Map(
+      ((metaRows ?? []) as { id: string; meta: Record<string, unknown> | null }[]).map(
+        (row) => [row.id, row.meta ?? {}],
+      ),
+    );
+  }
+
+  for (const target of targets) {
+    const row: Record<string, unknown> = { ...patch };
+    if (socials !== undefined) {
+      row.meta = { ...(metaById.get(target) ?? {}), socials };
+    }
+
+    const { error } = await supabase
+      .from("mailboxes")
+      .update(row)
+      .eq("id", target)
+      .eq("workspace_id", session.workspace.id);
+
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ ok: true, updated: targets.length });
 }
 
 export async function DELETE(request: Request) {

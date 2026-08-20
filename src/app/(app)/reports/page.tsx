@@ -1,26 +1,56 @@
 import Link from "next/link";
 
+import {
+  ReportMailboxTable,
+  type ReportMailboxRow,
+} from "@/components/report-mailbox-table";
+import { ReportRangePicker } from "@/components/report-range-picker";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
 import {
-  buildDailySeries,
+  MAX_REPORT_MAILBOX_WINDOW,
+  REPORT_MAILBOX_WINDOWS,
+  summariseVolume,
+  type SentRow,
+} from "@/mailboxes/volume";
+import {
   buildFunnel,
+  buildSeries,
   formatPercent,
   summariseByNiche,
   totals,
   type NichePrice,
 } from "@/reports/metrics";
+import { parseReportRange, resolveReportRange } from "@/reports/ranges";
 
 export const dynamic = "force-dynamic";
 
-const WINDOW_DAYS = 30;
+const MAILBOX_WINDOW_DAYS = REPORT_MAILBOX_WINDOWS.map((window) => window.days);
 
-export default async function ReportsPage() {
+export default async function ReportsPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   const session = await requireSession();
   const supabase = await createSupabaseServerClient();
   const workspaceId = session.workspace.id;
 
-  const since = new Date(Date.now() - WINDOW_DAYS * 86_400_000).toISOString();
+  const params = await searchParams;
+  const range = resolveReportRange(parseReportRange(params.range));
+  const since = range.since;
+
+  // The mailbox table has its own windows, up to 3 months, and they are
+  // independent of the page range: picking "7 days" at the top must not empty
+  // the "3 months" column below it. So its rows are read over the widest of its
+  // own windows — or over the page range when that reaches further back, which
+  // costs nothing because the query is already running.
+  const mailboxSince = new Date(
+    Math.min(
+      Date.parse(since),
+      Date.now() - MAX_REPORT_MAILBOX_WINDOW * 86_400_000,
+    ),
+  ).toISOString();
 
   const [
     { data: sentRows },
@@ -32,12 +62,12 @@ export default async function ReportsPage() {
   ] = await Promise.all([
     supabase
       .from("messages")
-      .select("sent_at, mailbox_id")
+      .select("sent_at, mailbox_id, meta")
       .eq("workspace_id", workspaceId)
       .eq("direction", "outbound")
       .eq("status", "sent")
-      .gte("sent_at", since)
-      .limit(20_000),
+      .gte("sent_at", mailboxSince)
+      .limit(50_000),
     supabase
       .from("messages")
       .select("received_at, is_bounce, is_auto_reply")
@@ -67,9 +97,20 @@ export default async function ReportsPage() {
       .neq("pipeline_stage", "new"),
   ]);
 
+  // Trimmed back to the page range: the query above deliberately reached
+  // further so the mailbox table could have its own windows, and the headline
+  // figures must not silently inherit that wider span.
+  //
+  // Compared as parsed times, not as strings. Postgres returns
+  // `2026-08-20T09:00:00+00:00` and `toISOString()` produces
+  // `2026-08-20T00:00:00.000Z`; those two formats do not sort against each other.
+  const sinceMs = Date.parse(since);
   const sent = ((sentRows ?? []) as { sent_at: string | null }[])
     .map((row) => row.sent_at)
-    .filter((value): value is string => Boolean(value));
+    .filter(
+      (value): value is string =>
+        Boolean(value) && Date.parse(value as string) >= sinceMs,
+    );
 
   const inbound = (inboundRows ?? []) as {
     received_at: string | null;
@@ -87,7 +128,11 @@ export default async function ReportsPage() {
     .map((row) => row.received_at)
     .filter((value): value is string => Boolean(value));
 
-  const series = buildDailySeries(WINDOW_DAYS, { sent, replies, bounces });
+  const series = buildSeries(
+    range.days,
+    { sent, replies, bounces },
+    range.bucket,
+  );
   const summary = totals(series);
 
   const deals = (dealRows ?? []) as unknown as {
@@ -133,19 +178,40 @@ export default async function ReportsPage() {
     if (!latestHealth.has(row.mailbox_id)) latestHealth.set(row.mailbox_id, row);
   }
 
-  const sentByMailbox = new Map<string, number>();
-  for (const row of (sentRows ?? []) as { mailbox_id: string | null }[]) {
-    if (!row.mailbox_id) continue;
-    sentByMailbox.set(row.mailbox_id, (sentByMailbox.get(row.mailbox_id) ?? 0) + 1);
-  }
+  // Every mailbox window in one pass over the rows already fetched, so the
+  // toggle in the table below is instant and costs no extra query.
+  const volumes = summariseVolume(
+    (sentRows ?? []) as SentRow[],
+    new Date(),
+    MAILBOX_WINDOW_DAYS,
+  );
+
+  const mailboxRowsForTable: ReportMailboxRow[] = mailboxes.map((mailbox) => {
+    const health = latestHealth.get(mailbox.id);
+    return {
+      id: mailbox.id,
+      email: mailbox.email,
+      healthStatus: mailbox.health_status,
+      reputationScore: health ? health.reputation_score : null,
+      bounceRate: health ? Number(health.bounce_rate) : null,
+      sentToday: mailbox.sent_today,
+      dailyLimit: mailbox.daily_limit,
+    };
+  });
 
   const peak = Math.max(1, ...series.map((point) => point.sent));
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold">Reports</h1>
-        <p className="hint mt-1">Last {WINDOW_DAYS} days.</p>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold">Reports</h1>
+          <p className="hint mt-1">
+            {range.label}
+            {range.key === "ytd" && ` — ${range.days} days so far`}.
+          </p>
+        </div>
+        <ReportRangePicker value={range.key} />
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -169,13 +235,19 @@ export default async function ReportsPage() {
       </div>
 
       <section className="card card-pad space-y-3">
-        <h2 className="text-sm font-semibold">Daily volume</h2>
+        <h2 className="text-sm font-semibold">
+          {range.bucket === "week" ? "Weekly volume" : "Daily volume"}
+        </h2>
         <div className="flex h-32 items-end gap-0.5">
           {series.map((point) => (
             <div
               key={point.date}
               className="group relative flex-1"
-              title={`${point.date}: ${point.sent} sent, ${point.replies} replies, ${point.bounces} bounces`}
+              title={`${
+                point.date === point.endDate
+                  ? point.date
+                  : `${point.date} – ${point.endDate}`
+              }: ${point.sent} sent, ${point.replies} replies, ${point.bounces} bounces`}
             >
               <div
                 className="w-full rounded-sm bg-[var(--color-brand)]"
@@ -191,7 +263,10 @@ export default async function ReportsPage() {
           ))}
         </div>
         <p className="hint">
-          Blue is sent, green is replies. Hover a bar for the day&apos;s numbers.
+          Blue is sent, green is replies. Hover a bar for the numbers.{" "}
+          {range.bucket === "week"
+            ? "One bar a week over a range this long — 365 daily bars would each be a sliver."
+            : "One bar a day."}
         </p>
       </section>
 
@@ -218,50 +293,7 @@ export default async function ReportsPage() {
         </div>
       </section>
 
-      <section className="card">
-        <h2 className="border-b border-[var(--color-line)] px-5 py-3 text-sm font-semibold">
-          Mailboxes
-        </h2>
-        {mailboxes.length === 0 ? (
-          <p className="px-5 py-6 text-sm text-[var(--color-muted)]">
-            No mailboxes connected.
-          </p>
-        ) : (
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Mailbox</th>
-                  <th>Health</th>
-                  <th>Score</th>
-                  <th>Sent ({WINDOW_DAYS}d)</th>
-                  <th>Bounce rate</th>
-                  <th>Today</th>
-                </tr>
-              </thead>
-              <tbody>
-                {mailboxes.map((mailbox) => {
-                  const health = latestHealth.get(mailbox.id);
-                  return (
-                    <tr key={mailbox.id}>
-                      <td className="font-medium">{mailbox.email}</td>
-                      <td>{mailbox.health_status}</td>
-                      <td>{health ? `${health.reputation_score}/100` : "—"}</td>
-                      <td>{(sentByMailbox.get(mailbox.id) ?? 0).toLocaleString()}</td>
-                      <td>
-                        {health ? formatPercent(Number(health.bounce_rate)) : "—"}
-                      </td>
-                      <td>
-                        {mailbox.sent_today} / {mailbox.daily_limit}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
+      <ReportMailboxTable mailboxes={mailboxRowsForTable} volumes={volumes} />
 
       <section className="card">
         <div className="flex items-center justify-between border-b border-[var(--color-line)] px-5 py-3">

@@ -1,9 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { logActivity } from "@/lib/activity";
+import { env } from "@/lib/env";
 import { canSend, type BlockCode, type SendKind } from "@/mail/guard";
 import { loadMailboxProvider } from "@/mail/providers";
 import { CAMPAIGN_HEADER } from "@/mail/inbound-classify";
+import { buildSignature, parseSocialKeys } from "@/mail/signature";
 import { textToHtml } from "@/mail/template";
 import {
   buildFooterHtml,
@@ -109,10 +111,20 @@ export async function sendEmail(
   let text = input.body;
   let html = input.html ?? textToHtml(input.body);
 
-  if (mailbox.signature) {
-    text = `${text}\n\n${mailbox.signature}`;
-    html = `${html}${textToHtml(mailbox.signature)}`;
-  }
+  // Signature, and the social icon row under it. This is the one place outbound
+  // mail carries images; mail/signature.ts explains why they have to be hosted
+  // PNGs rather than the inline SVG the website uses.
+  //
+  // Warmup gets the signature but not the icons. Peer traffic between your own
+  // mailboxes fetching four remote images every time is both pointless and a
+  // distinctive fingerprint — the opposite of what warmup is for.
+  const signature = buildSignature({
+    signature: mailbox.signature,
+    socials: kind === "warmup" ? [] : parseSocialKeys(mailbox.meta),
+    baseUrl: env.appUrl(),
+  });
+  text += signature.text;
+  html += signature.html;
 
   const headers: Record<string, string> = { ...input.extraHeaders };
 

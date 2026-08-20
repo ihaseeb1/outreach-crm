@@ -32,14 +32,34 @@ interface EnrolledRow {
   contacts: { email: string; domain: string | null } | null;
 }
 
+/**
+ * Enrolled contacts per page.
+ *
+ * The list used to be a bare `.limit(100)` with nothing to click, so a campaign
+ * with 56 contacts looked complete and one with 400 silently showed a quarter of
+ * itself. 50 keeps the page light enough to stay on one screen's worth of
+ * scrolling.
+ */
+const PAGE_SIZE = 50;
+
 export default async function CampaignDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
+  const query = await searchParams;
   const session = await requireSession();
   const supabase = await createSupabaseServerClient();
+
+  const requestedPage = Number(
+    typeof query.page === "string" ? query.page : "1",
+  );
+  const page = Number.isFinite(requestedPage) && requestedPage > 0
+    ? Math.floor(requestedPage)
+    : 1;
 
   const { data: campaignRow } = await supabase
     .from("campaigns")
@@ -51,8 +71,12 @@ export default async function CampaignDetailPage({
   if (!campaignRow) notFound();
   const campaign = campaignRow as Campaign;
 
-  const [{ data: stepRows }, { data: mailboxRows }, { data: enrolledRows }, { data: statRow }] =
-    await Promise.all([
+  const [
+    { data: stepRows },
+    { data: mailboxRows },
+    { data: enrolledRows, count: enrolledCount },
+    { data: statRow },
+  ] = await Promise.all([
       supabase
         .from("sequence_steps")
         .select("*")
@@ -65,14 +89,24 @@ export default async function CampaignDetailPage({
         .eq("is_active", true)
         .neq("health_status", "paused")
         .order("created_at", { ascending: true }),
+      // `count: exact` on the same query as the page slice, so "of 56" comes
+      // from the table rather than from campaign_stats, which is a separate view
+      // and can lag a just-finished enrolment.
+      //
+      // A second `.order("id")` breaks ties: hundreds of rows share the same
+      // next_send_at (or share null), and Postgres is free to return equal rows
+      // in any order it likes — which means the same contact can appear on both
+      // page 1 and page 2 while another never appears at all.
       supabase
         .from("campaign_contacts")
         .select(
           "id, current_step, status, next_send_at, last_sent_at, last_error, contacts(email, domain)",
+          { count: "exact" },
         )
         .eq("campaign_id", id)
         .order("next_send_at", { ascending: true, nullsFirst: false })
-        .limit(100),
+        .order("id", { ascending: true })
+        .range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1),
       supabase
         .from("campaign_stats")
         .select("*")
@@ -90,6 +124,12 @@ export default async function CampaignDetailPage({
 
   const enrolled = (enrolledRows ?? []) as unknown as EnrolledRow[];
   const stat = (statRow ?? {}) as Record<string, number>;
+
+  const total = enrolledCount ?? enrolled.length;
+  const lastPage = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const firstShown = total === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
+  const lastShown = (page - 1) * PAGE_SIZE + enrolled.length;
+  const pageHref = (target: number) => `/campaigns/${id}?page=${target}`;
 
   const summary = [
     { label: "Contacts", value: stat.total_contacts ?? 0 },
@@ -135,13 +175,20 @@ export default async function CampaignDetailPage({
 
       <CampaignEnrollForm campaignId={campaign.id} />
 
-      <section className="card">
-        <h2 className="border-b border-[var(--color-line)] px-5 py-3 text-sm font-semibold">
-          Enrolled contacts
-        </h2>
+      <section className="card" id="enrolled">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--color-line)] px-5 py-3">
+          <h2 className="text-sm font-semibold">Enrolled contacts</h2>
+          {total > 0 && (
+            <p className="hint">
+              {firstShown}–{lastShown} of {total.toLocaleString()}
+            </p>
+          )}
+        </div>
         {enrolled.length === 0 ? (
           <p className="px-5 py-6 text-sm text-[var(--color-muted)]">
-            No contacts added yet.
+            {page > 1
+              ? "Nothing on this page — the list is shorter than it was."
+              : "No contacts added yet."}
           </p>
         ) : (
           <div className="table-wrap">
@@ -186,6 +233,40 @@ export default async function CampaignDetailPage({
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {lastPage > 1 && (
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--color-line)] px-5 py-3">
+            <p className="hint">
+              Page {page} of {lastPage}
+            </p>
+            <div className="flex items-center gap-2">
+              {page > 1 ? (
+                <Link
+                  className="btn-secondary px-2.5 py-1.5 text-xs"
+                  href={`${pageHref(page - 1)}#enrolled`}
+                >
+                  ← Previous
+                </Link>
+              ) : (
+                <span className="btn-secondary cursor-not-allowed px-2.5 py-1.5 text-xs opacity-50">
+                  ← Previous
+                </span>
+              )}
+              {page < lastPage ? (
+                <Link
+                  className="btn-secondary px-2.5 py-1.5 text-xs"
+                  href={`${pageHref(page + 1)}#enrolled`}
+                >
+                  Next →
+                </Link>
+              ) : (
+                <span className="btn-secondary cursor-not-allowed px-2.5 py-1.5 text-xs opacity-50">
+                  Next →
+                </span>
+              )}
+            </div>
           </div>
         )}
       </section>
