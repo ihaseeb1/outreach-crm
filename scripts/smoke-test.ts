@@ -9,6 +9,30 @@
 import assert from "node:assert/strict";
 
 import {
+  describeExclusions,
+  mergeSummaries,
+  summariseByCampaign,
+} from "../src/campaigns/exclusions";
+import {
+  DEFAULT_TRACKING_MODE,
+  describeTracking,
+  readTracking,
+  recordEvent,
+  resolveTrackingMode,
+  rollUpTracking,
+} from "../src/mail/tracking-summary";
+import {
+  clickThroughUrl,
+  decodeClickTarget,
+  openPixelHtml,
+  rewriteLinks,
+  verifyClick,
+  verifyOpen,
+} from "../src/mail/tracking";
+import { pairColumns as pairImportColumns } from "../src/lib/import-parse";
+import { TODAY as TODAY_KEY, countsFor as countsForKey } from "../src/mailboxes/volume";
+
+import {
   isEligible,
   mailboxForContact,
   pickMailbox,
@@ -18,6 +42,16 @@ import {
 } from "../src/campaigns/rotation";
 import { copyName } from "../src/campaigns/duplicate";
 import { canStartAnother } from "../src/mail/poll";
+import {
+  decideInbound,
+  isLinkedToOutreach,
+  referencedMessageIds,
+} from "../src/mail/prefilter";
+import {
+  HEADER_FIELDS,
+  parseHeaderBlock,
+  type InboundHeader,
+} from "../src/mail/providers/types";
 import {
   canonicalNiche,
   countFound,
@@ -38,7 +72,11 @@ import {
   nicheColumns,
   toApiShape,
 } from "../src/deals/export";
-import { matchesPriceFilters, parseDealFilters } from "../src/deals/query";
+import {
+  filterByMailbox,
+  matchesPriceFilters,
+  parseDealFilters,
+} from "../src/deals/query";
 import { rate, scoreMailbox, type HealthSignals } from "../src/health/score";
 import {
   buildDailySeries,
@@ -49,7 +87,14 @@ import {
 } from "../src/reports/metrics";
 import type { DealWithPrices } from "../src/types/db";
 import { encryptSecret, decryptSecret, safeEqual } from "../src/lib/crypto";
-import { warmupMessage } from "../src/warmup/content";
+import {
+  REPLY_TAILS,
+  WARMUP_TOPICS,
+  corpusSize,
+  topicForSubject,
+  warmupMessage,
+  warmupReply,
+} from "../src/warmup/content";
 import {
   nextVolume,
   pickPeer,
@@ -107,13 +152,53 @@ import {
   renderSocialRowText,
   signatureCarriesAddress,
 } from "../src/mail/signature";
-import { parseReportRange, resolveReportRange } from "../src/reports/ranges";
+import {
+  parseReportBucket,
+  parseReportRange,
+  resolveReportRange,
+} from "../src/reports/ranges";
 
 // Set before any test runs; env values are read lazily inside the functions.
 process.env.APP_ENCRYPTION_KEY ??= "0".repeat(64);
 
 let passed = 0;
 let failed = 0;
+
+/**
+ * The paragraphs of a generated message, with the greeting and sign-off
+ * stripped. Those two come from shared pools; everything between them has to
+ * belong to the message's own topic.
+ */
+function bodyLines(body: string): string[] {
+  return body
+    .split(/\n{2,}/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !GENERIC_LINES.has(line));
+}
+
+const GENERIC_LINES = new Set([
+  "Hi,",
+  "Hi there,",
+  "Morning,",
+  "Afternoon,",
+  "Hello,",
+  "Quick one,",
+  "Thanks,",
+  "Cheers,",
+  "Best,",
+  "Thanks again,",
+  "Speak soon,",
+]);
+
+/** A repeatable pseudo-random source, so a corpus test is not flaky. */
+function seededDraw(seed: number): () => number {
+  let state = (seed + 1) * 2654435761;
+  return () => {
+    state = (state * 1103515245 + 12345) % 2147483648;
+    return state / 2147483648;
+  };
+}
 
 function test(name: string, fn: () => void) {
   try {
@@ -654,11 +739,257 @@ test("warmup content varies rather than repeating one template", () => {
   assert.ok(a.body.length > 20);
 });
 
+test("every message is assembled from one topic, so it reads as one note", () => {
+  // Drawn deterministically from a topic id, then checked back: every line in
+  // the body has to belong to the topic the subject came from. The old corpus
+  // drew each line from a separate global pool, which produced paragraphs that
+  // were grammatical and about nothing.
+  for (let i = 0; i < 200; i += 1) {
+    const message = warmupMessage(seededDraw(i));
+    const topic = WARMUP_TOPICS.find((candidate) => candidate.id === message.topicId)!;
+    assert.ok(topic, "message names a topic that exists");
+    assert.ok(topic.subjects.includes(message.subject), message.subject);
+
+    const known = new Set([...topic.openers, ...topic.bodies, ...topic.closers]);
+    for (const line of bodyLines(message.body)) {
+      assert.ok(known.has(line), `stray line: ${line}`);
+    }
+  }
+});
+
+test("a subject finds its way back to its topic, however many Re: it carries", () => {
+  const topic = WARMUP_TOPICS[0]!;
+  assert.equal(topicForSubject(topic.subjects[0]!)?.id, topic.id);
+  assert.equal(topicForSubject(`Re: ${topic.subjects[0]!}`)?.id, topic.id);
+  assert.equal(topicForSubject(`Re: Re:  ${topic.subjects[0]!}`)?.id, topic.id);
+  assert.equal(topicForSubject("Something nobody wrote"), null);
+  assert.equal(topicForSubject(null), null);
+});
+
+test("a reply stays on the topic of the thread it answers", () => {
+  const topic = WARMUP_TOPICS[3]!;
+  const subject = `Re: ${topic.subjects[1]!}`;
+  const known = new Set([...topic.turns.flat(), ...REPLY_TAILS]);
+
+  for (let depth = 1; depth <= 4; depth += 1) {
+    for (let i = 0; i < 40; i += 1) {
+      const body = warmupReply({ subject, depth, seed: `root-${i}@example.com` });
+      for (const line of bodyLines(body)) {
+        assert.ok(known.has(line), `stray reply line: ${line}`);
+      }
+    }
+  }
+});
+
+test("the same thread always produces the same reply, whichever tick sends it", () => {
+  const subject = "Re: Revised timeline";
+  const first = warmupReply({ subject, depth: 1, seed: "root-a@example.com" });
+  for (let i = 0; i < 20; i += 1) {
+    assert.equal(warmupReply({ subject, depth: 1, seed: "root-a@example.com" }), first);
+  }
+  // A different thread, and a different turn of the same thread, must differ.
+  assert.notEqual(warmupReply({ subject, depth: 1, seed: "root-b@example.com" }), first);
+  assert.notEqual(warmupReply({ subject, depth: 2, seed: "root-a@example.com" }), first);
+});
+
+test("a conversation never says the same thing twice", () => {
+  // Three replies is the deepest a thread goes, and each has its own written
+  // turn. Every message in a conversation has to differ from the ones above it.
+  for (let i = 0; i < 100; i += 1) {
+    const seed = `thread-${i}@example.com`;
+    const subject = WARMUP_TOPICS[i % WARMUP_TOPICS.length]!.subjects[0]!;
+    const said = new Set<string>();
+    for (let depth = 1; depth <= 3; depth += 1) {
+      const body = warmupReply({ subject, depth, seed });
+      assert.ok(!said.has(body), `repeated at depth ${depth}: ${body}`);
+      said.add(body);
+    }
+  }
+});
+
+test("the corpus is deep enough that nothing repeats at real volume", () => {
+  const size = corpusSize();
+  // Seven mailboxes at five a day is ~12,800 warmup sends a year. The opening
+  // pool has to dwarf that by orders of magnitude, or the same body goes out
+  // twice to the same pair of accounts. Half a million is ~47 years of sending
+  // before a repeat is even likely.
+  assert.ok(size.topics >= 20, `topics: ${size.topics}`);
+  assert.ok(size.subjects >= 100, `subjects: ${size.subjects}`);
+  assert.ok(size.openings > 500_000, `openings: ${size.openings}`);
+  assert.ok(size.replies >= 200, `replies: ${size.replies}`);
+});
+
+test("no two topics share a subject line, or a reply would jump topic", () => {
+  const seen = new Map<string, string>();
+  for (const topic of WARMUP_TOPICS) {
+    for (const subject of topic.subjects) {
+      const key = subject.toLowerCase();
+      assert.equal(seen.get(key), undefined, `"${subject}" is in two topics`);
+      seen.set(key, topic.id);
+    }
+  }
+});
+
 test("a warmup token verifies only for its own workspace", () => {
   const token = newWarmupToken("ws-1");
   assert.equal(isValidWarmupToken("ws-1", token), true);
   assert.equal(isValidWarmupToken("ws-2", token), false);
   assert.equal(isValidWarmupToken("ws-1", "forged.token"), false);
+});
+
+console.log("\ninbound prefilter");
+
+function header(overrides: Partial<InboundHeader> = {}): InboundHeader {
+  return {
+    uid: 10,
+    messageId: "<new@publisher.com>",
+    inReplyTo: null,
+    references: [],
+    fromEmail: "editor@publisher.com",
+    fromName: "Editor",
+    toEmail: "me@example.com",
+    subject: "Re: Guest post",
+    receivedAt: "2026-08-20T09:00:00.000Z",
+    headers: {},
+    ...overrides,
+  };
+}
+
+const EMPTY_CONTEXT = {
+  ownMailboxes: new Set<string>(),
+  storedMessageIds: new Set<string>(),
+  outreachRecipients: new Set<string>(),
+  outboundMessageIds: new Set<string>(),
+};
+
+test("mail already stored is a duplicate, and is never downloaded again", () => {
+  assert.equal(
+    decideInbound(header(), {
+      ...EMPTY_CONTEXT,
+      storedMessageIds: new Set(["<new@publisher.com>"]),
+    }),
+    "duplicate",
+  );
+});
+
+test("peer warmup mail is counted from the envelope, not downloaded", () => {
+  assert.equal(
+    decideInbound(header({ fromEmail: "peer@mine.com" }), {
+      ...EMPTY_CONTEXT,
+      ownMailboxes: new Set(["peer@mine.com"]),
+    }),
+    "warmup",
+  );
+  assert.equal(
+    decideInbound(header({ headers: { "x-ocrm-warmup": "token" } }), EMPTY_CONTEXT),
+    "warmup",
+  );
+});
+
+test("a bounce is always downloaded — the failed address is in the body", () => {
+  assert.equal(
+    decideInbound(
+      header({
+        fromEmail: "mailer-daemon@googlemail.com",
+        subject: "Delivery Status Notification (Failure)",
+      }),
+      EMPTY_CONTEXT,
+    ),
+    "fetch",
+  );
+});
+
+test("a reply from someone we emailed is downloaded", () => {
+  assert.equal(
+    decideInbound(header(), {
+      ...EMPTY_CONTEXT,
+      outreachRecipients: new Set(["editor@publisher.com"]),
+    }),
+    "fetch",
+  );
+});
+
+test("a reply that only threads back to us is still downloaded", () => {
+  // Publishers routinely answer from a different address than the one we wrote
+  // to. Threading is what catches that, and the prefilter must never be
+  // stricter than the storing path standing behind it — anything it drops here
+  // is dropped for good.
+  assert.equal(
+    decideInbound(
+      header({
+        fromEmail: "someone-else@publisher.com",
+        references: ["<ours-1@crm>", "<ours-2@crm>"],
+      }),
+      { ...EMPTY_CONTEXT, outboundMessageIds: new Set(["<ours-2@crm>"]) },
+    ),
+    "fetch",
+  );
+});
+
+test("the owner's ordinary personal mail is skipped without being read", () => {
+  assert.equal(
+    decideInbound(
+      header({ fromEmail: "mum@family.example", subject: "Sunday" }),
+      EMPTY_CONTEXT,
+    ),
+    "ignored",
+  );
+});
+
+test("every reference in a batch is gathered for one query", () => {
+  const ids = referencedMessageIds([
+    header({ inReplyTo: "<a@crm>", references: ["<a@crm>", "<b@crm>"] }),
+    header({ uid: 11, inReplyTo: "<c@crm>", references: [] }),
+  ]);
+  assert.deepEqual([...ids].sort(), ["<a@crm>", "<b@crm>", "<c@crm>"]);
+});
+
+test("no references and an unknown sender is not linked to outreach", () => {
+  assert.equal(
+    isLinkedToOutreach(header(), {
+      outreachRecipients: new Set<string>(),
+      outboundMessageIds: new Set<string>(),
+    }),
+    false,
+  );
+});
+
+console.log("\nheader parsing");
+
+test("a folded References header is joined back up", () => {
+  // References is the header most likely to be folded, and it is the one that
+  // matters most: truncating it at the first fold loses the thread.
+  const parsed = parseHeaderBlock(
+    "References: <one@crm>\r\n <two@crm>\r\n\t<three@crm>\r\nSubject: Hello\r\n",
+  );
+  assert.equal(parsed["references"], "<one@crm> <two@crm> <three@crm>");
+  assert.equal(parsed["subject"], "Hello");
+});
+
+test("header names are lower-cased, and a line with no colon is ignored", () => {
+  const parsed = parseHeaderBlock("Content-Type: multipart/report\r\n\r\nX-Junk\r\n");
+  assert.equal(parsed["content-type"], "multipart/report");
+  assert.equal(parsed["x-junk"], undefined);
+});
+
+test("the fetched headers cover everything the classifier reads", () => {
+  // The prefilter classifies from headers alone, so a header the classifier
+  // consults but the fetch never asks for is a silent misclassification —
+  // warmup mail landing in the inbox, or an autoresponder counted as a reply.
+  for (const field of [
+    WARMUP_HEADER,
+    "content-type",
+    "auto-submitted",
+    "precedence",
+    "x-autoreply",
+    "x-autorespond",
+    "x-auto-response-suppress",
+  ]) {
+    assert.ok(
+      (HEADER_FIELDS as readonly string[]).includes(field),
+      `not fetched: ${field}`,
+    );
+  }
 });
 
 console.log("\nhealth scoring");
@@ -831,6 +1162,22 @@ test("the contact email is carried into the export", () => {
   assert.ok(grid.rows[0]?.includes("editor@a.com"));
 });
 
+test("the mailbox the deal was closed on is carried into the export", () => {
+  const one = deal("a.com", [{ niche: "General", price: 150 }]);
+  const grid = buildExportGrid([one], {
+    dealMailboxes: new Map([[one.id, "outreach@mine.com"]]),
+  });
+  const index = grid.headers.indexOf("Closed on");
+  assert.ok(index > -1, "the export has a Closed on column");
+  assert.equal(grid.rows[0]?.[index], "outreach@mine.com");
+});
+
+test("a deal with no known mailbox exports as blank, not as undefined", () => {
+  const grid = buildExportGrid([deal("a.com", [{ niche: "General", price: 150 }])]);
+  const index = grid.headers.indexOf("Closed on");
+  assert.equal(grid.rows[0]?.[index], "");
+});
+
 test("TSV stays column-aligned even with messy text", () => {
   const grid = buildExportGrid([
     deal("a.com", [{ niche: "General", price: 150 }], {
@@ -899,6 +1246,34 @@ test("filters parse from query params, ignoring junk", () => {
   assert.equal(parsed.minPrice, 100);
   assert.equal(parsed.maxTat, undefined);
   assert.equal(parsed.niche, "CBD");
+});
+
+test("the mailbox filter parses from the query string", () => {
+  const parsed = parseDealFilters(new URLSearchParams("mailbox=mb-1"));
+  assert.equal(parsed.mailboxId, "mb-1");
+  assert.equal(parseDealFilters(new URLSearchParams()).mailboxId, undefined);
+});
+
+test("deals filter down to the mailbox they were closed on", () => {
+  const first = deal("a.com", [{ niche: "General", price: 150 }]);
+  const second = deal("b.com", [{ niche: "General", price: 200 }]);
+  const third = deal("c.com", [{ niche: "General", price: 250 }]);
+  const map = new Map([
+    [first.id, "mb-1"],
+    [second.id, "mb-2"],
+  ]);
+
+  assert.deepEqual(
+    filterByMailbox([first, second, third], map, "mb-1").map((d) => d.domain),
+    ["a.com"],
+  );
+  // A deal nothing could be resolved for is findable too, rather than being
+  // invisible under every filter value.
+  assert.deepEqual(
+    filterByMailbox([first, second, third], map, "none").map((d) => d.domain),
+    ["c.com"],
+  );
+  assert.equal(filterByMailbox([first, second, third], map, undefined).length, 3);
 });
 
 console.log("\nreporting");
@@ -1259,16 +1634,16 @@ test("a one-off thread stops after that first reply", () => {
   assert.equal(shouldContinueThread(2, "some-id@example.com", 1000), false);
 });
 
-test("roughly one thread in four is picked for a conversation", () => {
+test("roughly one thread in two is picked for a conversation", () => {
   let picked = 0;
   const total = 4000;
   for (let i = 0; i < total; i += 1) {
     if (isConversationThread(`msg-${i}@example.com`)) picked += 1;
   }
   const share = picked / total;
-  // Hash-derived, so not exactly 25% — but it must be in the right region,
+  // Hash-derived, so not exactly 50% — but it must be in the right region,
   // not 0% (never converses) or 100% (always does).
-  assert.ok(share > 0.15 && share < 0.35, `share was ${share}`);
+  assert.ok(share > 0.35 && share < 0.65, `share was ${share}`);
 });
 
 test("the decision for one thread is stable across repeated calls", () => {
@@ -2022,6 +2397,22 @@ test("long ranges switch the chart to weekly bars", () => {
   assert.equal(resolveReportRange("90", RANGE_NOW).bucket, "day");
   assert.equal(resolveReportRange("180", RANGE_NOW).bucket, "week");
   assert.equal(resolveReportRange("365", RANGE_NOW).bucket, "week");
+  assert.equal(resolveReportRange("365", RANGE_NOW).bucketIsExplicit, false);
+});
+
+test("an explicit grouping always beats the automatic one", () => {
+  // Including the awkward direction: daily bars over a year is an unreadable
+  // chart, but a control that quietly ignores you is worse.
+  assert.equal(resolveReportRange("365", RANGE_NOW, "day").bucket, "day");
+  assert.equal(resolveReportRange("7", RANGE_NOW, "month").bucket, "month");
+  assert.equal(resolveReportRange("7", RANGE_NOW, "month").bucketIsExplicit, true);
+});
+
+test("an unknown grouping in the URL falls back to the automatic one", () => {
+  assert.equal(parseReportBucket("month"), "month");
+  assert.equal(parseReportBucket("fortnight"), null);
+  assert.equal(parseReportBucket(undefined), null);
+  assert.equal(parseReportBucket(["day"]), null);
 });
 
 test("year to date runs from 1 January", () => {
@@ -2083,6 +2474,41 @@ test("weekly buckets end today, not on a Monday", () => {
   assert.equal(series[52]!.days, 7);
   // The oldest bucket takes the remainder — 365 is not a whole number of weeks.
   assert.equal(series[0]!.days, 1);
+});
+
+test("monthly buckets follow the calendar, not 30-day blocks", () => {
+  const series = buildSeries(
+    120,
+    { sent: [], replies: [], bounces: [] },
+    "month",
+    SERIES_TODAY,
+  );
+  // 120 days back from 20 August 2026 reaches into April.
+  assert.equal(series.length, 5);
+  assert.equal(series[0]!.date.slice(0, 7), "2026-04");
+  assert.equal(series[4]!.date, "2026-08-01");
+  assert.equal(series[4]!.endDate, "2026-08-20");
+  // The current month is only as long as it has actually been.
+  assert.equal(series[4]!.days, 20);
+  // A month wholly inside the window is complete.
+  assert.equal(series[2]!.days, 30); // June
+  assert.equal(series[3]!.days, 31); // July
+});
+
+test("folding into months loses nothing", () => {
+  const sent = [
+    "2026-08-20T01:00:00Z",
+    "2026-08-01T01:00:00Z",
+    "2026-06-30T23:00:00Z",
+    "2026-05-02T01:00:00Z",
+  ];
+  const daily = buildSeries(120, { sent, replies: [], bounces: [] }, "day", SERIES_TODAY);
+  const monthly = buildSeries(120, { sent, replies: [], bounces: [] }, "month", SERIES_TODAY);
+  assert.equal(totals(daily).sent, 4);
+  assert.equal(totals(monthly).sent, totals(daily).sent);
+  // And they land in the month they belong to, not the one next door.
+  assert.equal(monthly.find((point) => point.date.startsWith("2026-06"))!.sent, 1);
+  assert.equal(monthly.find((point) => point.date.startsWith("2026-08"))!.sent, 2);
 });
 
 test("folding into weeks loses nothing", () => {
@@ -2277,6 +2703,338 @@ test("a personal sign-off still prints above the closing block", () => {
 
   assert.ok(email.indexOf("Haseeb") < email.indexOf("New North Road"));
   assert.equal([...email.matchAll(/<img /g)].length, 4);
+});
+
+test("a warmup email ends with exactly the block a real send ends with", () => {
+  // The whole point of the change: the mailbox is warmed on the same shape of
+  // message it will later send for real. Assembled through the same functions
+  // the send path uses, with the same inputs, so "the same" is checked rather
+  // than assumed.
+  const closing = (body: string) =>
+    textToHtml(body) +
+    buildSignature({
+      signature: signatureCarriesAddress(FULL_SIGN_OFF, FULL_SIGN_OFF)
+        ? null
+        : FULL_SIGN_OFF,
+    }).html +
+    buildFooterHtml({ ...FOOTER_BASE, socials: SOCIAL_KEYS, baseUrl: ICON_BASE });
+
+  const outreach = closing("Would you consider a guest contribution?");
+  const warmup = closing(warmupMessage(seededDraw(7)).body);
+
+  const tail = (email: string) => email.slice(email.indexOf("<div style=\"margin-top:24px"));
+  assert.equal(tail(warmup), tail(outreach));
+
+  // And the parts that matter, spelled out, so a failure says which one went.
+  assert.ok(warmup.includes("New North Road"));
+  assert.equal([...warmup.matchAll(/<img /g)].length, 4);
+  assert.equal([...warmup.matchAll(/Unsubscribe/g)].length, 1);
+  // One closing block, not the sign-off twice — the bug this ordering exists
+  // to prevent, now that warmup goes through it too.
+  assert.equal(warmup.split("Best Regards").length - 1, 1);
+});
+
+
+console.log("\npasted contacts: both halves in one cell");
+
+test("a combined cell splits into a website and an address", () => {
+  // The format the user actually has to hand. Before this, the whole string
+  // parsed as one URL — new URL() reads everything before the @ as userinfo, so
+  // "facebook.com,info@facebook.com" was a valid URL with host facebook.com and
+  // the address swallowed into the credentials.
+  const result = pairImportColumns("facebook.com,info@facebook.com", "");
+
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0]!.email, "info@facebook.com");
+  assert.equal(result.rows[0]!.website, "https://facebook.com/");
+  assert.equal(result.rows[0]!.domain, "facebook.com");
+  assert.equal(result.skipped.length, 0);
+  // Not queued as a bare website as well — it belongs to a contact now.
+  assert.equal(result.websitesOnly.length, 0);
+});
+
+test("a combined cell works in the email box too, and either way round", () => {
+  for (const [sites, mails] of [
+    ["", "facebook.com,info@facebook.com"],
+    ["", "info@facebook.com,facebook.com"],
+    ["facebook.com,info@facebook.com", ""],
+  ] as const) {
+    const result = pairImportColumns(sites, mails);
+    assert.equal(result.rows.length, 1, `${sites} | ${mails}`);
+    assert.equal(result.rows[0]!.email, "info@facebook.com");
+    assert.equal(result.rows[0]!.website, "https://facebook.com/");
+  }
+});
+
+test("two clean columns still pair row by row", () => {
+  const result = pairImportColumns(
+    "one.com\ntwo.com\nthree.com",
+    "a@one.com\nb@two.com\nc@three.com",
+  );
+  assert.equal(result.rows.length, 3);
+  assert.equal(result.rows[1]!.website, "https://two.com/");
+  assert.equal(result.rows[1]!.email, "b@two.com");
+});
+
+test("a blank cell in the middle still shifts nothing", () => {
+  const result = pairImportColumns("one.com\n\nthree.com", "a@one.com\n\nc@three.com");
+  assert.equal(result.rows.length, 2);
+  assert.equal(result.rows[1]!.website, "https://three.com/");
+  assert.equal(result.rows[1]!.email, "c@three.com");
+});
+
+test("a website in the email column is not reported as a broken address", () => {
+  const result = pairImportColumns("", "three.com");
+  assert.equal(result.rows.length, 0);
+  assert.deepEqual(result.websitesOnly, ["https://three.com/"]);
+  assert.equal(result.skipped.length, 0);
+});
+
+test("mixed rows: combined, paired, email-only, site-only", () => {
+  const result = pairImportColumns(
+    "facebook.com,info@facebook.com\ntwo.com\n\nfour.com",
+    "\nb@two.com\nc@nowhere.com\n",
+  );
+  assert.deepEqual(
+    result.rows.map((row) => row.email),
+    ["info@facebook.com", "b@two.com", "c@nowhere.com"],
+  );
+  assert.deepEqual(result.websitesOnly, ["https://four.com/"]);
+});
+
+console.log("\ncampaign exclusions");
+
+test("exclusions are counted per campaign, biggest first", () => {
+  const summary = summariseByCampaign([
+    [{ campaignId: "a", campaignName: "First Campaign", status: "active" }],
+    [{ campaignId: "a", campaignName: "First Campaign", status: "completed" }],
+    [{ campaignId: "b", campaignName: "Outreach Q3", status: "pending" }],
+    [{ campaignId: "a", campaignName: "First Campaign", status: "pending" }],
+  ]);
+  assert.deepEqual(summary, [
+    { campaign: "First Campaign", count: 3 },
+    { campaign: "Outreach Q3", count: 1 },
+  ]);
+});
+
+test("a contact in two campaigns counts once for each", () => {
+  const summary = summariseByCampaign([
+    [
+      { campaignId: "a", campaignName: "A", status: "completed" },
+      { campaignId: "b", campaignName: "B", status: "active" },
+    ],
+  ]);
+  assert.deepEqual(summary, [
+    { campaign: "A", count: 1 },
+    { campaign: "B", count: 1 },
+  ]);
+});
+
+test("the sentence names the campaigns", () => {
+  assert.equal(
+    describeExclusions([
+      { campaign: "First Campaign", count: 12 },
+      { campaign: "Outreach Q3", count: 3 },
+    ]),
+    "12 in First Campaign, 3 in Outreach Q3",
+  );
+  assert.equal(describeExclusions([]), "");
+});
+
+test("a long list of campaigns is summarised, not truncated silently", () => {
+  const many = ["A", "B", "C", "D", "E", "F"].map((campaign, index) => ({
+    campaign,
+    count: 6 - index,
+  }));
+  const text = describeExclusions(many, 4);
+  assert.ok(text.includes("6 in A"));
+  assert.ok(text.endsWith("and 2 other campaigns"));
+});
+
+test("the two exclusion counts add up rather than replacing each other", () => {
+  // The filtered path drops used contacts before enrolment sees them, and
+  // enrolment drops any that slipped through by id. Both have to be reported.
+  assert.deepEqual(
+    mergeSummaries(
+      [{ campaign: "First Campaign", count: 2 }],
+      [
+        { campaign: "First Campaign", count: 5 },
+        { campaign: "Outreach Q3", count: 1 },
+      ],
+    ),
+    [
+      { campaign: "First Campaign", count: 7 },
+      { campaign: "Outreach Q3", count: 1 },
+    ],
+  );
+});
+
+console.log("\nsent today");
+
+test("today is the UTC date, the same boundary the daily limit resets on", () => {
+  const now = new Date("2026-08-21T02:00:00Z");
+  const volume = summariseVolume(
+    [
+      // 23:00 the previous UTC day — two hours ago, and not today.
+      { mailbox_id: "a", sent_at: "2026-08-20T23:00:00Z", meta: { kind: "campaign" } },
+      { mailbox_id: "a", sent_at: "2026-08-21T00:30:00Z", meta: { kind: "warmup" } },
+      { mailbox_id: "a", sent_at: "2026-08-21T01:00:00Z", meta: { kind: "campaign" } },
+    ],
+    now,
+  ).a;
+
+  const today = countsForKey(volume, TODAY_KEY);
+  assert.equal(today.warmup, 1);
+  assert.equal(today.outreach, 1);
+  // The same three sends are all inside the 7-day window.
+  assert.equal(countsForKey(volume, 7).outreach, 2);
+  assert.equal(countsForKey(volume, 7).warmup, 1);
+});
+
+test("a mailbox that has sent nothing today reads zero, not undefined", () => {
+  const volume = summariseVolume(
+    [{ mailbox_id: "a", sent_at: "2026-08-14T10:00:00Z", meta: null }],
+    new Date("2026-08-21T02:00:00Z"),
+  ).a;
+  assert.deepEqual(countsForKey(volume, TODAY_KEY), { outreach: 0, warmup: 0 });
+  assert.equal(countsForKey(undefined, TODAY_KEY).outreach, 0);
+});
+
+console.log("\nopen and click tracking");
+
+test("an open is signed, and a tampered id does not verify", () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  const html = openPixelHtml("https://crm.example.com", id);
+  const signature = /[?&]s=([^"&]+)/.exec(html)![1]!;
+
+  assert.ok(verifyOpen(id, signature));
+  assert.ok(!verifyOpen("22222222-2222-4222-8222-222222222222", signature));
+  assert.ok(!verifyOpen(id, "not-a-signature"));
+  // A 1x1 that cannot move the layout, whatever the client does with CSS.
+  assert.ok(html.includes('width="1"') && html.includes('height="1"'));
+});
+
+test("a click signs the destination as well, so this is not an open redirect", () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  const url = clickThroughUrl("https://crm.example.com", id, "https://publisher.com/rates");
+  const params = new URL(url).searchParams;
+
+  const target = decodeClickTarget(params.get("u")!);
+  assert.equal(target, "https://publisher.com/rates");
+  assert.ok(verifyClick(id, target!, params.get("s")!));
+
+  // The signature belongs to that one destination.
+  assert.ok(!verifyClick(id, "https://evil.example/phish", params.get("s")!));
+});
+
+test("only http(s) destinations are accepted", () => {
+  const encode = (value: string) => Buffer.from(value, "utf8").toString("base64url");
+  assert.equal(decodeClickTarget(encode("https://a.com/x")), "https://a.com/x");
+  assert.equal(decodeClickTarget(encode("javascript:alert(1)")), null);
+  assert.equal(decodeClickTarget(encode("file:///etc/passwd")), null);
+  assert.equal(decodeClickTarget("not base64 at all !!"), null);
+});
+
+test("links are rewritten, but never our own", () => {
+  const base = "https://crm.example.com";
+  const id = "11111111-1111-4111-8111-111111111111";
+  const html = rewriteLinks(
+    `<a href="https://publisher.com/rates">rates</a>` +
+      `<a href="${base}/api/unsubscribe?w=1">Unsubscribe</a>` +
+      `<a href="mailto:editor@publisher.com">mail</a>`,
+    id,
+    base,
+  );
+
+  assert.ok(html.includes(`${base}/api/track/click?m=${id}`));
+  // The one-click unsubscribe has to stay exactly what the header promises.
+  assert.ok(html.includes(`href="${base}/api/unsubscribe?w=1"`));
+  assert.ok(html.includes('href="mailto:editor@publisher.com"'));
+});
+
+test("the first open is never overwritten by a later one", () => {
+  let meta: Record<string, unknown> = { kind: "campaign" };
+  meta = recordEvent(meta, "open", "2026-08-20T10:00:00Z");
+  meta = recordEvent(meta, "open", "2026-08-21T09:00:00Z");
+
+  const summary = readTracking(meta)!;
+  assert.equal(summary.opens, 2);
+  assert.equal(summary.firstOpenAt, "2026-08-20T10:00:00Z");
+  assert.equal(summary.lastOpenAt, "2026-08-21T09:00:00Z");
+  // Untouched alongside it.
+  assert.equal(meta.kind, "campaign");
+});
+
+test("a click implies an open, and remembers which link", () => {
+  // Images off is normal. "Clicked but never opened" would read as a bug.
+  const meta = recordEvent({}, "click", "2026-08-21T09:00:00Z", "https://publisher.com/rates");
+  const summary = readTracking(meta)!;
+
+  assert.equal(summary.clicks, 1);
+  assert.equal(summary.opens, 1);
+  assert.equal(summary.firstOpenAt, "2026-08-21T09:00:00Z");
+  assert.deepEqual(summary.links, [{ url: "https://publisher.com/rates", count: 1 }]);
+});
+
+test("never tracked and never opened do not read the same", () => {
+  // No record at all: we do not know. A record with zero opens: they did not.
+  assert.equal(readTracking({ kind: "campaign" }), null);
+  assert.equal(readTracking(null), null);
+
+  const sent = readTracking({ tracking: { mode: "opens_and_clicks" } })!;
+  assert.equal(sent.opens, 0);
+  assert.equal(sent.tracked, true);
+  assert.equal(describeTracking(sent), "Not opened yet");
+
+  const untracked = readTracking({ tracking: { mode: "off" } })!;
+  assert.equal(untracked.tracked, false);
+  assert.equal(describeTracking(untracked), "Not tracked");
+});
+
+test("the timeline line reads as a sentence", () => {
+  let meta = recordEvent({ tracking: { mode: "opens_and_clicks" } }, "open", "2026-08-20T10:00:00Z");
+  meta = recordEvent(meta, "click", "2026-08-20T11:00:00Z", "https://publisher.com");
+  assert.equal(
+    describeTracking(readTracking(meta), (iso) => iso.slice(0, 10)),
+    "Opened once · first 2026-08-20 · 1 click",
+  );
+});
+
+test("a roll-up sums the opens and keeps the earliest first-open", () => {
+  const step1 = readTracking(
+    recordEvent({ tracking: { mode: "opens" } }, "open", "2026-08-20T10:00:00Z"),
+  );
+  const step2 = readTracking({ tracking: { mode: "opens" } });
+  const step3 = readTracking(
+    recordEvent(
+      recordEvent({ tracking: { mode: "opens" } }, "open", "2026-08-21T08:00:00Z"),
+      "open",
+      "2026-08-21T09:00:00Z",
+    ),
+  );
+
+  const rolled = rollUpTracking([step1, step2, step3, null]);
+  assert.equal(rolled.tracked, 3);
+  assert.equal(rolled.opens, 3);
+  assert.equal(rolled.openedAny, true);
+  assert.equal(rolled.clickedAny, false);
+  assert.equal(rolled.firstOpenAt, "2026-08-20T10:00:00Z");
+  assert.equal(rolled.lastOpenAt, "2026-08-21T09:00:00Z");
+});
+
+test("an untracked send is left out of the roll-up entirely", () => {
+  const off = readTracking({ tracking: { mode: "off" } });
+  const rolled = rollUpTracking([off]);
+  assert.equal(rolled.tracked, 0);
+  assert.equal(rolled.opens, 0);
+});
+
+test("the workspace setting falls back rather than switching tracking off", () => {
+  assert.equal(resolveTrackingMode(null), DEFAULT_TRACKING_MODE);
+  assert.equal(resolveTrackingMode({}), DEFAULT_TRACKING_MODE);
+  assert.equal(resolveTrackingMode({ tracking: "nonsense" }), DEFAULT_TRACKING_MODE);
+  assert.equal(resolveTrackingMode({ tracking: "off" }), "off");
+  assert.equal(resolveTrackingMode({ tracking: "opens" }), "opens");
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

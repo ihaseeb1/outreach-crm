@@ -29,6 +29,7 @@ export const BASE_COLUMNS = [
   "Domain",
   "Status",
   "Contact email",
+  "Closed on",
   "Link type",
   "Placement",
   "TAT (days)",
@@ -70,6 +71,8 @@ export function nicheColumns(deals: DealWithPrices[]): string[] {
 export interface DealRowContext {
   /** contact_id -> email, so the export carries who quoted the price. */
   contactEmails?: Map<string, string>;
+  /** deal_id -> the mailbox address the deal was closed on. */
+  dealMailboxes?: Map<string, string>;
 }
 
 export function buildExportGrid(
@@ -91,6 +94,7 @@ export function buildExportGrid(
       deal.domain,
       deal.status,
       (deal.contact_id && context.contactEmails?.get(deal.contact_id)) ?? "",
+      context.dealMailboxes?.get(deal.id) ?? "",
       deal.link_type ?? "",
       deal.placement_type ?? "",
       deal.tat_days ?? null,
@@ -142,12 +146,18 @@ export function gridToCsv(grid: ExportGrid): string {
 }
 
 /** Shape returned by the read-only external API. */
-export function toApiShape(deal: DealWithPrices, contactEmail?: string) {
+export function toApiShape(
+  deal: DealWithPrices,
+  contactEmail?: string,
+  extra: { mailboxEmail?: string | null } = {},
+) {
   return {
     id: deal.id,
     domain: deal.domain,
     status: deal.status,
     contact_email: contactEmail ?? null,
+    /** The address the deal was actually negotiated on. */
+    mailbox_email: extra.mailboxEmail ?? null,
     link_type: deal.link_type,
     placement_type: deal.placement_type,
     tat_days: deal.tat_days,

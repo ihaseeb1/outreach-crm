@@ -110,7 +110,7 @@ export interface SeriesPoint extends DailyPoint {
 export function buildSeries(
   days: number,
   input: { sent: string[]; replies: string[]; bounces: string[] },
-  bucket: "day" | "week" = "day",
+  bucket: "day" | "week" | "month" = "day",
   today: Date = new Date(),
 ): SeriesPoint[] {
   const daily = buildDailySeries(days, input, today);
@@ -118,6 +118,8 @@ export function buildSeries(
   if (bucket === "day") {
     return daily.map((point) => ({ ...point, endDate: point.date, days: 1 }));
   }
+
+  if (bucket === "month") return byCalendarMonth(daily);
 
   const points: SeriesPoint[] = [];
   // Walk backwards in sevens from the last day, then reverse — that is what
@@ -135,6 +137,46 @@ export function buildSeries(
   }
 
   return points.reverse();
+}
+
+/**
+ * Monthly bars, on **calendar** months rather than 30-day blocks.
+ *
+ * Weekly buckets are aligned to the end of the range because a week is an
+ * arbitrary slice and the last bar must not be a partial one. A month is not
+ * arbitrary — "June" means something, invoices and targets land on it — so
+ * grouping by anything other than the calendar would produce bars nobody can
+ * check against anything else. The first and last buckets are therefore
+ * genuinely partial, and `days` says so, which is what stops a half-finished
+ * current month reading as a collapse.
+ */
+function byCalendarMonth(daily: DailyPoint[]): SeriesPoint[] {
+  const points: SeriesPoint[] = [];
+
+  for (const point of daily) {
+    const month = point.date.slice(0, 7);
+    const current = points[points.length - 1];
+
+    if (current && current.date.slice(0, 7) === month) {
+      current.endDate = point.date;
+      current.days += 1;
+      current.sent += point.sent;
+      current.replies += point.replies;
+      current.bounces += point.bounces;
+      continue;
+    }
+
+    points.push({
+      date: point.date,
+      endDate: point.date,
+      days: 1,
+      sent: point.sent,
+      replies: point.replies,
+      bounces: point.bounces,
+    });
+  }
+
+  return points;
 }
 
 export interface NichePrice {

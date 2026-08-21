@@ -11,6 +11,11 @@ const PUBLIC_PREFIXES = [
   "/api/cron",
   "/api/unsubscribe",
   "/api/public",
+  // Open and click tracking. Fetched by the recipient's mail client, which has
+  // no session — without this the pixel would redirect to /login and no open
+  // could ever be recorded. Each request authorises itself with the HMAC it
+  // carries; see mail/tracking.ts.
+  "/api/track",
   // The OAuth callback arrives via a third-party redirect; it authenticates
   // itself with the encrypted state parameter rather than a session.
   "/api/oauth",

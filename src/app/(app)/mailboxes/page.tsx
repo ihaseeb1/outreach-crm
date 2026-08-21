@@ -222,9 +222,11 @@ export default async function MailboxesPage({
         <VolumeWindowProvider>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="hint">
-              Sent volume over the last 7, 14 or 30 days — the same window for
-              every mailbox, so they can be compared. Totals include warmup,
-              which spends the daily limit rather than adding to it.
+              Sent volume for today, or the last 7, 14 or 30 days — the same
+              window for every mailbox, so they can be compared. Totals include
+              warmup, which spends the daily limit rather than adding to it, so
+              today&rsquo;s figure says how much of each allowance went on
+              warmup and how much on real outreach.
             </p>
             <VolumeWindowToggle />
           </div>
@@ -375,7 +377,12 @@ export default async function MailboxesPage({
             filtered out — only genuine replies from people you emailed reach the
             unified inbox.
           </p>
-          <RunJobButton job="inbound" label="Poll mailboxes now" limit={5} />
+          {/* No limit, deliberately. This used to be capped at five, which is
+              where "Checked 5 of 5" came from on a workspace with seven
+              mailboxes: the button was reporting its own cap back as the total.
+              Every connected mailbox is polled now, paused ones included, and
+              the button keeps asking until the queue is empty. */}
+          <RunJobButton job="inbound" label="Poll mailboxes now" />
         </div>
       )}
     </div>

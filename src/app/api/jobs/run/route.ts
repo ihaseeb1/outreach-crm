@@ -17,7 +17,9 @@ export const dynamic = "force-dynamic";
 
 const bodySchema = z.object({
   job: z.enum(["scrape", "validate", "inbound", "campaigns", "warmup", "health"]),
-  limit: z.number().int().positive().max(200).optional(),
+  // Optional for inbound and it means "no cap" when omitted, which is the
+  // normal case: a manual poll covers every mailbox however many there are.
+  limit: z.number().int().positive().max(1000).optional(),
   /** Campaigns only: send now even though the clock is outside the window. */
   ignoreWindow: z.boolean().optional(),
   /** Inbound only: re-read this many UIDs below each mailbox's checkpoint. */
@@ -53,18 +55,23 @@ export async function POST(request: Request) {
   if (parsed.data.job === "inbound") {
     const rescan = parsed.data.rescan ?? 0;
 
-    // "Check for new replies" means every connected account, not the one that
-    // happens to be least recently polled. Someone pressing this button is
-    // waiting on a specific reply and has no way to know which mailbox it
-    // landed in.
-    const { polled, results, deferred } = await runInboundPoll(supabase, {
+    // "Poll mailboxes now" means every connected account, without a cap.
+    //
+    // It used to take the least-recently-polled twenty, and skip anything
+    // switched off for sending. On a seven-mailbox workspace with two of them
+    // paused that reported "Checked 5 of 5" — a sentence with no way to tell
+    // that two accounts had been left out entirely. Someone pressing this
+    // button is waiting on a specific reply and has no idea which mailbox it
+    // landed in, so the answer has to cover all of them.
+    const { polled, results, deferred, queued, unpollable } = await runInboundPoll(supabase, {
       workspaceId,
-      limit: Math.min(parsed.data.limit ?? 20, 20),
+      limit: parsed.data.limit,
+      includeInactive: true,
       // Every mailbox at once, in a single round. IMAP is waiting, not working,
-      // so eight accounts in parallel take about as long as one — and a second
-      // round is what would not fit under the 60s ceiling.
+      // so eight accounts in parallel take about as long as one. Anything past
+      // that is queued by the workers and picked up as slots free.
       concurrency: 8,
-      budgetMs: rescan > 0 ? 48_000 : 40_000,
+      budgetMs: rescan > 0 ? 48_000 : 42_000,
       // A rescan reads far more per mailbox, so it gets a longer leash each and
       // still only one round.
       mailboxTimeoutMs: rescan > 0 ? 40_000 : 25_000,
@@ -79,6 +86,8 @@ export async function POST(request: Request) {
       job: "inbound",
       polled,
       deferred,
+      queued,
+      unpollable,
       rescan,
       ...summarisePoll(results),
     });

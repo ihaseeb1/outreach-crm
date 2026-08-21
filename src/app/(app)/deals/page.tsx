@@ -5,7 +5,13 @@ import { DealsToolbar } from "@/components/deals-toolbar";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
 import { nicheColumns } from "@/deals/export";
-import { contactEmailMap, loadDeals, parseDealFilters } from "@/deals/query";
+import {
+  contactEmailMap,
+  dealMailboxMap,
+  filterByMailbox,
+  loadDeals,
+  parseDealFilters,
+} from "@/deals/query";
 
 export const dynamic = "force-dynamic";
 
@@ -32,8 +38,30 @@ export default async function DealsPage({
 
   const supabase = await createSupabaseServerClient();
   const filters = parseDealFilters(search);
-  const deals = await loadDeals(supabase, session.workspace.id, filters);
-  const emails = await contactEmailMap(supabase, deals);
+
+  const loaded = await loadDeals(supabase, session.workspace.id, filters);
+
+  // Resolved once, then used twice — for the filter and for the column. The
+  // question "which of my addresses closed this?" was previously unanswerable
+  // anywhere in the app, even though the conversation has always known.
+  const mailboxByDeal = await dealMailboxMap(supabase, loaded);
+  const deals = filterByMailbox(loaded, mailboxByDeal, filters.mailboxId);
+
+  const [emails, { data: mailboxRows }] = await Promise.all([
+    contactEmailMap(supabase, deals),
+    supabase
+      .from("mailboxes")
+      .select("id, email")
+      .eq("workspace_id", session.workspace.id)
+      .order("email"),
+  ]);
+
+  const mailboxEmails = new Map(
+    ((mailboxRows ?? []) as { id: string; email: string }[]).map((row) => [
+      row.id,
+      row.email,
+    ]),
+  );
   const niches = nicheColumns(deals);
 
   const liveValue = deals
@@ -58,11 +86,36 @@ export default async function DealsPage({
       <DealsToolbar query={search.toString()} />
 
       <form method="get" className="card card-pad grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        <div>
+        <div className="sm:col-span-2">
           <label className="label" htmlFor="domain">
-            Domain
+            Search domain
           </label>
-          <input id="domain" name="domain" className="input" defaultValue={filters.domain ?? ""} />
+          <input
+            id="domain"
+            name="domain"
+            className="input"
+            placeholder="e.g. example.com, or just part of it"
+            defaultValue={filters.domain ?? ""}
+          />
+        </div>
+        <div>
+          <label className="label" htmlFor="mailbox">
+            Closed on
+          </label>
+          <select
+            id="mailbox"
+            name="mailbox"
+            className="input"
+            defaultValue={filters.mailboxId ?? ""}
+          >
+            <option value="">Any mailbox</option>
+            {[...mailboxEmails].map(([id, email]) => (
+              <option key={id} value={id}>
+                {email}
+              </option>
+            ))}
+            <option value="none">Not linked to a mailbox</option>
+          </select>
         </div>
         <div>
           <label className="label" htmlFor="niche">
@@ -146,6 +199,7 @@ export default async function DealsPage({
                   <th>Domain</th>
                   <th>Status</th>
                   <th>Contact</th>
+                  <th>Closed on</th>
                   <th>Link</th>
                   <th>TAT</th>
                   <th>DR</th>
@@ -174,6 +228,9 @@ export default async function DealsPage({
                       </td>
                       <td className="max-w-40 truncate">
                         {(deal.contact_id && emails.get(deal.contact_id)) || "—"}
+                      </td>
+                      <td className="max-w-40 truncate">
+                        {mailboxEmails.get(mailboxByDeal.get(deal.id) ?? "") ?? "—"}
                       </td>
                       <td>{deal.link_type ?? "—"}</td>
                       <td>{deal.tat_days ?? "—"}</td>

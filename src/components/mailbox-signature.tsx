@@ -225,7 +225,11 @@ export function MailboxSignature({
         </div>
         <p className="hint mt-1">
           The address and the unsubscribe link are required by CAN-SPAM and cannot
-          be turned off. Warmup mail gets neither, so it never fetches the icons.
+          be turned off. <strong>Every email ends with this block</strong> —
+          campaign steps, follow-ups, one-off sends and warmup alike — so the
+          mailbox is warmed on the same shape of message it will send for real.
+          Following the opt-out link in a warmup message does nothing: one of your
+          own mailboxes can never be suppressed.
         </p>
       </div>
 

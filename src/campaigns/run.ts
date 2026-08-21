@@ -14,7 +14,8 @@ import {
 } from "@/campaigns/rotation";
 import { sendingAllowance } from "@/warmup/plan";
 import { contactVars, renderTemplate } from "@/mail/template";
-import { sendEmail } from "@/mail/send";
+import { fetchSendingConfig, sendEmail } from "@/mail/send";
+import type { TrackingMode } from "@/mail/tracking-summary";
 import type {
   Campaign,
   CampaignContact,
@@ -159,7 +160,13 @@ async function runCampaign(
   const due = (dueRows ?? []) as CampaignContact[];
   let used = 0;
 
-  const postalAddress = await fetchPostalAddress(supabase, campaign.workspace_id);
+  // Read once for the whole batch: both the postal address and whether these
+  // sends carry tracking come off the same workspace row, and sendEmail would
+  // otherwise fetch it again for every contact.
+  const { postalAddress, tracking } = await fetchSendingConfig(
+    supabase,
+    campaign.workspace_id,
+  );
 
   for (const entry of due) {
     if (used >= budget) break;
@@ -177,6 +184,7 @@ async function runCampaign(
       mailboxes,
       window,
       postalAddress,
+      tracking,
     });
 
     switch (outcome) {
@@ -210,6 +218,7 @@ interface ProcessInput {
   mailboxes: RotationMailbox[];
   window: ResolvedWindow;
   postalAddress: string | null;
+  tracking: TrackingMode;
 }
 
 async function processCampaignContact(
@@ -309,6 +318,7 @@ async function processCampaignContact(
     references: thread?.messageId ? [thread.messageId] : undefined,
     threadId: entry.thread_id ?? thread?.threadId ?? null,
     postalAddress: input.postalAddress,
+    tracking: input.tracking,
   });
 
   if (outcome.ok) {
@@ -544,17 +554,4 @@ export function ensureReplyPrefix(subject: string): string {
   return /^re:\s/i.test(subject) ? subject : `Re: ${subject}`;
 }
 
-async function fetchPostalAddress(
-  supabase: SupabaseClient,
-  workspaceId: string,
-): Promise<string | null> {
-  const { data } = await supabase
-    .from("workspaces")
-    .select("sending_postal_address")
-    .eq("id", workspaceId)
-    .single();
-  return (
-    (data as { sending_postal_address: string | null } | null)
-      ?.sending_postal_address ?? null
-  );
-}
+

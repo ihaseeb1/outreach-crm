@@ -1,10 +1,27 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { countFound, parseQuote, type ParsedQuote } from "@/deals/parse-quote";
 import type { DealStatus, DealWithPrices } from "@/types/db";
+
+/** One email in this publisher's history, as /api/messages/thread returns it. */
+interface ThreadMessage {
+  id: string;
+  direction: "inbound" | "outbound";
+  subject: string | null;
+  body: string;
+  truncated: boolean;
+  from_email: string | null;
+  to_email: string | null;
+  mailbox: string | null;
+  at: string;
+  status: string;
+  is_bounce: boolean;
+  is_auto_reply: boolean;
+  step_number: number | null;
+}
 
 interface StarredMessage {
   mailbox?: string;
@@ -159,6 +176,63 @@ export function DealForm({
   const [readNote, setReadNote] = useState<string | null>(null);
   const [starred, setStarred] = useState<StarredMessage[] | null>(null);
   const [loadingStarred, setLoadingStarred] = useState(false);
+
+  const [thread, setThread] = useState<ThreadMessage[] | null>(null);
+  const [threadError, setThreadError] = useState<string | null>(null);
+  const [loadingThread, setLoadingThread] = useState(false);
+  const [openMessage, setOpenMessage] = useState<string | null>(null);
+
+  // Whose emails to show. A saved deal knows its contact; one typed in by hand
+  // has only a domain, which the endpoint can still resolve.
+  const threadContactId = existing?.contact_id ?? defaults?.contact_id ?? null;
+  const threadConversationId =
+    existing?.conversation_id ?? defaults?.conversation_id ?? null;
+  const threadDomain = existing?.domain ?? defaults?.domain ?? null;
+
+  /**
+   * Loads the email history for this publisher.
+   *
+   * The reason this exists: checking a quoted price meant leaving the form for
+   * the inbox and losing whatever had been typed. The thread is fetched next to
+   * the fields instead, and any message in it can be read straight into them.
+   */
+  const loadThread = useCallback(async (overrideDomain?: string) => {
+    const lookupDomain = overrideDomain?.trim() || threadDomain;
+    if (!threadContactId && !threadConversationId && !lookupDomain) return;
+
+    setLoadingThread(true);
+    setThreadError(null);
+    try {
+      const params = new URLSearchParams();
+      if (threadContactId) params.set("contact_id", threadContactId);
+      if (threadConversationId) params.set("conversation_id", threadConversationId);
+      if (lookupDomain) params.set("domain", lookupDomain);
+
+      const response = await fetch(`/api/messages/thread?${params}`);
+      const payload = (await response.json()) as {
+        messages?: ThreadMessage[];
+        error?: string;
+      };
+      if (!response.ok) throw new Error(payload.error ?? "Could not load the emails.");
+
+      setThread(payload.messages ?? []);
+    } catch (err) {
+      setThreadError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoadingThread(false);
+    }
+    // Deliberately not depending on the `domain` field: a new deal types it a
+    // character at a time, and a fetch per keystroke is exactly what a button
+    // is for.
+  }, [threadContactId, threadConversationId, threadDomain]);
+
+  // Loaded when the form opens, not on a click: the point of the request was
+  // that the email is already there to check a price against. Skipped in
+  // `compact` (the inbox), where the message being read is on screen anyway.
+  useEffect(() => {
+    if (compact) return;
+    void loadThread();
+  }, [compact, loadThread]);
 
   /**
    * Pulls in whatever the user has starred in Gmail.
@@ -392,6 +466,142 @@ export function DealForm({
               </li>
             ))}
           </ul>
+        )}
+
+        {/* A new deal typed in by hand has no contact and no stored domain, so
+            its emails are one click away rather than loaded on open. */}
+        {!compact && !threadContactId && !threadConversationId && !threadDomain && (
+          <button
+            className="btn-secondary mt-3 px-2.5 py-1.5 text-xs"
+            type="button"
+            disabled={loadingThread || !domain.trim()}
+            onClick={() => void loadThread(domain)}
+          >
+            {loadingThread ? "Looking…" : "Find their emails"}
+          </button>
+        )}
+
+        {!compact &&
+          (threadContactId ||
+            threadConversationId ||
+            threadDomain ||
+            thread !== null ||
+            threadError) && (
+          <div className="mt-3 rounded-md border border-[var(--color-line)]">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--color-line)] px-3 py-2">
+              <span className="text-xs font-medium">
+                Their emails
+                {thread && thread.length > 0 && (
+                  <span className="hint"> ({thread.length})</span>
+                )}
+              </span>
+              <button
+                className="hint hover:underline"
+                type="button"
+                disabled={loadingThread}
+                onClick={() => void loadThread(domain)}
+              >
+                {loadingThread ? "Loading…" : "Refresh"}
+              </button>
+            </div>
+
+            {threadError && (
+              <p className="px-3 py-2 text-xs text-[var(--color-danger)]">
+                {threadError}
+              </p>
+            )}
+
+            {!threadError && loadingThread && thread === null && (
+              <p className="hint px-3 py-2">Loading the thread…</p>
+            )}
+
+            {thread && thread.length === 0 && (
+              <p className="hint px-3 py-2">
+                Nothing stored for {threadDomain || domain.trim() || "this contact"}{" "}
+                yet. Paste the quote below, or load a starred message.
+              </p>
+            )}
+
+            {thread && thread.length > 0 && (
+              <ul className="max-h-80 divide-y divide-[var(--color-line)] overflow-y-auto">
+                {thread.map((message) => {
+                  const open = openMessage === message.id;
+                  return (
+                    <li key={message.id} className="px-3 py-2">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <button
+                          className="min-w-0 flex-1 text-left"
+                          type="button"
+                          onClick={() => setOpenMessage(open ? null : message.id)}
+                        >
+                          <span className="text-xs font-medium">
+                            {message.direction === "inbound" ? "They wrote" : "You wrote"}
+                            {message.is_bounce && " (bounce)"}
+                            {message.is_auto_reply && " (auto-reply)"}
+                            {message.step_number ? ` · step ${message.step_number}` : ""}
+                          </span>
+                          <span className="hint block truncate">
+                            {message.subject ?? "(no subject)"} ·{" "}
+                            {new Date(message.at).toLocaleString()}
+                          </span>
+                        </button>
+                        <span className="flex shrink-0 items-center gap-2">
+                          <button
+                            className="hint hover:underline"
+                            type="button"
+                            onClick={() => setOpenMessage(open ? null : message.id)}
+                          >
+                            {open ? "Hide" : "Read"}
+                          </button>
+                          {/* Only their own words are worth parsing — reading
+                              our own email back would fill the rate card with
+                              the numbers we quoted them. */}
+                          {message.direction === "inbound" && (
+                            <button
+                              className="text-xs font-medium text-[var(--color-brand)] hover:underline"
+                              type="button"
+                              onClick={() => applyQuote(message.body)}
+                            >
+                              Use this
+                            </button>
+                          )}
+                        </span>
+                      </div>
+
+                      {open && (
+                        <div className="mt-2">
+                          <p className="hint">
+                            {message.direction === "inbound"
+                              ? `${message.from_email ?? "them"} → ${
+                                  message.mailbox ?? message.to_email ?? "you"
+                                }`
+                              : `${message.mailbox ?? message.from_email ?? "you"} → ${
+                                  message.to_email ?? "them"
+                                }`}
+                          </p>
+                          <pre className="mt-1 max-h-64 overflow-auto whitespace-pre-wrap rounded-md bg-[var(--color-canvas)] px-3 py-2 text-xs leading-relaxed">
+                            {message.body || "(no text stored for this message)"}
+                          </pre>
+                          {message.truncated && (
+                            <p className="hint mt-1">
+                              Shown to the first 20,000 characters.
+                            </p>
+                          )}
+                          <button
+                            className="hint mt-1 hover:underline"
+                            type="button"
+                            onClick={() => setPaste(message.body)}
+                          >
+                            Copy into the box below
+                          </button>
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
         )}
 
         <textarea

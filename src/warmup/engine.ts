@@ -161,14 +161,18 @@ export async function runWarmupSends(
       const token = newWarmupToken(workspaceId);
 
       const outcome = await sendEmail(supabase, {
+        // Peer mail between your own mailboxes: nothing to measure, and a
+        // remote image in traffic meant to look like ordinary correspondence.
+        tracking: "off",
         workspaceId,
         mailboxId: mailbox.id,
         toEmail: peer.email,
         subject: content.subject,
         body: content.body,
         kind: "warmup",
-        // Internal mail: no unsubscribe footer, no postal address.
-        includeFooter: false,
+        // The closing block is deliberately left to the default (on), so warmup
+        // ends exactly as real outreach does: postal address, social icons,
+        // opt-out. See the note on `includeFooter` in mail/send.ts.
         extraHeaders: { [WARMUP_HEADER]: token },
       });
 
@@ -416,13 +420,20 @@ export async function runWarmupReplies(
       : `Re: ${row.subject ?? "Quick update"}`;
 
     const outcome = await sendEmail(supabase, {
+      tracking: "off",
       workspaceId: row.workspace_id,
       mailboxId: row.to_mailbox_id,
       toEmail: senderEmail,
       subject,
-      body: warmupReply(),
+      // Seeded on the thread's root, so the same conversation always produces
+      // the same next line no matter which tick sends it — and on the depth, so
+      // the third message answers the second rather than repeating the first.
+      body: warmupReply({
+        subject: row.subject,
+        depth: thread.depth,
+        seed: thread.rootMessageId,
+      }),
       kind: "warmup",
-      includeFooter: false,
       inReplyTo: row.message_id,
       references: row.message_id ? [row.message_id] : undefined,
       extraHeaders: { [WARMUP_HEADER]: token },

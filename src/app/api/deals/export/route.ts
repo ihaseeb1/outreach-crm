@@ -4,7 +4,13 @@ import * as XLSX from "xlsx";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getSession } from "@/lib/workspace";
 import { buildExportGrid, gridToCsv, gridToTsv } from "@/deals/export";
-import { contactEmailMap, loadDeals, parseDealFilters } from "@/deals/query";
+import {
+  contactEmailMap,
+  dealMailboxMap,
+  filterByMailbox,
+  loadDeals,
+  parseDealFilters,
+} from "@/deals/query";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -25,14 +31,40 @@ export async function GET(request: Request) {
   const params = new URL(request.url).searchParams;
   const format = (params.get("format") ?? "xlsx").toLowerCase();
 
+  const filters = parseDealFilters(params);
+
   const supabase = await createSupabaseServerClient();
-  const deals = await loadDeals(
-    supabase,
-    session.workspace.id,
-    parseDealFilters(params),
+  const loaded = await loadDeals(supabase, session.workspace.id, filters);
+
+  const mailboxByDeal = await dealMailboxMap(supabase, loaded);
+  const deals = filterByMailbox(loaded, mailboxByDeal, filters.mailboxId);
+
+  const [emails, { data: mailboxRows }] = await Promise.all([
+    contactEmailMap(supabase, deals),
+    supabase
+      .from("mailboxes")
+      .select("id, email")
+      .eq("workspace_id", session.workspace.id),
+  ]);
+
+  const mailboxEmails = new Map(
+    ((mailboxRows ?? []) as { id: string; email: string }[]).map((row) => [
+      row.id,
+      row.email,
+    ]),
   );
-  const emails = await contactEmailMap(supabase, deals);
-  const grid = buildExportGrid(deals, { contactEmails: emails });
+
+  const grid = buildExportGrid(deals, {
+    contactEmails: emails,
+    // The spreadsheet is what gets sent to whoever is paying the invoices, and
+    // "which of our addresses agreed this" is the first thing they ask.
+    dealMailboxes: new Map(
+      [...mailboxByDeal].map(([dealId, mailboxId]) => [
+        dealId,
+        mailboxEmails.get(mailboxId) ?? mailboxId,
+      ]),
+    ),
+  });
 
   const stamp = new Date().toISOString().slice(0, 10);
 

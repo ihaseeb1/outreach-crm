@@ -16,19 +16,27 @@ export const dynamic = "force-dynamic";
  * button); GET serves the link in the email footer.
  */
 
-async function unsubscribe(request: Request): Promise<{ ok: boolean; email?: string }> {
+async function unsubscribe(
+  request: Request,
+): Promise<{ ok: boolean; email?: string; own?: boolean }> {
   const params = new URL(request.url).searchParams;
   const token = verifyUnsubscribeParams(params);
   if (!token) return { ok: false };
 
   const supabase = createSupabaseAdminClient();
 
-  await suppressEmail(supabase, {
+  const suppressed = await suppressEmail(supabase, {
     workspaceId: token.workspaceId,
     email: token.email,
     reason: "unsubscribed",
     source: "one_click_unsubscribe",
   });
+
+  // One of your own mailboxes. Warmup mail carries this link like any other
+  // message, and following it must not take a sending address out of service.
+  // Answered as a success — the link is valid and the visitor gets a sensible
+  // page — but nothing was suppressed.
+  if (!suppressed) return { ok: true, email: token.email, own: true };
 
   // Stop anything already in flight for this contact.
   const { data: contact } = await supabase
@@ -57,7 +65,7 @@ async function unsubscribe(request: Request): Promise<{ ok: boolean; email?: str
 
 export async function GET(request: Request) {
   const result = await unsubscribe(request);
-  return new NextResponse(page(result.ok, result.email), {
+  return new NextResponse(page(result.ok, result.email, result.own), {
     status: result.ok ? 200 : 400,
     headers: { "content-type": "text/html; charset=utf-8" },
   });
@@ -71,8 +79,15 @@ export async function POST(request: Request) {
   );
 }
 
-function page(ok: boolean, email?: string): string {
-  const body = ok
+function page(ok: boolean, email?: string, own?: boolean): string {
+  const body = own
+    ? `<h1>Nothing to unsubscribe</h1>
+       <p><strong>${escapeHtml(email ?? "")}</strong> is one of your own sending
+       mailboxes, so it has not been added to the suppression list.</p>
+       <p class="muted">This link came from a warmup message your own accounts
+       sent each other. Suppressing the address would have stopped that mailbox
+       being warmed up.</p>`
+    : ok
     ? `<h1>You're unsubscribed</h1>
        <p><strong>${escapeHtml(email ?? "")}</strong> has been removed and will not
        receive any further emails from us.</p>
@@ -81,13 +96,19 @@ function page(ok: boolean, email?: string): string {
        <p>This unsubscribe link is invalid or has been altered.</p>
        <p class="muted">Reply to the email you received and we'll remove you manually.</p>`;
 
+  const title = own
+    ? "Nothing to unsubscribe"
+    : ok
+      ? "Unsubscribed"
+      : "Link not valid";
+
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="robots" content="noindex" />
-  <title>${ok ? "Unsubscribed" : "Link not valid"}</title>
+  <title>${title}</title>
   <style>
     :root { color-scheme: light dark; }
     body {

@@ -21,7 +21,11 @@ import {
   totals,
   type NichePrice,
 } from "@/reports/metrics";
-import { parseReportRange, resolveReportRange } from "@/reports/ranges";
+import {
+  parseReportBucket,
+  parseReportRange,
+  resolveReportRange,
+} from "@/reports/ranges";
 
 export const dynamic = "force-dynamic";
 
@@ -37,7 +41,11 @@ export default async function ReportsPage({
   const workspaceId = session.workspace.id;
 
   const params = await searchParams;
-  const range = resolveReportRange(parseReportRange(params.range));
+  const range = resolveReportRange(
+    parseReportRange(params.range),
+    new Date(),
+    parseReportBucket(params.bucket),
+  );
   const since = range.since;
 
   // The mailbox table has its own windows, up to 3 months, and they are
@@ -201,6 +209,17 @@ export default async function ReportsPage({
 
   const peak = Math.max(1, ...series.map((point) => point.sent));
 
+  // Averaged over buckets that have actually happened. Including a month that
+  // is three days old alongside eleven complete ones drags the average down and
+  // makes a steady period look like a decline.
+  const completeBuckets = series.filter((point) => point.sent > 0).length;
+  const perBucket =
+    completeBuckets === 0
+      ? "0"
+      : (summary.sent / completeBuckets).toFixed(
+          summary.sent / completeBuckets >= 10 ? 0 : 1,
+        );
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -211,7 +230,7 @@ export default async function ReportsPage({
             {range.key === "ytd" && ` — ${range.days} days so far`}.
           </p>
         </div>
-        <ReportRangePicker value={range.key} />
+        <ReportRangePicker value={range.key} bucket={range.bucket} />
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -235,19 +254,21 @@ export default async function ReportsPage({
       </div>
 
       <section className="card card-pad space-y-3">
-        <h2 className="text-sm font-semibold">
-          {range.bucket === "week" ? "Weekly volume" : "Daily volume"}
-        </h2>
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <h2 className="text-sm font-semibold">{BUCKET_HEADINGS[range.bucket]}</h2>
+          <p className="hint">
+            {summary.sent.toLocaleString()} sent over {series.length}{" "}
+            {BUCKET_NOUNS[range.bucket]}
+            {series.length === 1 ? "" : "s"} · {perBucket} per{" "}
+            {BUCKET_NOUNS[range.bucket]} on average
+          </p>
+        </div>
         <div className="flex h-32 items-end gap-0.5">
           {series.map((point) => (
             <div
               key={point.date}
               className="group relative flex-1"
-              title={`${
-                point.date === point.endDate
-                  ? point.date
-                  : `${point.date} – ${point.endDate}`
-              }: ${point.sent} sent, ${point.replies} replies, ${point.bounces} bounces`}
+              title={`${bucketLabel(point, range.bucket)}: ${point.sent} sent, ${point.replies} replies, ${point.bounces} bounces`}
             >
               <div
                 className="w-full rounded-sm bg-[var(--color-brand)]"
@@ -264,9 +285,10 @@ export default async function ReportsPage({
         </div>
         <p className="hint">
           Blue is sent, green is replies. Hover a bar for the numbers.{" "}
-          {range.bucket === "week"
-            ? "One bar a week over a range this long — 365 daily bars would each be a sliver."
-            : "One bar a day."}
+          {BUCKET_NOTES[range.bucket]}
+          {!range.bucketIsExplicit &&
+            range.bucket === "week" &&
+            " Chosen automatically for a range this long — 365 daily bars would each be a sliver."}
         </p>
       </section>
 
@@ -340,6 +362,58 @@ export default async function ReportsPage({
       </section>
     </div>
   );
+}
+
+const BUCKET_HEADINGS: Record<string, string> = {
+  day: "Daily volume",
+  week: "Weekly volume",
+  month: "Monthly volume",
+};
+
+const BUCKET_NOUNS: Record<string, string> = {
+  day: "day",
+  week: "week",
+  month: "month",
+};
+
+const BUCKET_NOTES: Record<string, string> = {
+  day: "One bar a day.",
+  week: "One bar a week, ending today rather than on a Monday.",
+  month: "One bar a calendar month — the first and last may be part months.",
+};
+
+/**
+ * What a bar covers, written the way the grouping means it.
+ *
+ * A monthly bar labelled with its first and last dates is technically right and
+ * useless to read; it wants to say "August 2026", with the day range only when
+ * the month is a partial one.
+ */
+function bucketLabel(
+  point: { date: string; endDate: string; days: number },
+  bucket: string,
+): string {
+  if (bucket === "month") {
+    const month = new Date(`${point.date}T00:00:00Z`).toLocaleString(undefined, {
+      month: "long",
+      year: "numeric",
+      timeZone: "UTC",
+    });
+    const daysInMonth = new Date(
+      Date.UTC(
+        Number(point.date.slice(0, 4)),
+        Number(point.date.slice(5, 7)),
+        0,
+      ),
+    ).getUTCDate();
+    return point.days === daysInMonth
+      ? month
+      : `${month} (${point.date.slice(8)}–${point.endDate.slice(8)})`;
+  }
+
+  return point.date === point.endDate
+    ? point.date
+    : `${point.date} – ${point.endDate}`;
 }
 
 function Stat({

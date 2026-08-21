@@ -76,6 +76,8 @@ export async function POST(request: Request) {
   // Sent as "manual" so it carries the postal-address footer and unsubscribe
   // headers exactly like a real campaign email would.
   const outcome = await sendEmail(supabase, {
+    // A test to your own address — tracking it would count your own open.
+    tracking: "off",
     workspaceId: session.workspace.id,
     mailboxId: mailbox.id,
     toEmail: to,

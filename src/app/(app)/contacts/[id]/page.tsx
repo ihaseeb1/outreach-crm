@@ -4,6 +4,11 @@ import { notFound } from "next/navigation";
 import { NotesPanel, TasksPanel } from "@/components/notes-tasks";
 import { StageSelect } from "@/components/stage-select";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import {
+  describeTracking,
+  readTracking,
+  rollUpTracking,
+} from "@/mail/tracking-summary";
 import { requireSession } from "@/lib/workspace";
 import type {
   ActivityLogEntry,
@@ -29,6 +34,10 @@ interface TimelineMessage {
   created_at: string;
   /** Which of our own accounts sent it, or took delivery of it. */
   mailboxes: { email: string } | null;
+  /** Which step of the sequence this was, for outbound campaign mail. */
+  step_number: number | null;
+  /** Carries the open/click record — see mail/tracking-summary.ts. */
+  meta: Record<string, unknown> | null;
 }
 
 export default async function ContactPage({
@@ -68,7 +77,7 @@ export default async function ContactPage({
     supabase
       .from("messages")
       .select(
-        "id, direction, subject, body, status, is_bounce, is_auto_reply, from_email, to_email, created_at, mailboxes(email)",
+        "id, direction, subject, body, status, is_bounce, is_auto_reply, from_email, to_email, created_at, step_number, meta, mailboxes(email)",
       )
       .eq("contact_id", id)
       .order("created_at", { ascending: false })
@@ -145,6 +154,15 @@ export default async function ContactPage({
 
   const fullName =
     [contact.first_name, contact.last_name].filter(Boolean).join(" ") || null;
+
+  // Engagement across everything sent to this contact. Rolled up here as well
+  // as shown per message, because "has this person ever opened anything" is the
+  // question asked before "which email did they open".
+  const engagement = rollUpTracking(
+    messages
+      .filter((message) => message.direction === "outbound")
+      .map((message) => readTracking(message.meta)),
+  );
 
   return (
     <div className="space-y-6">
@@ -285,9 +303,26 @@ export default async function ContactPage({
       </div>
 
       <section className="card">
-        <h2 className="border-b border-[var(--color-line)] px-5 py-3 text-sm font-semibold">
-          Message history
-        </h2>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--color-line)] px-5 py-3">
+          <h2 className="text-sm font-semibold">Message history</h2>
+          {engagement.tracked > 0 && (
+            <p className="hint">
+              {engagement.openedAny
+                ? `Opened ${engagement.opens}${
+                    engagement.opens === 1 ? " time" : " times"
+                  } across ${engagement.tracked} tracked email${
+                    engagement.tracked === 1 ? "" : "s"
+                  }${
+                    engagement.firstOpenAt
+                      ? ` · first ${new Date(engagement.firstOpenAt).toLocaleString()}`
+                      : ""
+                  }${engagement.clickedAny ? ` · ${engagement.clicks} click${engagement.clicks === 1 ? "" : "s"}` : ""}`
+                : `No opens recorded on ${engagement.tracked} tracked email${
+                    engagement.tracked === 1 ? "" : "s"
+                  }`}
+            </p>
+          )}
+        </div>
         {messages.length === 0 ? (
           <p className="px-5 py-6 text-sm text-[var(--color-muted)]">
             Nothing sent or received yet.
@@ -324,6 +359,33 @@ export default async function ContactPage({
                     {message.body.slice(0, 200)}
                   </p>
                 )}
+                {/* Per message, deliberately: a follow-up that was opened when
+                    the first email was not is the thing worth seeing, and a
+                    single figure for the contact would hide it. */}
+                {message.direction === "outbound" &&
+                  (() => {
+                    const tracking = readTracking(message.meta);
+                    if (!tracking) return null;
+                    const opened = tracking.opens > 0;
+                    return (
+                      <p
+                        className={`mt-1 text-xs ${
+                          opened
+                            ? "text-[var(--color-ok)]"
+                            : "text-[var(--color-muted)]"
+                        }`}
+                      >
+                        {message.step_number ? `Step ${message.step_number} · ` : ""}
+                        {describeTracking(tracking)}
+                        {tracking.links.length > 0 && (
+                          <span className="text-[var(--color-muted)]">
+                            {" "}
+                            — {tracking.links[0]!.url.slice(0, 60)}
+                          </span>
+                        )}
+                      </p>
+                    );
+                  })()}
               </li>
             ))}
           </ul>

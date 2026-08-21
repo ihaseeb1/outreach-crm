@@ -12,24 +12,29 @@ export async function GET(request: Request) {
   if (unauthorized) return unauthorized;
 
   const limit = Number.parseInt(
-    new URL(request.url).searchParams.get("limit") ?? "8",
+    new URL(request.url).searchParams.get("limit") ?? "12",
     10,
   );
 
   const supabase = createSupabaseAdminClient();
-  // Four at a time inside a 45s budget: comfortably under the 60s function
+  // Six at a time inside a 40s budget: comfortably under the 60s function
   // ceiling even if every mailbox is slow, and a whole workspace gets covered
-  // in a tick or two rather than one mailbox per tick.
-  const { polled, results, deferred } = await runInboundPoll(supabase, {
-    limit: Number.isFinite(limit) ? Math.min(limit, 20) : 8,
-    concurrency: 4,
+  // in a tick rather than one mailbox per tick.
+  //
+  // Paused mailboxes are polled as well. Pausing stops a mailbox *sending*; the
+  // replies to what it already sent still arrive, and dropping them on the
+  // floor because of a toggle that means something else would lose real mail.
+  const { polled, results, deferred, queued, unpollable } = await runInboundPoll(supabase, {
+    limit: Number.isFinite(limit) ? Math.min(limit, 50) : 12,
+    concurrency: 6,
     budgetMs: 40_000,
+    includeInactive: true,
   });
 
   return jobResponse({
     job: "inbound",
     processed: polled,
-    details: { deferred, ...summarisePoll(results) },
+    details: { deferred, queued, unpollable, ...summarisePoll(results) },
   });
 }
 

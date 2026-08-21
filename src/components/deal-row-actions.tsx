@@ -90,11 +90,14 @@ export function DealRowActions({ deal }: { deal: DealWithPrices }) {
             if (event.target === event.currentTarget) setEditing(false);
           }}
         >
-          <div className="mx-auto my-8 max-w-3xl rounded-lg bg-[var(--color-surface)] p-5 shadow-xl">
+          <div className="mx-auto my-8 max-w-4xl rounded-lg bg-[var(--color-surface)] p-5 shadow-xl">
             <div className="mb-4 flex items-start justify-between gap-3">
               <div>
                 <h2 className="text-sm font-semibold">Edit deal</h2>
-                <p className="hint">{deal.domain}</p>
+                <p className="hint">
+                  {deal.domain} — their emails load below, so a quoted price can
+                  be checked without leaving the form.
+                </p>
               </div>
               <button
                 className="btn-secondary px-2.5 py-1.5 text-xs"

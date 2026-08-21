@@ -8,6 +8,7 @@ export function CampaignEnrollForm({ campaignId }: { campaignId: string }) {
   const router = useRouter();
   const [domain, setDomain] = useState("");
   const [limit, setLimit] = useState(100);
+  const [allowReuse, setAllowReuse] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -25,16 +26,38 @@ export function CampaignEnrollForm({ campaignId }: { campaignId: string }) {
         body: JSON.stringify({
           campaign_id: campaignId,
           filter: { domain: domain || undefined, limit },
+          allow_in_other_campaigns: allowReuse,
         }),
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error ?? "Could not add contacts.");
 
       const parts = [`Added ${payload.added}`];
-      if (payload.alreadyEnrolled) parts.push(`${payload.alreadyEnrolled} already in`);
+      if (payload.alreadyEnrolled) parts.push(`${payload.alreadyEnrolled} already in this one`);
       if (payload.skippedSuppressed) parts.push(`${payload.skippedSuppressed} suppressed`);
       if (payload.skippedUnvalidated) parts.push(`${payload.skippedUnvalidated} unvalidated`);
-      setMessage(`${parts.join(", ")}.`);
+
+      // The campaigns holding the ones that were skipped, named. A bare count
+      // leaves the obvious next question — where did they go? — unanswered.
+      const elsewhere = (payload.otherCampaigns ?? []) as {
+        campaign: string;
+        count: number;
+      }[];
+      if (payload.skippedOtherCampaign) {
+        parts.push(
+          elsewhere.length > 0
+            ? `${payload.skippedOtherCampaign} already in ${elsewhere
+                .map((entry) => `${entry.campaign} (${entry.count})`)
+                .join(", ")}`
+            : `${payload.skippedOtherCampaign} already in another campaign`,
+        );
+      }
+
+      let text = `${parts.join(", ")}.`;
+      if (payload.scanExhausted) {
+        text += ` Stopped after reading ${payload.scanned} contacts — run it again for more.`;
+      }
+      setMessage(text);
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -74,9 +97,29 @@ export function CampaignEnrollForm({ campaignId }: { campaignId: string }) {
         </div>
       </div>
 
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          checked={allowReuse}
+          onChange={(e) => setAllowReuse(e.target.checked)}
+        />
+        <span>
+          Allow contacts already in other campaigns
+          <span className="hint block">
+            Off by default, so a new campaign can only take people no campaign
+            has used yet — whatever their status there: queued, mid-sequence,
+            completed or bounced. Turn it on only to deliberately re-contact
+            them from a second angle.
+          </span>
+        </span>
+      </label>
+
       <p className="hint">
         Only validated addresses are added. Anything on the suppression list is
-        refused here as well as at send time.
+        refused here as well as at send time. "Max to add" counts contacts that
+        actually get added, so asking for 100 reads past the ones already in use
+        rather than stopping at the first 100 rows.
       </p>
 
       <button className="btn-primary" type="submit" disabled={busy}>

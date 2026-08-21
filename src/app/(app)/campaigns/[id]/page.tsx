@@ -6,6 +6,11 @@ import { CampaignDuplicateButton } from "@/components/campaign-duplicate-button"
 import { CampaignEnrollForm } from "@/components/campaign-enroll-form";
 import { SequenceEditor, type EditableStep } from "@/components/sequence-editor";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import {
+  readTracking,
+  rollUpTracking,
+  type TrackingSummary,
+} from "@/mail/tracking-summary";
 import { requireSession } from "@/lib/workspace";
 import type { Campaign, SequenceStep } from "@/types/db";
 
@@ -24,6 +29,7 @@ const CONTACT_STATUS_STYLES: Record<string, string> = {
 
 interface EnrolledRow {
   id: string;
+  contact_id: string;
   current_step: number;
   status: string;
   next_send_at: string | null;
@@ -76,6 +82,7 @@ export default async function CampaignDetailPage({
     { data: mailboxRows },
     { data: enrolledRows, count: enrolledCount },
     { data: statRow },
+    { data: sentRows },
   ] = await Promise.all([
       supabase
         .from("sequence_steps")
@@ -100,7 +107,7 @@ export default async function CampaignDetailPage({
       supabase
         .from("campaign_contacts")
         .select(
-          "id, current_step, status, next_send_at, last_sent_at, last_error, contacts(email, domain)",
+          "id, contact_id, current_step, status, next_send_at, last_sent_at, last_error, contacts(email, domain)",
           { count: "exact" },
         )
         .eq("campaign_id", id)
@@ -112,6 +119,18 @@ export default async function CampaignDetailPage({
         .select("*")
         .eq("campaign_id", id)
         .maybeSingle(),
+      // Every email this campaign has sent, for the open/click figures. One
+      // query rather than one per row: at seven steps a campaign of 500
+      // contacts is 3,500 rows at most, and both the per-step summary and the
+      // per-contact columns are counted from the same read, so they cannot
+      // disagree.
+      supabase
+        .from("messages")
+        .select("contact_id, step_number, meta")
+        .eq("campaign_id", id)
+        .eq("direction", "outbound")
+        .eq("status", "sent")
+        .limit(20_000),
     ]);
 
   const steps = (stepRows ?? []) as SequenceStep[];
@@ -124,6 +143,39 @@ export default async function CampaignDetailPage({
 
   const enrolled = (enrolledRows ?? []) as unknown as EnrolledRow[];
   const stat = (statRow ?? {}) as Record<string, number>;
+
+  // Tracking, bucketed two ways from one read.
+  const trackingByContact = new Map<string, TrackingSummary[]>();
+  const trackingByStep = new Map<number, TrackingSummary[]>();
+
+  for (const row of (sentRows ?? []) as {
+    contact_id: string | null;
+    step_number: number | null;
+    meta: Record<string, unknown> | null;
+  }[]) {
+    const summary = readTracking(row.meta);
+    if (!summary) continue;
+    if (row.contact_id) {
+      const list = trackingByContact.get(row.contact_id) ?? [];
+      list.push(summary);
+      trackingByContact.set(row.contact_id, list);
+    }
+    const step = row.step_number ?? 0;
+    const byStep = trackingByStep.get(step) ?? [];
+    byStep.push(summary);
+    trackingByStep.set(step, byStep);
+  }
+
+  const stepEngagement = [...trackingByStep.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([step, summaries]) => ({
+      step,
+      sent: summaries.length,
+      ...rollUpTracking(summaries),
+      // People, not events: five opens by one publisher is not five publishers.
+      openers: summaries.filter((summary) => summary.opens > 0).length,
+      clickers: summaries.filter((summary) => summary.clicks > 0).length,
+    }));
 
   const total = enrolledCount ?? enrolled.length;
   const lastPage = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -160,6 +212,55 @@ export default async function CampaignDetailPage({
           </div>
         ))}
       </div>
+
+      {stepEngagement.length > 0 && (
+        <section className="card">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--color-line)] px-5 py-3">
+            <h2 className="text-sm font-semibold">Opens and clicks by step</h2>
+            <p className="hint">
+              Counted per email sent. Opens are approximate — images blocked
+              means no open recorded, and a privacy proxy can fetch the image
+              before anyone reads it.
+            </p>
+          </div>
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Step</th>
+                  <th>Sent</th>
+                  <th>Opened</th>
+                  <th>Clicked</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stepEngagement.map((row) => (
+                  <tr key={row.step}>
+                    <td className="font-medium">
+                      {row.step === 0 ? "One-off" : `Step ${row.step}`}
+                    </td>
+                    <td>{row.sent}</td>
+                    <td>
+                      {row.openers}
+                      <span className="hint">
+                        {" "}
+                        ({Math.round((row.openers / Math.max(1, row.sent)) * 100)}%
+                        {row.opens > row.openers && `, ${row.opens} opens`})
+                      </span>
+                    </td>
+                    <td>
+                      {row.clickers}
+                      {row.clicks > row.clickers && (
+                        <span className="hint"> ({row.clicks} clicks)</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       <CampaignControls
         campaignId={campaign.id}
@@ -198,6 +299,7 @@ export default async function CampaignDetailPage({
                   <th>Email</th>
                   <th>Status</th>
                   <th>Step</th>
+                  <th>Opened</th>
                   <th>Next send</th>
                   <th>Last sent</th>
                 </tr>
@@ -218,6 +320,29 @@ export default async function CampaignDetailPage({
                     </td>
                     <td>
                       {row.current_step} / {steps.length}
+                    </td>
+                    <td>
+                      {(() => {
+                        const summaries = trackingByContact.get(row.contact_id) ?? [];
+                        if (summaries.length === 0) return <span className="hint">—</span>;
+                        const rolled = rollUpTracking(summaries);
+                        if (!rolled.openedAny) {
+                          return <span className="hint">not yet</span>;
+                        }
+                        return (
+                          <span
+                            className="text-[var(--color-ok)]"
+                            title={
+                              rolled.firstOpenAt
+                                ? `First opened ${new Date(rolled.firstOpenAt).toLocaleString()}`
+                                : undefined
+                            }
+                          >
+                            {rolled.opens}×
+                            {rolled.clickedAny && ` · ${rolled.clicks} click${rolled.clicks === 1 ? "" : "s"}`}
+                          </span>
+                        );
+                      })()}
                     </td>
                     <td>
                       {row.next_send_at

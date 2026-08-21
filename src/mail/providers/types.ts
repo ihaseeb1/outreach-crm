@@ -1,3 +1,5 @@
+import { WARMUP_HEADER } from "@/mail/inbound-classify";
+
 /**
  * MailboxProvider — the seam between the app and however a given mailbox
  * actually sends and receives.
@@ -53,6 +55,83 @@ export interface FetchInboundOptions {
   limit?: number;
 }
 
+/**
+ * Everything a poller needs to decide whether a message is worth downloading —
+ * and nothing else.
+ *
+ * A full message can be megabytes; this is a few hundred bytes. Splitting the
+ * poll into "look at the envelope" and then "read the ones that matter" is what
+ * keeps a busy personal inbox inside the function's time budget: most of what
+ * lands in one is newsletters and receipts that this app is never going to
+ * store.
+ */
+export interface InboundHeader {
+  uid: number;
+  messageId: string | null;
+  inReplyTo: string | null;
+  references: string[];
+  fromEmail: string;
+  fromName: string | null;
+  toEmail: string | null;
+  subject: string | null;
+  receivedAt: string;
+  /** Lower-cased header names, for the classifier. */
+  headers: Record<string, string>;
+}
+
+/**
+ * The headers fetched alongside the envelope.
+ *
+ * Kept short on purpose — every name here is another field the server has to
+ * assemble. These are exactly the ones `classifyInbound` reads, plus
+ * References, which the envelope does not carry.
+ */
+export const HEADER_FIELDS = [
+  "references",
+  "in-reply-to",
+  "message-id",
+  "content-type",
+  "auto-submitted",
+  "precedence",
+  "x-autoreply",
+  "x-autorespond",
+  "x-auto-response-suppress",
+  // Referenced, not spelled out: warmup mail is identified by this header, and
+  // a copy of the string here that drifted from the one the sender writes would
+  // quietly turn every warmup reply into an unexplained inbox entry.
+  WARMUP_HEADER,
+] as const;
+
+/**
+ * Parses a raw header block into a lower-cased map.
+ *
+ * Continuation lines (a header folded across several physical lines, which
+ * References very often is) are joined onto the header they belong to — miss
+ * that and a long References chain is truncated at the first fold, which is
+ * precisely the case where threading matters most.
+ */
+export function parseHeaderBlock(raw: string): Record<string, string> {
+  const headers: Record<string, string> = {};
+  let currentKey: string | null = null;
+
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+
+    if (/^\s/.test(line) && currentKey) {
+      headers[currentKey] = `${headers[currentKey]} ${line.trim()}`.trim();
+      continue;
+    }
+
+    const separator = line.indexOf(":");
+    if (separator === -1) continue;
+
+    currentKey = line.slice(0, separator).trim().toLowerCase();
+    headers[currentKey] = line.slice(separator + 1).trim();
+  }
+
+  return headers;
+}
+
 export interface VerifyResult {
   ok: boolean;
   error?: string;
@@ -74,6 +153,20 @@ export interface MailboxProvider {
   verify(): Promise<VerifyResult>;
   send(message: OutboundMessage): Promise<SendResult>;
   fetchInbound(options?: FetchInboundOptions): Promise<InboundMessage[]>;
+  /**
+   * A poll in two phases down **one** connection.
+   *
+   * Phase one lists envelopes — cheap enough to run over every unseen message.
+   * `choose` then decides which of them are worth reading, and phase two
+   * downloads only those. The decision needs database lookups, so it is async,
+   * and the connection is deliberately held open across it: reconnecting
+   * between the phases would double the number of IMAP sessions a poll opens,
+   * on exactly the provider that is fussiest about how many are open at once.
+   */
+  fetchInboundSelective(
+    options: FetchInboundOptions,
+    choose: (headers: InboundHeader[]) => Promise<number[]>,
+  ): Promise<{ headers: InboundHeader[]; messages: InboundMessage[] }>;
   /**
    * Messages the user has starred, newest first.
    *

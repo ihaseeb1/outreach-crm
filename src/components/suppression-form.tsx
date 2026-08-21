@@ -83,29 +83,5 @@ export function SuppressionForm() {
   );
 }
 
-export function RemoveSuppressionButton({ id, reason }: { id: string; reason: string }) {
-  const router = useRouter();
-  const [busy, setBusy] = useState(false);
-  const locked = reason === "hard_bounce" || reason === "complaint";
-
-  if (locked) {
-    return (
-      <span className="hint" title="Kept permanently to protect sending reputation.">
-        locked
-      </span>
-    );
-  }
-
-  async function remove() {
-    setBusy(true);
-    await fetch(`/api/suppressions?id=${id}`, { method: "DELETE" });
-    setBusy(false);
-    router.refresh();
-  }
-
-  return (
-    <button className="btn-danger px-2 py-1 text-xs" onClick={remove} disabled={busy} type="button">
-      {busy ? "…" : "Remove"}
-    </button>
-  );
-}
+// The per-row remove button moved into `suppression-table.tsx`, which owns
+// selection as well and so can delete one row or fifty through the same path.

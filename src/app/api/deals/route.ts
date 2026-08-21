@@ -9,7 +9,13 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { starConversationInMailbox, type StarOutcome } from "@/mail/star";
 import { getSession } from "@/lib/workspace";
 import { toApiShape } from "@/deals/export";
-import { contactEmailMap, loadDeals, parseDealFilters } from "@/deals/query";
+import {
+  contactEmailMap,
+  dealMailboxMap,
+  filterByMailbox,
+  loadDeals,
+  parseDealFilters,
+} from "@/deals/query";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -64,14 +70,30 @@ export async function GET(request: Request) {
   }
 
   const filters = parseDealFilters(url.searchParams);
-  const deals = await loadDeals(supabase, workspaceId, filters);
-  const emails = await contactEmailMap(supabase, deals);
+  const loaded = await loadDeals(supabase, workspaceId, filters);
+
+  const mailboxByDeal = await dealMailboxMap(supabase, loaded);
+  const deals = filterByMailbox(loaded, mailboxByDeal, filters.mailboxId);
+
+  const [emails, { data: mailboxRows }] = await Promise.all([
+    contactEmailMap(supabase, deals),
+    supabase.from("mailboxes").select("id, email").eq("workspace_id", workspaceId),
+  ]);
+
+  const mailboxEmails = new Map(
+    ((mailboxRows ?? []) as { id: string; email: string }[]).map((row) => [
+      row.id,
+      row.email,
+    ]),
+  );
 
   return NextResponse.json({
     count: deals.length,
     filters,
     deals: deals.map((deal) =>
-      toApiShape(deal, deal.contact_id ? emails.get(deal.contact_id) : undefined),
+      toApiShape(deal, deal.contact_id ? emails.get(deal.contact_id) : undefined, {
+        mailboxEmail: mailboxEmails.get(mailboxByDeal.get(deal.id) ?? "") ?? null,
+      }),
     ),
   });
 }

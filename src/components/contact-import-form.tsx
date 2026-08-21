@@ -120,7 +120,10 @@ export function ContactImportForm() {
               <textarea
                 id="import-websites"
                 className="input min-h-48 font-mono text-xs"
-                placeholder={"example.com\nanother-site.co.uk\nthirdsite.net"}
+                placeholder={
+                  "example.com\nanother-site.co.uk\nthirdsite.net" +
+                  "\n\n…or both halves per line:\nfacebook.com,info@facebook.com"
+                }
                 value={websites}
                 onChange={(e) => setWebsites(e.target.value)}
               />
@@ -146,6 +149,12 @@ export function ContactImportForm() {
             row 1, row 2 with row 2, and so on. You can fill in just one box:
             emails alone still create contacts, websites alone get queued for
             scraping.
+          </p>
+          <p className="hint">
+            Both halves on one line works too —{" "}
+            <code>facebook.com,info@facebook.com</code> pasted into either box is
+            split into the website and the address. The count below is what will
+            actually be saved, so you can check it before importing.
           </p>
 
           {mismatch && (

@@ -56,13 +56,46 @@ export const REPORT_RANGE_OPTIONS: ReportRangeOption[] = REPORT_RANGE_KEYS.map(
   (key) => ({ key, label: LABELS[key], shortLabel: SHORT_LABELS[key] }),
 );
 
+/**
+ * How the volume chart groups its bars.
+ *
+ * A window and a grouping are two different questions, and tying them together
+ * meant one of them could never be asked. "Last 12 months" always came back as
+ * weekly bars, so there was no way to see twelve monthly totals; "last 30 days"
+ * was always daily, so there was no way to see it as four weeks. Both are
+ * ordinary things to want, so the grouping is its own control.
+ */
+export const REPORT_BUCKETS = ["day", "week", "month"] as const;
+
+export type ReportBucket = (typeof REPORT_BUCKETS)[number];
+
+export const REPORT_BUCKET_LABELS: Record<ReportBucket, string> = {
+  day: "Daily",
+  week: "Weekly",
+  month: "Monthly",
+};
+
+export function isReportBucket(value: unknown): value is ReportBucket {
+  return (
+    typeof value === "string" &&
+    (REPORT_BUCKETS as readonly string[]).includes(value)
+  );
+}
+
+/** Falls back to whatever the range would have chosen — this comes from a URL. */
+export function parseReportBucket(value: unknown): ReportBucket | null {
+  return isReportBucket(value) ? value : null;
+}
+
 export interface ResolvedRange extends ReportRangeOption {
   /** Days in the window, counting today. */
   days: number;
   /** ISO timestamp for the `gte` — midnight UTC on the window's first day. */
   since: string;
-  /** How the volume chart should bucket: one bar a day, or one a week. */
-  bucket: "day" | "week";
+  /** How the volume chart should bucket: a bar a day, a week, or a month. */
+  bucket: ReportBucket;
+  /** True when the bucket was chosen by the reader rather than by the range. */
+  bucketIsExplicit: boolean;
 }
 
 const DAY_MS = 86_400_000;
@@ -95,6 +128,7 @@ export function parseReportRange(value: unknown): ReportRangeKey {
 export function resolveReportRange(
   key: ReportRangeKey,
   now: Date = new Date(),
+  bucket: ReportBucket | null = null,
 ): ResolvedRange {
   const days = key === "ytd" ? daysSinceJanuaryFirst(now) : Number(key);
   const startMs = startOfUtcDay(now) - (days - 1) * DAY_MS;
@@ -105,7 +139,11 @@ export function resolveReportRange(
     shortLabel: SHORT_LABELS[key],
     days,
     since: new Date(startMs).toISOString(),
-    bucket: days > WEEKLY_ABOVE_DAYS ? "week" : "day",
+    // An explicit choice always wins, including "daily over a year" — that is
+    // an unreadable chart, but it is the reader's chart to make unreadable, and
+    // the alternative is a control that silently ignores you.
+    bucket: bucket ?? (days > WEEKLY_ABOVE_DAYS ? "week" : "day"),
+    bucketIsExplicit: bucket !== null,
   };
 }
 

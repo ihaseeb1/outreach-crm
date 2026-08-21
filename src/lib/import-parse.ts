@@ -82,6 +82,34 @@ function stripWrappers(token: string): string {
 }
 
 /**
+ * Is this token a website rather than an address?
+ *
+ * The `@` test is the whole point. `new URL()` reads everything before an `@`
+ * as userinfo, so "facebook.com,info@facebook.com" parses as the perfectly
+ * valid URL `https://facebook.com,info@facebook.com` — host facebook.com, with
+ * the address swallowed into the credentials. Without this guard that cell
+ * imports as a website and the email disappears without a word.
+ */
+function looksLikeSite(token: string): boolean {
+  return !token.includes("@") && isValidHttpUrl(token);
+}
+
+/** Splits any cell into tokens, whatever separator it was pasted with. */
+function cellTokens(cell: string): string[] {
+  return splitLine(cell).map(stripWrappers).filter(Boolean);
+}
+
+/** The address and the website in a set of tokens, in either order. */
+function pickPair(tokens: string[]): { email: string | null; site: string | null } {
+  const emailToken = tokens.find((token) => EMAIL_RE.test(token));
+  const email = emailToken ? normalizeEmail(EMAIL_RE.exec(emailToken)![0]) : null;
+  const siteToken = tokens.find(
+    (token) => token !== emailToken && looksLikeSite(token),
+  );
+  return { email, site: siteToken ? normalizeUrl(siteToken) : null };
+}
+
+/**
  * Pairs two pasted columns — websites in one box, emails in the other —
  * matching them line by line.
  *
@@ -115,18 +143,26 @@ export function pairColumns(websitesRaw: string, emailsRaw: string): ParseResult
   const length = Math.max(sites.length, mails.length);
 
   for (let index = 0; index < length; index += 1) {
-    const siteCell = stripWrappers(sites[index] ?? "");
-    const mailCell = stripWrappers(mails[index] ?? "");
+    const siteCell = (sites[index] ?? "").trim();
+    const mailCell = (mails[index] ?? "").trim();
 
-    const emailMatch = mailCell ? EMAIL_RE.exec(mailCell) : null;
-    const email = emailMatch ? normalizeEmail(emailMatch[0]) : null;
-    const site = siteCell && isValidHttpUrl(siteCell) ? normalizeUrl(siteCell) : null;
+    // Both cells are pooled into one set of tokens, so a row survives whichever
+    // way round it was pasted: two clean columns, a combined
+    // "facebook.com,info@facebook.com" cell in either box, or a website sitting
+    // in the email column. The website box is read first, so its token wins
+    // when both cells carry one.
+    const { email, site } = pickPair([
+      ...cellTokens(siteCell),
+      ...cellTokens(mailCell),
+    ]);
 
     if (!email) {
       // An address that was typed but cannot be used is always reported, even
       // when the website on the same row is fine and gets queued — otherwise
       // the contact they meant to add disappears without a word.
-      if (mailCell) {
+      // A website in the email box is not a broken address — it is the other
+      // half of the pair, and it gets queued below like any other site.
+      if (mailCell && !looksLikeSite(mailCell)) {
         skipped.push({
           line: `row ${index + 1}: ${mailCell}`,
           reason: "Not a valid email address",
@@ -187,9 +223,10 @@ export function parseContactImport(raw: string): ParseResult {
     const emailToken = tokens.find((token) => EMAIL_RE.test(token));
     const email = emailToken ? normalizeEmail(EMAIL_RE.exec(emailToken)![0]) : null;
 
-    // A website token is anything URL-shaped that is not the email itself.
+    // A website token is anything URL-shaped carrying no address — see
+    // looksLikeSite for why "no @" is the test that matters.
     const siteToken = tokens.find(
-      (token) => token !== emailToken && !EMAIL_RE.test(token) && isValidHttpUrl(token),
+      (token) => token !== emailToken && looksLikeSite(token),
     );
 
     if (!email) {
@@ -218,7 +255,7 @@ export function parseContactImport(raw: string): ParseResult {
         token !== emailToken &&
         token !== siteToken &&
         !/^[\d.,%$£€]+$/.test(token) &&
-        !isValidHttpUrl(token),
+        !looksLikeSite(token),
     );
     const nameParts = nameTokens.join(" ").trim().split(/\s+/).filter(Boolean);
 

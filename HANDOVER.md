@@ -1,10 +1,404 @@
-# Handover — 17 and 20 August 2026
+# Handover — 17, 20, 21 August 2026
 
 Read this first, then `DEPLOY_STATUS.md` for hosting and `BUILD_LOG.md` for the
 original seven build phases.
 
 Live at **https://crm.orankly.com**. Everything here is on `main` and deployed.
 Pushing `main` deploys straight to production, so ask before pushing.
+
+**The 20 and 21 August work below is committed but NOT yet deployed and NOT yet
+verified against live data.** Start with "What to check live" at the end of the
+21 August section, then "Six fixes, 20 August".
+
+---
+
+## Six fixes, 21 August (third session)
+
+Reported after another few days of use. All six are done; `npm run typecheck`,
+`npm run smoke` (282 tests) and `npm run build` are clean. **No migration is
+needed for any of it** — see "Why tracking lives on messages.meta" below.
+
+As with the last session, nothing here has run against the real Supabase or a
+real mailbox: there is no `.env.local` in this checkout. After deploying, the
+things to actually look at are listed under "What to check live" at the end.
+
+### 1. Clearing the suppression list, not deleting it row by row
+
+Last session added delete buttons. The ask was to *empty* the list — the storage
+is the point, not the individual rows.
+
+`DELETE /api/suppressions?all=1` is a separate path from the id-list delete, and
+deliberately so: the page only holds the newest 1,000 entries, so "delete
+everything on screen" would have left the rest behind and reported success. The
+scope is the same reason filter and the same search box the reader can see, the
+count is taken **before** the delete (a delete cannot report how many rows it
+removed once they are gone), bounces and complaints still need `confirm=1`, and
+the removal is written to the activity log as `suppression.cleared`.
+
+The button reads "Clear the list (1,234)" with no filter set and "Clear filtered"
+with one, so it always says what it is about to do.
+
+### 2. Reading their email inside Edit deal
+
+The screenshot that came with the report says it: **Edit deal** offered "Read
+pasted text" and "Load starred emails" and nothing else, so checking a quoted
+niche price meant leaving the form for the inbox and losing whatever had been
+typed.
+
+New `GET /api/messages/thread`, addressed by `contact_id`, `conversation_id` or
+`domain` — a deal has at least one of the three, and a hand-entered deal has only
+the domain. The domain lookup matches the deal's domain against both the
+contact's domain *and* its address, because a publisher answers from whatever
+address they like.
+
+In the form it is a panel inside "Fill from their email": every message with
+sender, date and subject, expandable to the full text in a scrollable block, with
+**Use this** running the existing quote parser on it and **Copy into the box
+below** for the paste field. It loads when the editor opens rather than on a
+click — being already there was the request. Three details worth keeping:
+
+- **Inbound only gets "Use this".** Parsing our own email back would fill the
+  rate card with the numbers we quoted them.
+- **Skipped in the inbox** (`compact`), where the message is on screen anyway.
+- **A brand-new deal gets a button instead**, because the domain is being typed
+  a character at a time and a fetch per keystroke is what a button is for.
+
+The modal went from `max-w-3xl` to `max-w-4xl` to give it room.
+
+### 3. Sent today, split into warmup and real outreach
+
+The mailboxes page had 7 / 14 / 30 day volume and a "Sent today" bar that was
+one number. **Today** is now the first option on the same toggle, and the page
+opens on it.
+
+"Today" is the **UTC calendar day**, not a rolling 24 hours, because
+`sent_today_date` — the counter that resets the daily limit — is written as
+`toISOString().slice(0, 10)` everywhere in this app. A rolling window would
+disagree with the "Sent today" bar on the same card every evening, and this is
+the figure that would look wrong.
+
+The today view shows the split and no daily average: "0.4 a day" for a day that
+is still happening says nothing, and how much of today's allowance went on warmup
+rather than on prospects is the whole reason to look at one day.
+
+### 4. Open and click tracking
+
+**`meta.tracking` on the message row**, written by two new public endpoints:
+
+- `GET /api/track/open?m=&s=` — a 1×1 GIF, `no-store`, returned whatever happens
+  to the write. A broken image in a prospect's inbox is worse than a missed count.
+- `GET /api/track/click?m=&u=&s=` — records, then 302s to the destination.
+
+Both are unauthenticated, because the caller is the recipient's mail client. The
+HMAC is what authorises the write, and the click signature covers **the
+destination as well as the message id** — an unsigned `?u=` here would be an open
+redirect on crm.orankly.com, which is worth more to a phisher than the tracking
+is worth to us. Non-http(s) targets are refused, and a bad signature redirects to
+the home page rather than following the URL it was handed.
+
+What is recorded per message: open count, first open, last open, click count,
+first/last click, and a count per link. **The first open is never overwritten** —
+"has he opened it" was the question. A click also implies an open, because images
+off and a link clicked is ordinary, and "clicked but never opened" reads as a bug.
+
+Where it shows:
+
+- **Contact page** — a line per outbound message ("Step 2 · Opened 3× · first 21
+  Aug 14:22 · 1 click"), plus a roll-up in the card header. Per message, and per
+  step, is exactly the "did he open the follow-up" question.
+- **Campaign page** — "Opens and clicks by step" (openers as a percentage of
+  sent, with the raw open count when it is higher), and an **Opened** column on
+  the enrolled table. Both come from one `messages` read, so they cannot disagree.
+- **Settings** — off / opens only / opens and clicks, default opens and clicks.
+
+Three things deliberately not tracked: **warmup** (peer mail between your own
+mailboxes — nothing to measure, and a remote image in traffic meant to look like
+correspondence), **the connection test** (your own open), and **the closing
+block**. Link rewriting runs on the message body only, before the signature and
+the CAN-SPAM footer are appended, so the one-click unsubscribe link stays exactly
+what `List-Unsubscribe` promises and our own footer is never scored as engagement.
+
+The message id had to be **minted before the send** (`crypto.randomUUID()`, then
+inserted explicitly) because the pixel and every rewritten link carry it, and
+they go into an email that leaves before the row exists.
+
+The mode is stored **on the message** as well as read from the workspace, so
+turning tracking off later does not make every email ever sent read as "never
+opened" instead of "not tracked". Those two must never render the same way: one
+is "we do not know", the other is "they did not".
+
+The Settings copy says the two honest caveats out loud: images blocked means no
+open recorded, Apple Mail's privacy proxy fetches images before anyone reads
+anything, and a rewritten link points at crm.orankly.com rather than at the site,
+which some filters weigh against cold mail. **Opens only** keeps the signal and
+leaves links alone.
+
+#### Why tracking lives on `messages.meta`
+
+Every migration in this project is applied by hand in the Supabase SQL editor. A
+feature that needs one is dark between deploying and remembering to run it, and a
+half-applied schema breaks reads on pages that have nothing to do with the
+feature. `meta` is jsonb that already exists on every row and is already selected
+by the pages that show this. The cost is that two opens in the same instant can
+lose a count to a read-modify-write race — a duplicated open of one email is not
+a number anyone acts on. If this ever needs to be exact, the upgrade is a
+`message_events` table plus an atomic increment, and `mail/tracking-summary.ts`
+is the only module that would change.
+
+### 5. "facebook.com,info@facebook.com" pasted as one cell
+
+Both halves on one line already worked in the *one-per-line* box. In the
+**two-box** mode — which is the default — it silently lost the address, and the
+reason is worth writing down: `new URL()` reads everything before an `@` as
+userinfo, so `facebook.com,info@facebook.com` parses as a perfectly valid URL
+with host `facebook.com` and the address swallowed into the credentials. It
+imported as a website and the email disappeared without a word.
+
+`pairColumns` now pools both cells of a row into one set of tokens and picks the
+address and the website out of them, so a row survives whichever way round it was
+pasted: two clean columns, a combined cell in either box, or a website sitting in
+the email column (which is no longer reported as a broken address). The test for
+"is this a website" is now **no `@`** first, URL-shaped second — that guard is the
+whole fix, and it is shared with the one-per-line parser.
+
+### 6. A new campaign taking contacts another campaign is already using
+
+Reported as: added contacts to a new campaign, got 100 that were already in the
+other one.
+
+**The check that existed asked the wrong question.** `enrollContacts` looked for
+"is this contact already in *this* campaign" — nothing anywhere looked outside the
+campaign being added to. And the filtered "add matching contacts" query simply
+took the newest N validated contacts, so the 56 already enrolled were the first
+ones it found.
+
+Both halves fixed, in `campaigns/exclusions.ts`:
+
+- **Any row in `campaign_contacts` counts as used**, whatever its status —
+  pending, mid-sequence, completed, bounced, opted out. All of them mean the
+  person has been written to.
+- **The campaign is named**, in the API response, in the form's message and in
+  the activity log: "Added 12, 44 already in First Campaign (44)".
+- **"Max to add" means 100 *new* contacts.** The selection pages through
+  candidates (1,000 at a time, up to 20,000 scanned) filtering against the
+  used set until it has enough, and says so when it stops early — stopping at
+  the first 100 rows would have found none and reported nothing wrong.
+- **An explicit override**, off by default: "Allow contacts already in other
+  campaigns", for deliberately re-contacting from a second angle.
+
+Shipped alongside, because this path can now hand five thousand ids to a query:
+`loadEnrolments`, the contacts read in `enrollContacts` and `suppressedSubset` all
+**chunk at 200 ids**. `in` goes into the query string, and five thousand uuids is a
+180KB URL the gateway rejects before Postgres ever sees it.
+
+### What to check live
+
+In order, after deploying:
+
+1. **Settings** — the tracking dropdown reads "Opens and clicks" (the default).
+   Turn it to "Opens only" if the rewritten links are a worry on cold mail.
+2. **Mailboxes** — the toggle opens on **Today** and the cards say how much of
+   today's allowance went on warmup.
+3. **Suppressions** — "Clear the list (n)" reports the same n it deletes.
+4. **Deals → Edit** on a publisher who has replied — their emails load in the
+   form. This is the one that needs real data to prove anything.
+5. **Campaigns → First Campaign → Add contacts** with the box ticked at 100.
+   It should add nothing and say "already in First Campaign (n)" — that is the
+   bug being fixed, reported correctly.
+6. **Tracking end to end** needs a real send: press **Run campaign now**, open
+   the email in Gmail, and the contact page should say "Opened once". Until an
+   email is actually sent *after* this deploy, every existing message will read
+   "not tracked" — correctly, because it was.
+
+---
+
+## Six fixes, 20 August (second session)
+
+Six things the user reported after a few more days of use. All six are done;
+`npm run typecheck`, `npm run smoke` (257 tests) and `npm run build` are clean.
+**None of it has been exercised against a real mailbox** — there is no
+`.env.local` in this checkout, so nothing here has run against Supabase or
+Gmail. Per the verification habits at the bottom of this file, that means the
+first thing to do after deploying is press **Poll mailboxes now** and read what
+it says.
+
+### 1. "Checked 5 of 5" when seven mailboxes are connected
+
+**The button was reporting its own cap back as the total.**
+`<RunJobButton job="inbound" limit={5} />` on the mailboxes page asked the
+server for five mailboxes, got five, and rendered "Checked 5 of 5" from
+`polled + deferred`. There was no number anywhere in the response that knew the
+workspace had seven. The inbox's two buttons had the same shape with `limit={20}`.
+
+Fixed at every level rather than by raising the cap:
+
+- **No limit at all** on any of the three buttons. `limit` is now optional
+  through `runInboundPoll`, and omitted means every mailbox that qualifies.
+- **`queued`** is returned alongside `polled`/`deferred` — the size of the queue
+  before any budget was applied — and the message is built from it.
+- **`unpollable`** names connected mailboxes that could not be queued *at all*,
+  with the reason. A mailbox with no stored credentials is invisible to the
+  poll query, so without this the same "n of n" lie was still possible.
+- **Paused mailboxes are polled**, by the cron as well. Pausing stops a mailbox
+  *sending*; the replies to what it already sent still arrive, and dropping them
+  because of a toggle that means something else loses real mail.
+- **The button keeps asking** until `deferred` is 0, up to 8 rounds, showing
+  "Checked 4 so far, 3 to go…" in between. One request can only do what fits in
+  60 seconds; pressing the button repeatedly was the user's job before.
+
+### 2. IMAP timeouts, "Connection not available", "socket timeout"
+
+Three separate causes, all fixed:
+
+**A poll downloaded every message in full before deciding what it was.** The
+fetch asked for `source: true` over everything above the checkpoint. On a
+personal Gmail account that is newsletters, receipts and notifications — none of
+which this app ever stores — pulled down in full, one `simpleParser` each. That
+is the 25 seconds.
+
+Polls are now **two phases down one connection**
+(`fetchInboundSelective` in `mail/providers/smtp.ts`): envelopes plus nine
+headers for everything unseen, a decision, then full sources for *only* what is
+going to be stored. `mail/prefilter.ts` holds the decision and is pure, so it is
+covered by tests. It is deliberately no stricter than the storing path behind
+it — it keeps anything that threads back to our outbound mail, not just mail
+from an address we wrote to, because publishers answer from a different address
+all the time.
+
+Warmup mail is now handled **from the envelope**, with nothing downloaded: every
+field the counter reads is in the header.
+
+**An abandoned poll never hung up.** `pollWithTimeout` raced the poll against a
+25-second timer and walked away from the loser — but the IMAP socket carried on,
+still counting against Gmail's per-account connection limit until the server
+reaped it. The next mailbox asking for a connection is the one that got
+"Connection not available". `pollMailbox` now takes an `AbortSignal`, the
+provider tracks its live clients, and `close()` tears them down mid-flight.
+
+**`socketTimeout` was above the caller's ceiling.** 30s inside a 25s race, so a
+stalled socket could never surface as a named error — the stopwatch always won
+and every failure read as "Timed out after 25s". Now 18s, under the ceiling, so
+the real cause has a chance to be reported. Plus **one retry** on transient
+failures only (`isTransient`), because "Connection not available" is usually
+gone a second later, while a wrong app password is not.
+
+### 3. Warmup conversations
+
+`warmup/content.ts` was 15 subjects, 6 openers, 7 middles, 5 closers and 7
+replies drawn from **separate global pools** — so a body was three grammatical
+sentences about nothing in particular, and a reply had no relationship to the
+message it answered.
+
+It is now **24 topics**. A topic is a small work situation (a draft going round,
+a supplier quote, cover for next week) with its own subjects, openers, bodies,
+closers, and **three turns of replies written for the turn they appear in**. A
+thread stays on one topic start to finish.
+
+- **3.6 million distinct opening messages** (`corpusSize()`, asserted in the
+  tests, so trimming the corpus fails a test rather than passing quietly). At
+  seven mailboxes and five a day that is ~12,800 sends a year.
+- **288 written reply lines**, plus 288 more combinations with the shared tails.
+- **A thread is deterministic in its own root message id**, seeded per depth, so
+  the same conversation always produces the same next line however many ticks it
+  takes to play out — and provably never repeats itself within a thread.
+- The topic is recovered from the **subject line**, "Re: " prefixes stripped, so
+  none of this needed a migration.
+- **Half of threads now become conversations**, up from one in four
+  (`CONVERSATION_IN_EVERY`), of two or three replies. That trades new threads for
+  deeper ones rather than adding volume — every turn spends the same daily cap.
+  Three replies is the ceiling because three turns is what is written; a longer
+  thread would have to reuse a turn.
+
+### 3b. Warmup now ends with the same closing block as real outreach
+
+Reported from a screenshot: the test email closed with the postal address, the
+four icons and the opt-out, while warmup mail closed with a bare
+`Best Regards, Team Orankly / Address / Phone` and no icons.
+
+**Cause.** Warmup passed `includeFooter: false`, so `postal` stayed null, so
+`signatureCarriesAddress` had nothing to compare against and `mailboxes.signature`
+— which holds that address text — printed as an ordinary sign-off instead.
+
+**The earlier reasoning was wrong and has been reversed.** Warmup was excluded
+because peer mail fetching four remote images every time was "pointless and a
+distinctive fingerprint". But leaving the block off did not make warmup look like
+nothing; it made it look like a *different sender* from the one being warmed up.
+The account then had two shapes of outbound mail and only one of them was the
+shape real outreach goes out in. `includeFooter` now defaults to **true for every
+kind**, and the two `includeFooter: false` lines in `warmup/engine.ts` are gone.
+
+Three things had to move with it:
+
+- **The corpus no longer generates its own sign-off.** A warmup body ending
+  "Speak soon," directly above "Best Regards, Team Orankly…" is two sign-offs —
+  exactly the two-signature shape the footer rebuild existed to remove. Bodies
+  now end on their last sentence and the closing block closes the email, as an
+  outreach email does. The opening pool drops from 3.6M to 604,800, which is
+  still ~47 years of sending before a repeat is likely.
+- **`canSend` requires a postal address for every kind**, not just campaigns.
+  Otherwise a warmup send passed the guard, reserved a slot against the daily
+  limit, then failed inside `sendEmail` with nothing to print — the slot is
+  released, but the reason never reaches the batch's `skipped` list, so the run
+  reports a mailbox that simply did nothing.
+- **Your own mailbox can never be suppressed.** This is the hazard the change
+  introduces and the part to keep. Warmup mail now carries an opt-out link and
+  `List-Unsubscribe` headers addressed to *one of your own mailboxes*. Gmail
+  prefetches and scans links, offers its own one-click unsubscribe from that
+  header, and a person may simply click it to see what it does. Any of those
+  would put a sending address on the suppression list, and `canSend` would then
+  refuse every warmup message to it — silently, because a skipped send looks
+  identical to a rested mailbox. The guard is in `suppressEmail`, the single
+  choke point every suppression path goes through, not in the unsubscribe route
+  alone; refusals are logged as `suppression.refused_own_mailbox`, and the
+  unsubscribe page says what happened instead of claiming success.
+
+Both a warmup opening and a warmup reply were rendered through the send path's
+own functions and read end to end: one closing block, address once, four icons,
+one "Unsubscribe".
+
+### 4. Deleting suppressions
+
+Hard bounces and complaints rendered as the word "locked" with no route past it.
+One guard too many: a bounce classified from wording rather than an SMTP status
+code can be wrong, and a wrongly written-off address had no way back.
+
+Everything is deletable now, but never by accident — a second, differently
+worded confirmation for the protected reasons, `confirm=1` required on the API,
+and every removal written to the activity log with its reason. Alongside it:
+**search** by address or source, a **reason filter**, **select-all and bulk
+delete**, and a footer that says what deleting actually means. Selection is
+intersected with what is on screen, so filtering after selecting cannot delete
+something the reader can no longer see.
+
+### 5. Daily / weekly / monthly volume on Reports
+
+Grouping was welded to the period: over 92 days you got weeks, under it you got
+days, and there was no way to ask for anything else. So twelve monthly totals —
+the obvious thing to want from a twelve-month report — could not be had.
+
+**Volume** is now its own dropdown next to **Period**, in the URL as `bucket`.
+Monthly bars follow the **calendar**, not 30-day blocks: a month means something
+that a rolling 30 days does not, and the tooltip reads "August 2026" rather than
+a date range. First and last buckets are genuinely partial and `days` says so.
+An explicit choice always wins, including daily bars over a year — an unreadable
+chart, but a control that quietly ignores you is worse. The chart header now
+carries the total and the per-bucket average, averaged over buckets that
+actually had sending in them.
+
+### 6. Deals: search by domain, and which address closed it
+
+The domain box was already there but read as one filter among six; it is now a
+wide **Search domain** field with a placeholder saying partial matches work.
+
+The new part is **Closed on**: a column, and a filter. Which of the seven
+addresses won a publisher was never recorded on `deals` — but the conversation
+the deal was logged from knows (`conversations.mailbox_id`), and a hand-entered
+deal with no conversation falls back to the last message exchanged with that
+contact. Resolved once per page load and used for both the column and the
+filter, so they cannot disagree. No migration. It is in the **xlsx/csv/tsv
+export** as a "Closed on" column and in the **read-only API** as
+`mailbox_email`, since "which of our addresses agreed this" is the first thing
+anyone asks of that spreadsheet.
 
 ---
 

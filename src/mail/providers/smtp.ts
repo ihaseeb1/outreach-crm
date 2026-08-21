@@ -5,15 +5,18 @@ import type SMTPTransport from "nodemailer/lib/smtp-transport";
 
 import { classifyInbound } from "@/mail/inbound-classify";
 import { accessTokenFor } from "@/mail/providers/oauth";
-import type {
-  FetchInboundOptions,
-  FolderMessageRef,
-  InboundMessage,
-  MailboxCredentials,
-  MailboxProvider,
-  OutboundMessage,
-  SendResult,
-  VerifyResult,
+import {
+  HEADER_FIELDS,
+  parseHeaderBlock,
+  type FetchInboundOptions,
+  type FolderMessageRef,
+  type InboundHeader,
+  type InboundMessage,
+  type MailboxCredentials,
+  type MailboxProvider,
+  type OutboundMessage,
+  type SendResult,
+  type VerifyResult,
 } from "@/mail/providers/types";
 
 /**
@@ -27,6 +30,22 @@ export class SmtpProvider implements MailboxProvider {
   readonly kind = "smtp";
 
   private transporter: Transporter | null = null;
+
+  /**
+   * Every IMAP client currently mid-operation.
+   *
+   * Without this, `close()` could only ever tear down SMTP, so a poll that was
+   * abandoned on a timeout left its IMAP socket open and reading. Those orphans
+   * are what produced the pair of errors the user kept seeing: the socket
+   * eventually died on its own and every later command on it answered
+   * "Connection not available", while Gmail counted the abandoned connections
+   * against its per-account simultaneous-connection limit and refused the next
+   * one. A caller that gives up now actually hangs up.
+   */
+  private readonly liveClients = new Set<ImapFlow>();
+
+  /** Set by `close()`. A closed provider refuses to open anything new. */
+  private closed = false;
 
   constructor(
     private readonly credentials: MailboxCredentials,
@@ -87,16 +106,21 @@ export class SmtpProvider implements MailboxProvider {
       return result;
     }
 
-    const client = await this.imapClient();
     try {
-      await client.connect();
-      await client.getMailboxLock("INBOX").then((lock) => lock.release());
+      // No retry: verify exists to report the real reason a mailbox will not
+      // connect, and a retry would only ever hide the first error behind the
+      // second.
+      await this.withImap(
+        async (client) => {
+          const lock = await client.getMailboxLock("INBOX");
+          lock.release();
+        },
+        { retries: 0 },
+      );
       result.imap = true;
     } catch (error) {
       result.error = `IMAP: ${message(error)}`;
       return result;
-    } finally {
-      await client.logout().catch(() => undefined);
     }
 
     result.ok = true;
@@ -138,9 +162,94 @@ export class SmtpProvider implements MailboxProvider {
       // Without these a stalled connection waits on the OS socket timeout —
       // minutes — which is far longer than the function is allowed to live, so
       // the whole run dies with it and reports nothing.
-      connectionTimeout: 15_000,
-      greetingTimeout: 15_000,
-      socketTimeout: 30_000,
+      //
+      // socketTimeout is deliberately *below* the caller's per-mailbox ceiling
+      // (25s in the poller). It used to be 30s, above it, which meant a stalled
+      // socket could never surface as a named IMAP error — the poller's
+      // stopwatch always fired first and the only thing anyone ever saw was
+      // "Timed out after 25s", with no clue whether it was the connect, the
+      // login or the fetch.
+      connectionTimeout: 12_000,
+      greetingTimeout: 12_000,
+      socketTimeout: 18_000,
+    });
+  }
+
+  /**
+   * Connect, run one piece of work, hang up — with a retry.
+   *
+   * Gmail's IMAP frontend refuses or drops connections often enough that a
+   * single attempt is not a fair test of a mailbox: "Connection not available"
+   * and "socket timeout" are both usually gone by the second try a second
+   * later. Only transient failures are retried — a wrong app password would
+   * otherwise be asked twice and reported just as slowly.
+   */
+  private async withImap<T>(
+    fn: (client: ImapFlow) => Promise<T>,
+    options: { retries?: number } = {},
+  ): Promise<T> {
+    const retries = options.retries ?? 1;
+    let lastError: unknown = new Error("IMAP: no attempt was made.");
+
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      if (this.closed) throw new Error("The mailbox connection was closed.");
+
+      const client = await this.imapClient();
+      this.liveClients.add(client);
+
+      try {
+        await client.connect();
+        return await fn(client);
+      } catch (error) {
+        lastError = error;
+        if (this.closed || attempt >= retries || !isTransient(error)) break;
+        await pause(600 * (attempt + 1));
+      } finally {
+        this.liveClients.delete(client);
+        // logout() is the polite close and can itself hang on a dead socket;
+        // close() is the guaranteed one. Both, in that order.
+        await client.logout().catch(() => undefined);
+        try {
+          client.close();
+        } catch {
+          // Already gone.
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
+  /**
+   * Envelopes and a handful of headers for everything above the checkpoint.
+   *
+   * This is the cheap half of the two-phase poll. One IMAP command, no message
+   * bodies: a personal Gmail account collects newsletters, receipts and
+   * notifications, and downloading all of that in full — which is what a
+   * single-phase poll did — is what pushed a poll past 25 seconds. Deciding
+   * what is worth reading costs a few kilobytes; reading it costs megabytes.
+   */
+  async fetchInboundSelective(
+    options: FetchInboundOptions,
+    choose: (headers: InboundHeader[]) => Promise<number[]>,
+  ): Promise<{ headers: InboundHeader[]; messages: InboundMessage[] }> {
+    const limit = options.limit ?? 200;
+    const since = options.sinceUid ?? 0;
+
+    return this.withImap(async (client) => {
+      const lock = await client.getMailboxLock("INBOX");
+
+      try {
+        const headers = await readHeaders(client, since, limit);
+        // The caller's decision runs while the connection is held. It is a
+        // handful of indexed queries, and holding a socket open for that is far
+        // cheaper than logging in a second time.
+        const wanted = await choose(headers);
+        const messages = await readMessages(client, wanted);
+        return { headers, messages };
+      } finally {
+        lock.release();
+      }
     });
   }
 
@@ -148,37 +257,34 @@ export class SmtpProvider implements MailboxProvider {
     options: FetchInboundOptions = {},
   ): Promise<InboundMessage[]> {
     const limit = options.limit ?? 25;
-    const client = await this.imapClient();
-    const results: InboundMessage[] = [];
+    const since = options.sinceUid ?? 0;
 
-    await client.connect();
-    const lock = await client.getMailboxLock("INBOX");
+    return this.withImap(async (client) => {
+      const lock = await client.getMailboxLock("INBOX");
+      const results: InboundMessage[] = [];
 
-    try {
-      // UID-based so we resume exactly where the last poll stopped, with no
-      // dependency on the \Seen flag (which the user may toggle themselves).
-      const since = options.sinceUid ?? 0;
-      const range = `${since + 1}:*`;
+      try {
+        // UID-based so we resume exactly where the last poll stopped, with no
+        // dependency on the \Seen flag (which the user may toggle themselves).
+        for await (const item of client.fetch(
+          `${since + 1}:*`,
+          { uid: true, source: true, envelope: true, internalDate: true },
+          { uid: true },
+        )) {
+          if (item.uid <= since) continue;
+          if (!item.source) continue;
 
-      for await (const item of client.fetch(
-        range,
-        { uid: true, source: true, envelope: true, internalDate: true },
-        { uid: true },
-      )) {
-        if (item.uid <= since) continue;
-        if (!item.source) continue;
+          const parsed = await simpleParser(item.source);
+          results.push(toInboundMessage(item.uid, parsed));
 
-        const parsed = await simpleParser(item.source);
-        results.push(toInboundMessage(item.uid, parsed));
-
-        if (results.length >= limit) break;
+          if (results.length >= limit) break;
+        }
+      } finally {
+        lock.release();
       }
-    } finally {
-      lock.release();
-      await client.logout().catch(() => undefined);
-    }
 
-    return results;
+      return results;
+    });
   }
 
   /**
@@ -190,34 +296,33 @@ export class SmtpProvider implements MailboxProvider {
    */
   async fetchFlagged(options: { limit?: number } = {}): Promise<InboundMessage[]> {
     const limit = options.limit ?? 10;
-    const client = await this.imapClient();
-    const results: InboundMessage[] = [];
 
-    await client.connect();
-    const lock = await client.getMailboxLock("INBOX");
+    return this.withImap(async (client) => {
+      const lock = await client.getMailboxLock("INBOX");
+      const results: InboundMessage[] = [];
 
-    try {
-      const uids = await client.search({ flagged: true }, { uid: true });
-      if (!uids || uids.length === 0) return [];
+      try {
+        const uids = await client.search({ flagged: true }, { uid: true });
+        if (!uids || uids.length === 0) return [];
 
-      // Highest UIDs are the most recent, and they are what a person has just
-      // starred while looking for help with a quote.
-      const newest = uids.slice(-limit);
+        // Highest UIDs are the most recent, and they are what a person has just
+        // starred while looking for help with a quote.
+        const newest = uids.slice(-limit);
 
-      for await (const item of client.fetch(
-        newest,
-        { uid: true, source: true, envelope: true, internalDate: true },
-        { uid: true },
-      )) {
-        if (!item.source) continue;
-        results.push(toInboundMessage(item.uid, await simpleParser(item.source)));
+        for await (const item of client.fetch(
+          newest,
+          { uid: true, source: true, envelope: true, internalDate: true },
+          { uid: true },
+        )) {
+          if (!item.source) continue;
+          results.push(toInboundMessage(item.uid, await simpleParser(item.source)));
+        }
+      } finally {
+        lock.release();
       }
-    } finally {
-      lock.release();
-      await client.logout().catch(() => undefined);
-    }
 
-    return results.reverse();
+      return results.reverse();
+    });
   }
 
   /**
@@ -228,34 +333,33 @@ export class SmtpProvider implements MailboxProvider {
     folder: string,
     fn: (client: ImapFlow) => Promise<T>,
   ): Promise<T> {
-    const client = await this.imapClient();
-    await client.connect();
-    const lock = await client.getMailboxLock(folder);
-    try {
-      return await fn(client);
-    } finally {
-      lock.release();
-      await client.logout().catch(() => undefined);
-    }
+    return this.withImap(async (client) => {
+      const lock = await client.getMailboxLock(folder);
+      try {
+        return await fn(client);
+      } finally {
+        lock.release();
+      }
+    });
   }
 
   async findSpamFolder(): Promise<string | null> {
-    const client = await this.imapClient();
-    await client.connect();
     try {
-      const folders = await client.list();
-      const bySpecialUse = folders.find((folder) => folder.specialUse === "\\Junk");
-      if (bySpecialUse) return bySpecialUse.path;
+      return await this.withImap(async (client) => {
+        const folders = await client.list();
+        const bySpecialUse = folders.find(
+          (folder) => folder.specialUse === "\\Junk",
+        );
+        if (bySpecialUse) return bySpecialUse.path;
 
-      // Not every server advertises SPECIAL-USE; fall back to the usual names.
-      const byName = folders.find((folder) =>
-        /^(junk|spam|bulk mail|junk e-?mail)$/i.test(folder.name),
-      );
-      return byName?.path ?? null;
+        // Not every server advertises SPECIAL-USE; fall back to the usual names.
+        const byName = folders.find((folder) =>
+          /^(junk|spam|bulk mail|junk e-?mail)$/i.test(folder.name),
+        );
+        return byName?.path ?? null;
+      });
     } catch {
       return null;
-    } finally {
-      await client.logout().catch(() => undefined);
     }
   }
 
@@ -301,10 +405,7 @@ export class SmtpProvider implements MailboxProvider {
   async flagByMessageId(messageId: string, flags: string[]): Promise<string | null> {
     if (!messageId) return null;
 
-    const client = await this.imapClient();
-    await client.connect();
-
-    try {
+    return this.withImap(async (client) => {
       const folders = await client.list().catch(() => []);
       const allMail = folders.find((folder) => folder.specialUse === "\\All");
 
@@ -334,9 +435,7 @@ export class SmtpProvider implements MailboxProvider {
       }
 
       return null;
-    } finally {
-      await client.logout().catch(() => undefined);
-    }
+    });
   }
 
   async addFlags(folder: string, uids: number[], flags: string[]): Promise<void> {
@@ -362,10 +461,139 @@ export class SmtpProvider implements MailboxProvider {
     }
   }
 
+  /**
+   * Hangs up on everything, including work still in flight.
+   *
+   * Called both on the normal path and by a caller that has given up waiting.
+   * The second case is the important one: an abandoned IMAP socket goes on
+   * counting against Gmail's per-account connection limit until the server
+   * eventually reaps it, and that is what turns one slow mailbox into
+   * "Connection not available" on the next three.
+   */
   async close(): Promise<void> {
+    this.closed = true;
     this.transporter?.close();
     this.transporter = null;
+
+    for (const client of this.liveClients) {
+      try {
+        client.close();
+      } catch {
+        // Already gone; nothing to do.
+      }
+    }
+    this.liveClients.clear();
   }
+}
+
+/**
+ * Errors worth trying again. Everything here is a network or connection-slot
+ * problem rather than a statement about the mailbox: an app password does not
+ * become correct on the second attempt, but a refused connection frequently
+ * does.
+ */
+function isTransient(error: unknown): boolean {
+  const text = message(error).toLowerCase();
+  return (
+    /connection not available/.test(text) ||
+    /socket timeout|socket closed|socket hang ?up/.test(text) ||
+    /timed? ?out/.test(text) ||
+    /econnreset|econnrefused|epipe|etimedout|enotfound|eai_again|enetunreach/.test(
+      text,
+    ) ||
+    /too many (?:simultaneous )?connections|temporarily unavailable|try again/.test(
+      text,
+    )
+  );
+}
+
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * imapflow types an envelope date as `string | Date` — it is a Date in
+ * practice, but a server that sends an unparseable Date header leaves the raw
+ * string. An unreadable date must not lose the message, so it falls back to
+ * now.
+ */
+function asIsoDate(value: string | Date | undefined): string {
+  if (value instanceof Date) return value.toISOString();
+  const parsed = value ? Date.parse(value) : NaN;
+  return Number.isNaN(parsed)
+    ? new Date().toISOString()
+    : new Date(parsed).toISOString();
+}
+
+/**
+ * Envelopes and a short list of headers for everything above the checkpoint.
+ *
+ * The cheap half of a poll. One IMAP command, no message bodies: a personal
+ * Gmail account collects newsletters, receipts and notifications, and
+ * downloading all of that in full — which is what a single-phase poll did — is
+ * what pushed a poll past 25 seconds. Deciding what is worth reading costs a
+ * few kilobytes; reading it costs megabytes.
+ */
+async function readHeaders(
+  client: ImapFlow,
+  since: number,
+  limit: number,
+): Promise<InboundHeader[]> {
+  const results: InboundHeader[] = [];
+
+  for await (const item of client.fetch(
+    `${since + 1}:*`,
+    { uid: true, envelope: true, internalDate: true, headers: [...HEADER_FIELDS] },
+    { uid: true },
+  )) {
+    if (item.uid <= since) continue;
+
+    const headers = parseHeaderBlock(
+      item.headers ? item.headers.toString("utf8") : "",
+    );
+    const envelope = item.envelope;
+    const from = envelope?.from?.[0];
+    const to = envelope?.to?.[0];
+
+    results.push({
+      uid: item.uid,
+      messageId: envelope?.messageId ?? headers["message-id"] ?? null,
+      inReplyTo: envelope?.inReplyTo ?? headers["in-reply-to"] ?? null,
+      references: (headers["references"] ?? "")
+        .split(/\s+/)
+        .filter((value) => value.startsWith("<")),
+      fromEmail: (from?.address ?? "").toLowerCase(),
+      fromName: from?.name || null,
+      toEmail: to?.address?.toLowerCase() ?? null,
+      subject: envelope?.subject ?? null,
+      receivedAt: asIsoDate(envelope?.date ?? item.internalDate),
+      headers,
+    });
+
+    if (results.length >= limit) break;
+  }
+
+  return results;
+}
+
+/** The expensive half: full sources, for the UIDs the caller asked for. */
+async function readMessages(
+  client: ImapFlow,
+  uids: number[],
+): Promise<InboundMessage[]> {
+  if (uids.length === 0) return [];
+
+  const results: InboundMessage[] = [];
+  for await (const item of client.fetch(
+    uids,
+    { uid: true, source: true, envelope: true, internalDate: true },
+    { uid: true },
+  )) {
+    if (!item.source) continue;
+    results.push(toInboundMessage(item.uid, await simpleParser(item.source)));
+  }
+
+  return results;
 }
 
 function toInboundMessage(uid: number, parsed: ParsedMail): InboundMessage {

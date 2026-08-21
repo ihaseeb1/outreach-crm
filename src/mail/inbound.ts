@@ -4,15 +4,27 @@ import { logActivity } from "@/lib/activity";
 import { normalizeEmail } from "@/lib/email";
 import { classifyInbound, WARMUP_HEADER } from "@/mail/inbound-classify";
 import { loadMailboxProvider } from "@/mail/providers";
+import {
+  decideInbound,
+  referencedMessageIds,
+  senderAddresses,
+  type PrefilterContext,
+} from "@/mail/prefilter";
 import { suppressEmail } from "@/mail/suppressions";
-import type { InboundMessage } from "@/mail/providers/types";
+import type { InboundHeader, InboundMessage } from "@/mail/providers/types";
 import type { Mailbox } from "@/types/db";
 
 /**
  * IMAP poller.
  *
- * Connect → fetch anything newer than the last UID → process → disconnect.
- * No persistent connections, so it runs happily inside a serverless function.
+ * Connect → list envelopes above the last UID → download only the ones worth
+ * storing → process → disconnect. No persistent connections, so it runs happily
+ * inside a serverless function.
+ *
+ * The two phases matter. Downloading every message in full and deciding
+ * afterwards is what made a poll take longer than the function was allowed to
+ * live: a personal Gmail account is mostly newsletters and receipts, none of
+ * which this app stores, and each one was being pulled down in full anyway.
  *
  * What lands in the unified inbox is tightly controlled: only genuine replies
  * from people we actually emailed. Warmup traffic, bounces, autoresponders, and
@@ -22,6 +34,9 @@ import type { Mailbox } from "@/types/db";
 export interface PollResult {
   mailboxId: string;
   mailboxEmail: string;
+  /** Envelopes looked at. */
+  examined: number;
+  /** Messages actually downloaded in full. */
   fetched: number;
   replies: number;
   bounces: number;
@@ -35,7 +50,15 @@ export interface PollResult {
   error?: string;
 }
 
+/** Full messages downloaded per poll. */
 const FETCH_LIMIT = 25;
+
+/**
+ * Envelopes listed per poll. An order of magnitude above the fetch limit
+ * because envelopes are cheap and skipping past a hundred newsletters to reach
+ * one reply must not take a hundred polls.
+ */
+const HEADER_LIMIT = 300;
 
 export async function pollMailbox(
   supabase: SupabaseClient,
@@ -48,11 +71,19 @@ export async function pollMailbox(
      */
     rescanUids?: number;
     fetchLimit?: number;
+    headerLimit?: number;
+    /**
+     * Aborted when the caller has stopped waiting. The provider is torn down
+     * immediately rather than being left holding an IMAP connection nobody is
+     * reading — which is how one slow mailbox used to poison the next few.
+     */
+    signal?: AbortSignal;
   } = {},
 ): Promise<PollResult> {
   const result: PollResult = {
     mailboxId: mailbox.id,
     mailboxEmail: mailbox.email,
+    examined: 0,
     fetched: 0,
     replies: 0,
     bounces: 0,
@@ -69,6 +100,11 @@ export async function pollMailbox(
     return result;
   }
 
+  const abort = () => {
+    void loaded.provider.close().catch(() => undefined);
+  };
+  options.signal?.addEventListener("abort", abort, { once: true });
+
   const ownMailboxes = await workspaceMailboxAddresses(
     supabase,
     mailbox.workspace_id,
@@ -78,15 +114,45 @@ export async function pollMailbox(
   const rescan = Math.max(0, options.rescanUids ?? 0);
 
   try {
-    const messages = await loaded.provider.fetchInbound({
-      sinceUid: Math.max(0, checkpoint - rescan),
-      limit: options.fetchLimit ?? FETCH_LIMIT,
-    });
-    result.fetched = messages.length;
+    // Ordered ascending everywhere below, because the checkpoint means
+    // "everything up to here is dealt with" — it can only be trusted if the
+    // messages are walked in order.
+    let ordered: InboundHeader[] = [];
+    const verdicts = new Map<number, ReturnType<typeof decideInbound>>();
 
-    // Ascending, because the checkpoint below is "everything up to here is
-    // stored" — it can only be trusted if the messages are walked in order.
-    const ordered = [...messages].sort((a, b) => a.uid - b.uid);
+    const { messages } = await loaded.provider.fetchInboundSelective(
+      {
+        sinceUid: Math.max(0, checkpoint - rescan),
+        limit: options.headerLimit ?? HEADER_LIMIT,
+      },
+      async (headers) => {
+        ordered = [...headers].sort((a, b) => a.uid - b.uid);
+
+        const context = await prefilterContext(
+          supabase,
+          mailbox.workspace_id,
+          ordered,
+          ownMailboxes,
+        );
+
+        for (const header of ordered) {
+          verdicts.set(header.uid, decideInbound(header, context));
+        }
+
+        // Only what the prefilter kept, and only as many as the budget allows.
+        // The rest keep their place in the queue: the checkpoint stops at the
+        // first one left behind, so the next poll starts exactly there.
+        return ordered
+          .filter((header) => verdicts.get(header.uid) === "fetch")
+          .slice(0, options.fetchLimit ?? FETCH_LIMIT)
+          .map((header) => header.uid);
+      },
+    );
+
+    result.examined = ordered.length;
+
+    const bodies = new Map(messages.map((message) => [message.uid, message]));
+    result.fetched = bodies.size;
 
     // Never advanced past a message we failed to store. That is exactly how the
     // first real reply was lost: the insert errored, nobody looked at the error,
@@ -94,7 +160,39 @@ export async function pollMailbox(
     // that mail again.
     let highestUid = checkpoint;
 
-    for (const message of ordered) {
+    for (const header of ordered) {
+      const verdict = verdicts.get(header.uid);
+
+      if (verdict === "duplicate") {
+        result.duplicates += 1;
+        highestUid = Math.max(highestUid, header.uid);
+        continue;
+      }
+
+      if (verdict === "ignored") {
+        result.ignored += 1;
+        highestUid = Math.max(highestUid, header.uid);
+        continue;
+      }
+
+      if (verdict === "warmup") {
+        // Counted from the envelope. Warmup mail is never stored, and every
+        // field the counter reads — sender, subject, threading — is already
+        // here, so there is nothing to download.
+        await recordWarmupReply(supabase, mailbox.workspace_id, header);
+        result.warmup += 1;
+        highestUid = Math.max(highestUid, header.uid);
+        continue;
+      }
+
+      const message = bodies.get(header.uid);
+      if (!message) {
+        // Wanted but not downloaded — the fetch budget ran out, or the server
+        // did not return it. Stop here rather than skipping it: the checkpoint
+        // must not move past mail that has never been read.
+        break;
+      }
+
       const outcome = await processInbound(supabase, mailbox, message, ownMailboxes);
 
       if (outcome.kind === "failed") {
@@ -144,10 +242,80 @@ export async function pollMailbox(
       })
       .eq("id", mailbox.id);
   } finally {
+    options.signal?.removeEventListener("abort", abort);
     await loaded.provider.close().catch(() => undefined);
   }
 
   return result;
+}
+
+/**
+ * Everything the prefilter needs, in three queries rather than three per
+ * message.
+ *
+ * Asking the database once per envelope is what the old poller did implicitly,
+ * inside `processInbound`, and at a few hundred envelopes that alone is slower
+ * than the IMAP fetch it was meant to be cheaper than.
+ */
+async function prefilterContext(
+  supabase: SupabaseClient,
+  workspaceId: string,
+  headers: InboundHeader[],
+  ownMailboxes: Set<string>,
+): Promise<PrefilterContext> {
+  const context: PrefilterContext = {
+    ownMailboxes,
+    storedMessageIds: new Set<string>(),
+    outreachRecipients: new Set<string>(),
+    outboundMessageIds: new Set<string>(),
+  };
+
+  if (headers.length === 0) return context;
+
+  const incomingIds = headers
+    .map((header) => header.messageId)
+    .filter((value): value is string => Boolean(value));
+  const references = referencedMessageIds(headers);
+  const senders = senderAddresses(headers);
+
+  const [stored, threaded, recipients] = await Promise.all([
+    incomingIds.length > 0
+      ? supabase
+          .from("messages")
+          .select("message_id")
+          .eq("workspace_id", workspaceId)
+          .eq("direction", "inbound")
+          .in("message_id", incomingIds)
+      : Promise.resolve({ data: [] }),
+    references.length > 0
+      ? supabase
+          .from("messages")
+          .select("message_id")
+          .eq("workspace_id", workspaceId)
+          .eq("direction", "outbound")
+          .in("message_id", references)
+      : Promise.resolve({ data: [] }),
+    senders.length > 0
+      ? supabase
+          .from("messages")
+          .select("to_email")
+          .eq("workspace_id", workspaceId)
+          .eq("direction", "outbound")
+          .in("to_email", senders)
+      : Promise.resolve({ data: [] }),
+  ]);
+
+  for (const row of (stored.data ?? []) as { message_id: string | null }[]) {
+    if (row.message_id) context.storedMessageIds.add(row.message_id);
+  }
+  for (const row of (threaded.data ?? []) as { message_id: string | null }[]) {
+    if (row.message_id) context.outboundMessageIds.add(row.message_id);
+  }
+  for (const row of (recipients.data ?? []) as { to_email: string | null }[]) {
+    if (row.to_email) context.outreachRecipients.add(normalizeEmail(row.to_email));
+  }
+
+  return context;
 }
 
 type InboundOutcome =
@@ -493,14 +661,19 @@ async function workspaceMailboxAddresses(
 }
 
 /**
- * Warmup replies are counted, not stored as conversations. Phase 4 fills in the
- * warmup_messages bookkeeping; until then this is a deliberate no-op so warmup
- * mail simply never reaches the inbox.
+ * Warmup replies are counted, not stored as conversations.
+ *
+ * Takes only the envelope fields, so it can be called from the prefilter
+ * without downloading the message — peer warmup mail is by far the most common
+ * thing in these inboxes and none of it has a body worth reading.
  */
 async function recordWarmupReply(
   supabase: SupabaseClient,
   workspaceId: string,
-  message: InboundMessage,
+  message: Pick<
+    InboundMessage,
+    "fromEmail" | "subject" | "inReplyTo" | "references"
+  >,
 ): Promise<void> {
   const { recordWarmupInbound } = await import("@/warmup/inbound");
   await recordWarmupInbound(supabase, workspaceId, {

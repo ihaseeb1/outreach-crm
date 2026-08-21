@@ -31,7 +31,7 @@ export type SendDecision =
   | { allowed: false; email: string; code: BlockCode; reason: string };
 
 export interface CanSendOptions {
-  /** Campaign mail must carry a postal address; warmup peer mail need not. */
+  /** Recorded on the message and used in the skip reason; every kind is gated. */
   kind?: SendKind;
   /** Pre-fetched to avoid a query per recipient inside batch jobs. */
   postalAddress?: string | null;
@@ -86,8 +86,17 @@ export async function canSend(
     }
   }
 
-  // CAN-SPAM: a campaign email without a postal address must never leave.
-  if (kind === "campaign") {
+  // CAN-SPAM: no email without a postal address leaves, of any kind.
+  //
+  // This used to be `kind === "campaign"`, because warmup carried no footer and
+  // so needed no address. Warmup now ends with the same closing block as real
+  // outreach, which means it needs the address too — and checking here rather
+  // than only inside sendEmail matters: without it a warmup send passes the
+  // guard, reserves a slot against the mailbox's daily limit, and only then
+  // discovers there is nothing to print. The slot is released, but the reason
+  // never reaches the batch's `skipped` list, so the run reports a mailbox that
+  // simply did nothing.
+  {
     let postal = options.postalAddress;
     if (postal === undefined) {
       const { data } = await supabase
@@ -102,7 +111,7 @@ export async function canSend(
       return block(
         email,
         "missing_postal_address",
-        "Set a sending postal address in Settings before sending campaigns (CAN-SPAM).",
+        `Set a sending postal address in Settings before sending (CAN-SPAM). Blocked a ${kind} send.`,
       );
     }
   }

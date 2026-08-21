@@ -114,13 +114,21 @@ export function shouldReply(replyRate: number, random: () => number = Math.rando
  * doing it on every thread is its own tell, and it burns daily volume fast —
  * every extra turn is another send against the same cap.
  *
- * So roughly one thread in four becomes a short conversation of two or three
- * replies; the rest stay single-reply. The choice is derived from the root
- * message id rather than a coin flip, so a thread's fate is stable no matter
- * how many ticks it takes to play out — a random draw per tick would make the
- * same thread continue or stop depending on when it was looked at.
+ * So roughly one thread in two becomes a conversation of two to four replies;
+ * the rest stay single-reply. The choice is derived from the root message id
+ * rather than a coin flip, so a thread's fate is stable no matter how many
+ * ticks it takes to play out — a random draw per tick would make the same
+ * thread continue or stop depending on when it was looked at.
+ *
+ * This was one in four, with conversations of two or three replies. Half the
+ * threads and up to four replies is a deliberate move towards a mailbox whose
+ * history looks like it belongs to somebody: an account whose entire record is
+ * send-and-single-reply is the pattern a provider can spot without reading a
+ * word. It costs volume rather than adding it — every extra turn is another
+ * send against the same daily cap — so it trades new threads for deeper ones,
+ * which is the right way round.
  */
-export const CONVERSATION_IN_EVERY = 4;
+export const CONVERSATION_IN_EVERY = 2;
 
 function hashOf(value: string): number {
   let hash = 0;
@@ -141,6 +149,12 @@ export function isConversationThread(
 /**
  * Total messages a conversation thread should reach, counting the original.
  * Three or four — that is two or three replies on top.
+ *
+ * Bounded by how much is actually written, not by taste: each topic in the
+ * corpus supplies three turns of replies, each answering the turn above it. A
+ * longer thread would have to reuse a turn, and two messages from the same
+ * small pool in one conversation is how a thread ends up half-repeating itself
+ * — worse than a thread that simply ends.
  */
 export function conversationLength(rootMessageId: string): number {
   return 3 + (hashOf(rootMessageId) % 2);

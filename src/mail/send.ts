@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { logActivity } from "@/lib/activity";
@@ -11,6 +13,11 @@ import {
   signatureCarriesAddress,
 } from "@/mail/signature";
 import { textToHtml } from "@/mail/template";
+import { trackBody, trackPixel } from "@/mail/tracking";
+import {
+  resolveTrackingMode,
+  type TrackingMode,
+} from "@/mail/tracking-summary";
 import {
   buildFooterHtml,
   buildFooterText,
@@ -49,11 +56,31 @@ export interface SendEmailInput {
   references?: string[];
   threadId?: string | null;
   extraHeaders?: Record<string, string>;
-  /** Warmup mail is internal and carries no unsubscribe footer. */
+  /**
+   * Whether to append the closing block — postal address, social icons, opt-out.
+   *
+   * Defaults to **true for every kind, warmup included**. Warmup used to be
+   * excluded, on the reasoning that peer mail between your own mailboxes
+   * fetching four remote images was pointless and a distinctive fingerprint.
+   * That was the wrong way round: leaving the block off did not make warmup look
+   * like nothing, it made it look like a *different sender* from the one being
+   * warmed up. The account being trained then had two shapes of outbound mail,
+   * and only one of them was the shape real outreach goes out in.
+   */
   includeFooter?: boolean;
   postalAddress?: string | null;
   suppressed?: Set<string>;
   actorId?: string | null;
+  /**
+   * Open/click tracking for this one email.
+   *
+   * Omitted means "ask the workspace", which costs a query — campaign batches
+   * pass it in so that query happens once per run rather than once per send.
+   * Warmup passes "off" explicitly: it goes between your own mailboxes, so a
+   * pixel there measures nothing and adds a remote image to traffic that is
+   * meant to look like ordinary correspondence.
+   */
+  tracking?: TrackingMode;
 }
 
 export type SendOutcome =
@@ -65,7 +92,7 @@ export async function sendEmail(
   input: SendEmailInput,
 ): Promise<SendOutcome> {
   const kind = input.kind ?? "campaign";
-  const includeFooter = input.includeFooter ?? kind !== "warmup";
+  const includeFooter = input.includeFooter ?? true;
 
   // 1. Compliance gate. Nothing below runs if this fails.
   const decision = await canSend(supabase, input.workspaceId, input.toEmail, {
@@ -112,6 +139,14 @@ export async function sendEmail(
   const { mailbox, provider } = loaded;
 
   // 4. Body assembly.
+  //
+  // The row id is minted here rather than left to Postgres, because the
+  // tracking pixel and every rewritten link have to carry it — and they are
+  // written into the email that is sent before the row exists. Inserting with
+  // an explicit id is what lets the URL in the recipient's inbox and the row
+  // this app later reads be the same message.
+  const rowId = crypto.randomUUID();
+
   let text = input.body;
   let html = input.html ?? textToHtml(input.body);
 
@@ -120,10 +155,17 @@ export async function sendEmail(
   // The postal address is resolved before the sign-off, because whether the
   // sign-off is printed at all depends on it.
   let postal: string | null = null;
+  let tracking = input.tracking;
+
   if (includeFooter) {
-    postal =
-      input.postalAddress ??
-      (await fetchPostalAddress(supabase, input.workspaceId));
+    if (input.postalAddress !== undefined && input.postalAddress !== null) {
+      postal = input.postalAddress;
+    } else {
+      // One read for both, since both live on the workspace row.
+      const config = await fetchSendingConfig(supabase, input.workspaceId);
+      postal = config.postalAddress;
+      tracking ??= config.tracking;
+    }
     if (!postal) {
       await release();
       return {
@@ -138,6 +180,17 @@ export async function sendEmail(
   // A personal sign-off above the closing block — skipped when it only repeats
   // the address that block already prints, which is what put the same text on
   // the email twice.
+  if (tracking === undefined) {
+    tracking = (await fetchSendingConfig(supabase, input.workspaceId)).tracking;
+  }
+
+  // Links are rewritten in the body only, and before anything is appended to
+  // it. The signature and the closing block must come through untouched: the
+  // unsubscribe link has to be exactly what the List-Unsubscribe header
+  // promises, and routing our own footer through a click counter would score
+  // the footer as engagement.
+  html = trackBody(html, { messageId: rowId, mode: tracking });
+
   const signature = buildSignature({
     signature: signatureCarriesAddress(mailbox.signature, postal)
       ? null
@@ -151,9 +204,9 @@ export async function sendEmail(
     // place outbound mail carries images; mail/signature.ts explains why they
     // have to be hosted PNGs rather than the inline SVG the website uses.
     //
-    // Warmup never reaches here — includeFooter is false for it — so peer mail
-    // between your own mailboxes does not fetch four remote images every time,
-    // which would be both pointless and a distinctive fingerprint.
+    // Warmup comes through here too. Every email this workspace sends ends the
+    // same way, so the mailbox being warmed is being trained on the exact shape
+    // of message it will later send for real.
     const footerInput = {
       workspaceId: input.workspaceId,
       recipientEmail: toEmail,
@@ -167,6 +220,10 @@ export async function sendEmail(
   }
 
   if (input.campaignId) headers[CAMPAIGN_HEADER] = input.campaignId;
+
+  // Last thing in the HTML, after the closing block, where a 1×1 image cannot
+  // push anything around.
+  html = trackPixel(html, { messageId: rowId, mode: tracking });
 
   // 5. Send.
   try {
@@ -186,6 +243,7 @@ export async function sendEmail(
     const { data: row } = await supabase
       .from("messages")
       .insert({
+        id: rowId,
         workspace_id: input.workspaceId,
         campaign_id: input.campaignId ?? null,
         contact_id: input.contactId ?? null,
@@ -202,7 +260,14 @@ export async function sendEmail(
         thread_id: threadId,
         status: "sent",
         sent_at: new Date().toISOString(),
-        meta: { kind, response: result.response ?? null },
+        // The mode is recorded on the message, not just read from the workspace
+        // at display time: turning tracking off later must not make every email
+        // ever sent read as "never opened" rather than "not tracked".
+        meta: {
+          kind,
+          response: result.response ?? null,
+          tracking: { mode: tracking },
+        },
       })
       .select("id")
       .single();
@@ -224,7 +289,7 @@ export async function sendEmail(
     return {
       ok: true,
       messageId: result.messageId,
-      rowId: (row as { id: string } | null)?.id ?? "",
+      rowId: (row as { id: string } | null)?.id ?? rowId,
       threadId,
     };
   } catch (error) {
@@ -258,17 +323,27 @@ export async function sendEmail(
   }
 }
 
-async function fetchPostalAddress(
+/**
+ * The two workspace-level facts a send needs: the postal address, and whether
+ * to track. One row, one query — they were two reads of the same row before.
+ */
+export async function fetchSendingConfig(
   supabase: SupabaseClient,
   workspaceId: string,
-): Promise<string | null> {
+): Promise<{ postalAddress: string | null; tracking: TrackingMode }> {
   const { data } = await supabase
     .from("workspaces")
-    .select("sending_postal_address")
+    .select("sending_postal_address, settings")
     .eq("id", workspaceId)
     .single();
-  return (
-    (data as { sending_postal_address: string | null } | null)
-      ?.sending_postal_address ?? null
-  );
+
+  const row = data as {
+    sending_postal_address: string | null;
+    settings: Record<string, unknown> | null;
+  } | null;
+
+  return {
+    postalAddress: row?.sending_postal_address ?? null,
+    tracking: resolveTrackingMode(row?.settings),
+  };
 }

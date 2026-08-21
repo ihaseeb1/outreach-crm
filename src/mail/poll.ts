@@ -50,6 +50,7 @@ export function canStartAnother(input: {
 export async function runInboundPoll(
   supabase: SupabaseClient,
   options: {
+    /** Mailboxes to consider. Omit for no cap — every one that qualifies. */
     limit?: number;
     concurrency?: number;
     workspaceId?: string;
@@ -58,32 +59,56 @@ export async function runInboundPoll(
     /** Recovery: re-read this many UIDs below each mailbox's checkpoint. */
     rescanUids?: number;
     fetchLimit?: number;
+    headerLimit?: number;
     mailboxTimeoutMs?: number;
+    /**
+     * Poll mailboxes that are switched off for sending too.
+     *
+     * Sending and receiving are different questions. A paused mailbox must not
+     * send, but a reply that lands in it is still a reply, and skipping it
+     * silently is what made "Poll mailboxes now" report *Checked 5 of 5* on a
+     * workspace with seven connected accounts — the two that were switched off
+     * were never in the queue to be counted, so nothing on screen said they had
+     * been left out.
+     */
+    includeInactive?: boolean;
   } = {},
 ): Promise<{
   polled: number;
   results: PollResult[];
   deferred: number;
+  /** How many mailboxes were in the queue before the budget was applied. */
+  queued: number;
+  /** Connected mailboxes that could not be queued at all, and why. */
+  unpollable: { email: string; reason: string }[];
 }> {
-  const limit = options.limit ?? 1;
-  const concurrency = Math.max(1, Math.min(options.concurrency ?? 1, limit));
+  const concurrency = Math.max(1, options.concurrency ?? 1);
   const budgetMs = options.budgetMs ?? 40_000;
   const startedAt = Date.now();
 
   let query = supabase
     .from("mailboxes")
     .select("*")
-    .eq("is_active", true)
     .not("encrypted_credentials", "is", null)
     // nullsFirst so a freshly connected mailbox is polled straight away.
-    .order("last_polled_at", { ascending: true, nullsFirst: true })
-    .limit(limit);
+    .order("last_polled_at", { ascending: true, nullsFirst: true });
 
+  if (!options.includeInactive) query = query.eq("is_active", true);
+  if (options.limit !== undefined) query = query.limit(options.limit);
   if (options.workspaceId) query = query.eq("workspace_id", options.workspaceId);
   if (options.mailboxId) query = query.eq("id", options.mailboxId);
 
   const { data } = await query;
   const queue = (data ?? []) as Mailbox[];
+  const queued = queue.length;
+
+  // Anything that could not even join the queue, named rather than silently
+  // absent. A mailbox with no stored credentials is invisible to the query
+  // above, so without this a workspace of seven can be told "checked 5 of 5"
+  // and have no way at all to find out what happened to the other two.
+  const unpollable = options.mailboxId
+    ? []
+    : await unpollableMailboxes(supabase, options.workspaceId);
 
   const results: PollResult[] = [];
   let started = 0;
@@ -114,6 +139,7 @@ export async function runInboundPoll(
         await pollWithTimeout(supabase, mailbox, {
           rescanUids: options.rescanUids,
           fetchLimit: options.fetchLimit,
+          headerLimit: options.headerLimit,
           timeoutMs: options.mailboxTimeoutMs ?? MAILBOX_TIMEOUT_MS,
         }),
       );
@@ -125,7 +151,36 @@ export async function runInboundPoll(
 
   // Whatever is left is first in line next run — the query is ordered by
   // last_polled_at, and polling stamps it.
-  return { polled: results.length, results, deferred: queue.length };
+  return {
+    polled: results.length,
+    results,
+    deferred: queue.length,
+    queued,
+    unpollable,
+  };
+}
+
+/**
+ * Connected mailboxes that cannot be polled at all, with the reason.
+ *
+ * Only one reason for now — no stored credentials, which is what a mailbox
+ * looks like after the row was created but the connect step never finished.
+ */
+async function unpollableMailboxes(
+  supabase: SupabaseClient,
+  workspaceId?: string,
+): Promise<{ email: string; reason: string }[]> {
+  let query = supabase
+    .from("mailboxes")
+    .select("email")
+    .is("encrypted_credentials", null);
+  if (workspaceId) query = query.eq("workspace_id", workspaceId);
+
+  const { data } = await query;
+  return ((data ?? []) as { email: string }[]).map((row) => ({
+    email: row.email,
+    reason: "no stored credentials — reconnect it",
+  }));
 }
 
 /**
@@ -140,12 +195,25 @@ export async function runInboundPoll(
 async function pollWithTimeout(
   supabase: SupabaseClient,
   mailbox: Mailbox,
-  options: { rescanUids?: number; fetchLimit?: number; timeoutMs: number },
+  options: {
+    rescanUids?: number;
+    fetchLimit?: number;
+    headerLimit?: number;
+    timeoutMs: number;
+  },
 ): Promise<PollResult> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // Abandoning a poll is not enough on its own: the IMAP socket carries on
+  // reading, still counting against the provider's per-account connection
+  // limit, and the next mailbox to ask for a connection is the one that gets
+  // "Connection not available". Aborting hangs up.
+  const controller = new AbortController();
 
   const timeout = new Promise<PollResult | null>((resolve) => {
-    timer = setTimeout(() => resolve(null), options.timeoutMs);
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve(null);
+    }, options.timeoutMs);
   });
 
   try {
@@ -153,6 +221,8 @@ async function pollWithTimeout(
       pollMailbox(supabase, mailbox, {
         rescanUids: options.rescanUids,
         fetchLimit: options.fetchLimit,
+        headerLimit: options.headerLimit,
+        signal: controller.signal,
       }),
       timeout,
     ]);
@@ -171,6 +241,7 @@ async function pollWithTimeout(
     return {
       mailboxId: mailbox.id,
       mailboxEmail: mailbox.email,
+      examined: 0,
       fetched: 0,
       replies: 0,
       bounces: 0,
@@ -183,6 +254,7 @@ async function pollWithTimeout(
     };
   } finally {
     clearTimeout(timer);
+    controller.abort();
   }
 }
 
@@ -192,6 +264,8 @@ export function summarisePoll(results: PollResult[]) {
     results.reduce((total, result) => total + pick(result), 0);
 
   return {
+    examined: sum((r) => r.examined),
+    fetched: sum((r) => r.fetched),
     replies: sum((r) => r.replies),
     bounces: sum((r) => r.bounces),
     warmup: sum((r) => r.warmup),
@@ -199,6 +273,16 @@ export function summarisePoll(results: PollResult[]) {
     duplicates: sum((r) => r.duplicates),
     failed: sum((r) => r.failed),
     mailboxes: results.map((r) => r.mailboxEmail),
+    // One line per mailbox, so a run that half worked says which half. The
+    // aggregate alone read as "0 replies" whether that meant nothing arrived or
+    // two accounts never connected.
+    perMailbox: results.map((result) => ({
+      email: result.mailboxEmail,
+      examined: result.examined,
+      replies: result.replies,
+      bounces: result.bounces,
+      error: result.error ?? null,
+    })),
     errors: results
       .filter((r) => r.error)
       .map((r) => `${r.mailboxEmail}: ${r.error}`),

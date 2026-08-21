@@ -16,6 +16,30 @@ export const VOLUME_WINDOWS = [7, 14, 30] as const;
 
 export type VolumeWindow = (typeof VOLUME_WINDOWS)[number];
 
+/**
+ * "Today" is a fourth view, and it is not "the last 24 hours".
+ *
+ * The daily limit resets on the UTC date — `sent_today_date` is written as
+ * `toISOString().slice(0, 10)` everywhere in the app — so today's count has to
+ * use the same boundary. A rolling 24 hours would disagree with the "Sent today"
+ * figure on the same card every evening, and the one that would look wrong is
+ * this one.
+ */
+export const TODAY = "today" as const;
+
+export type VolumeKey = VolumeWindow | number | typeof TODAY;
+
+/** What the mailboxes page offers, in the order it offers it. */
+export const VOLUME_VIEWS: readonly { key: VolumeKey; label: string }[] = [
+  { key: TODAY, label: "Today" },
+  ...VOLUME_WINDOWS.map((days) => ({ key: days as VolumeKey, label: `${days} days` })),
+];
+
+/** The UTC date a timestamp falls on — the same boundary as the daily limit. */
+export function utcDay(value: Date): string {
+  return value.toISOString().slice(0, 10);
+}
+
 /** Widest window, so the page and this module agree on how far back to read. */
 export const MAX_VOLUME_WINDOW = Math.max(...VOLUME_WINDOWS) as VolumeWindow;
 
@@ -49,15 +73,24 @@ export interface WindowCounts {
   warmup: number;
 }
 
-/** Keyed by window length in days — whichever windows were asked for. */
-export type MailboxVolume = Record<number, WindowCounts>;
+/**
+ * Keyed by window length in days, plus `today`.
+ *
+ * `today` is optional in the type because a caller can hand a hand-built volume
+ * to `countsFor`, and every lookup already tolerates a window that was never
+ * computed.
+ */
+export interface MailboxVolume {
+  [days: number]: WindowCounts;
+  today?: WindowCounts;
+}
 
 const DAY_MS = 86_400_000;
 
 export function emptyVolume(
   windows: readonly number[] = VOLUME_WINDOWS,
 ): MailboxVolume {
-  const volume: MailboxVolume = {};
+  const volume: MailboxVolume = { today: { outreach: 0, warmup: 0 } };
   for (const window of windows) volume[window] = { outreach: 0, warmup: 0 };
   return volume;
 }
@@ -72,9 +105,10 @@ export function emptyVolume(
  */
 export function countsFor(
   volume: MailboxVolume | undefined,
-  days: number,
+  days: VolumeKey,
 ): WindowCounts {
-  return volume?.[days] ?? { outreach: 0, warmup: 0 };
+  const counts = days === TODAY ? volume?.today : volume?.[days];
+  return counts ?? { outreach: 0, warmup: 0 };
 }
 
 /**
@@ -93,6 +127,7 @@ export function summariseVolume(
 ): Record<string, MailboxVolume> {
   const nowMs = now.getTime();
   const widest = Math.max(...windows);
+  const today = utcDay(now);
   const byMailbox: Record<string, MailboxVolume> = {};
 
   for (const row of rows) {
@@ -111,6 +146,18 @@ export function summariseVolume(
     const bucket = row.meta?.kind === "warmup" ? "warmup" : "outreach";
 
     const volume = (byMailbox[row.mailbox_id] ??= emptyVolume(windows));
+
+    // Counted from the date, not from the age in days: a send at 23:00 UTC and
+    // one at 01:00 the next morning are two hours apart and belong to different
+    // days, which is exactly how the daily limit sees them.
+    // Re-derived from the parsed timestamp rather than sliced off the string:
+    // Postgres hands back an offset ("+00:00" today, but a session in another
+    // zone would not), and the date has to be the UTC one either way.
+    if (utcDay(new Date(at)) === today) {
+      const counts = volume.today;
+      if (counts) counts[bucket] += 1;
+    }
+
     for (const window of windows) {
       // Present by construction — emptyVolume seeded exactly these keys.
       const counts = volume[window];
@@ -122,6 +169,7 @@ export function summariseVolume(
 }
 
 /** One decimal, because "0 a day" and "0.4 a day" are different situations. */
+
 export function perDay(total: number, days: number): string {
   return (total / days).toFixed(1);
 }
