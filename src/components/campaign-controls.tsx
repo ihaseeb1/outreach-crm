@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { TimezoneSelect } from "@/components/timezone-select";
+import { DEFAULT_TIMEZONE } from "@/lib/datetime";
 import type { CampaignSettings, CampaignStatus } from "@/types/db";
 
 const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -99,7 +100,7 @@ export function CampaignControls({
   const [startHour, setStartHour] = useState(settings.send_window_start ?? 9);
   const [endHour, setEndHour] = useState(settings.send_window_end ?? 17);
   const [days, setDays] = useState<number[]>(settings.send_days ?? [1, 2, 3, 4, 5]);
-  const [timezone, setTimezone] = useState(settings.timezone ?? "UTC");
+  const [timezone, setTimezone] = useState(settings.timezone ?? DEFAULT_TIMEZONE);
   const [selected, setSelected] = useState<string[]>(selectedMailboxIds);
 
   async function patch(body: Record<string, unknown>, thenRefresh = true) {
@@ -196,7 +197,9 @@ export function CampaignControls({
               First emails rotate across every ticked mailbox — the one with the
               most headroom left today goes next, so volume stays even instead of
               draining one inbox at a time. Each is capped by its own daily limit
-              and spaced by a randomised gap.
+              and spaced by a randomised gap. Fully-healthy mailboxes are used
+              first; a mailbox in poor health is left to warm up and only sends
+              outreach if no healthy one has room.
             </p>
             <p className="hint">
               Follow-ups do <strong>not</strong> rotate. Once a contact has been

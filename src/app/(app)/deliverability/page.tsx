@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { RunJobButton } from "@/components/run-job-button";
 import { WarmupControls, type WarmupState } from "@/components/warmup-controls";
+import { fmtDateTime } from "@/lib/datetime";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
 import type { Mailbox, MailboxHealth, WarmupSettings } from "@/types/db";
@@ -138,7 +139,7 @@ export default async function DeliverabilityPage() {
                     <p className="font-medium">{mailbox.email}</p>
                     <p className="hint">
                       {latest
-                        ? `Last checked ${new Date(latest.checked_at).toLocaleString()}`
+                        ? `Last checked ${fmtDateTime(latest.checked_at)}`
                         : "Not checked yet"}
                     </p>
                   </div>

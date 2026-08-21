@@ -1,3 +1,4 @@
+import { DEFAULT_TIMEZONE } from "@/lib/datetime";
 import type { CampaignSettings } from "@/types/db";
 
 /**
@@ -20,7 +21,7 @@ const DEFAULTS: ResolvedWindow = {
   endHour: 17,
   // Monday–Friday. 0 = Sunday.
   days: [1, 2, 3, 4, 5],
-  timezone: "UTC",
+  timezone: DEFAULT_TIMEZONE,
 };
 
 export function resolveWindow(settings: CampaignSettings | null | undefined): ResolvedWindow {

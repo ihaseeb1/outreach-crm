@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { fmtDateTime } from "@/lib/datetime";
 import { requireSession } from "@/lib/workspace";
 
 export const dynamic = "force-dynamic";
@@ -110,7 +111,7 @@ export default async function DashboardPage() {
               <tbody>
                 {(recentJobs as JobRow[]).map((job) => (
                   <tr key={job.id}>
-                    <td>{new Date(job.created_at).toLocaleString()}</td>
+                    <td>{fmtDateTime(job.created_at)}</td>
                     <td>{job.status}</td>
                     <td>
                       {job.processed_count} / {job.total_count}

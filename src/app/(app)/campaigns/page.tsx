@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { CampaignCreateForm } from "@/components/campaign-create-form";
+import { CampaignDeleteButton } from "@/components/campaign-delete-button";
 import { RunJobButton } from "@/components/run-job-button";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
@@ -76,6 +77,7 @@ export default async function CampaignsPage() {
                   <th>Replied</th>
                   <th>Bounced</th>
                   <th>Opted out</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
@@ -101,6 +103,12 @@ export default async function CampaignsPage() {
                       <td>{stat?.replied ?? 0}</td>
                       <td>{stat?.bounced ?? 0}</td>
                       <td>{stat?.unsubscribed ?? 0}</td>
+                      <td className="text-right">
+                        <CampaignDeleteButton
+                          campaignId={campaign.id}
+                          name={campaign.name}
+                        />
+                      </td>
                     </tr>
                   );
                 })}

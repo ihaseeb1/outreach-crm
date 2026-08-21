@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { NotesPanel } from "@/components/notes-tasks";
+import { fmtDate, fmtDateTime } from "@/lib/datetime";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
 import type { Contact, DealWithPrices, Note } from "@/types/db";
@@ -113,7 +114,7 @@ export default async function DomainPage({
         <Stat label="Messages" value={messages.length} />
         <Stat
           label="Last scraped"
-          value={website?.scraped_at ? new Date(website.scraped_at).toLocaleDateString() : "—"}
+          value={fmtDate(website?.scraped_at)}
         />
       </div>
 
@@ -204,7 +205,7 @@ export default async function DomainPage({
                     {emailById.get(message.contact_id) ?? ""}
                   </span>
                   <span className="hint">
-                    {new Date(message.created_at).toLocaleString()}
+                    {fmtDateTime(message.created_at)}
                   </span>
                 </div>
                 <p className="hint">{message.subject ?? "(no subject)"}</p>

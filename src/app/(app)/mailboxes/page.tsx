@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { MailboxActions } from "@/components/mailbox-actions";
 import { MailboxConnectForm } from "@/components/mailbox-connect-form";
+import { fmtDateTime } from "@/lib/datetime";
 import { MailboxPacing } from "@/components/mailbox-pacing";
 import { MailboxSignature } from "@/components/mailbox-signature";
 import {
@@ -280,17 +281,13 @@ export default async function MailboxesPage({
                   <div>
                     <dt>Last send</dt>
                     <dd className="text-[var(--color-ink)]">
-                      {mailbox.last_send_at
-                        ? new Date(mailbox.last_send_at).toLocaleString()
-                        : "—"}
+                      {fmtDateTime(mailbox.last_send_at)}
                     </dd>
                   </div>
                   <div>
                     <dt>Last inbox poll</dt>
                     <dd className="text-[var(--color-ink)]">
-                      {mailbox.last_polled_at
-                        ? new Date(mailbox.last_polled_at).toLocaleString()
-                        : "—"}
+                      {fmtDateTime(mailbox.last_polled_at)}
                     </dd>
                   </div>
                 </dl>

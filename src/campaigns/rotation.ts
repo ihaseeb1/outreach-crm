@@ -39,6 +39,12 @@ export interface EligibilityOptions {
   random?: () => number;
   /** Ignore the inter-send gap (used when only capacity matters, e.g. planning). */
   ignoreRest?: boolean;
+  /**
+   * When picking a mailbox for real outreach, prefer fully-healthy ones and use
+   * `warning` (poor-health) mailboxes only as a last resort. Defaults to true;
+   * set false when only raw capacity matters.
+   */
+  preferHealthy?: boolean;
 }
 
 export function isEligible(
@@ -93,20 +99,10 @@ export function eligibleMailboxes(
   return mailboxes.filter((mailbox) => isEligible(mailbox, options));
 }
 
-/**
- * Picks the next mailbox to send from: the one with the most headroom left
- * today, breaking ties by whichever has been idle longest. That keeps volume
- * even across every connected mailbox instead of draining them in order.
- */
-export function pickMailbox(
-  mailboxes: RotationMailbox[],
-  options: EligibilityOptions = {},
-): RotationMailbox | null {
-  const now = options.now ?? new Date();
-  const eligible = eligibleMailboxes(mailboxes, options);
-  if (eligible.length === 0) return null;
-
-  return eligible.reduce((best, candidate) => {
+/** Most headroom today; ties broken by whoever has been idle longest. */
+function bestOf(mailboxes: RotationMailbox[], now: Date): RotationMailbox | null {
+  if (mailboxes.length === 0) return null;
+  return mailboxes.reduce((best, candidate) => {
     const bestCapacity = remainingCapacity(best, now);
     const candidateCapacity = remainingCapacity(candidate, now);
     if (candidateCapacity !== bestCapacity) {
@@ -118,6 +114,38 @@ export function pickMailbox(
       : 0;
     return candidateLast < bestLast ? candidate : best;
   });
+}
+
+/**
+ * Picks the next mailbox to send real outreach from: the one with the most
+ * headroom left today, breaking ties by whichever has been idle longest. That
+ * keeps volume even across every connected mailbox instead of draining them in
+ * order.
+ *
+ * Health-aware. A mailbox in `warning` — bouncing, drawing complaints, or with
+ * warmup mail landing in spam — is poor-health, and pushing cold outreach
+ * through it makes the reputation worse, not better. So outreach only ever
+ * falls back to a `warning` mailbox when no fully-healthy one has capacity right
+ * now; the rest of the time the poor-health accounts are left to the warmup
+ * engine (which still runs on them) to recover. Set `preferHealthy: false` for
+ * callers that only care about raw capacity, not what the send is for.
+ */
+export function pickMailbox(
+  mailboxes: RotationMailbox[],
+  options: EligibilityOptions = {},
+): RotationMailbox | null {
+  const now = options.now ?? new Date();
+  const eligible = eligibleMailboxes(mailboxes, options);
+  if (eligible.length === 0) return null;
+
+  if (options.preferHealthy !== false) {
+    const healthy = eligible.filter(
+      (mailbox) => mailbox.health_status === "healthy",
+    );
+    if (healthy.length > 0) return bestOf(healthy, now);
+  }
+
+  return bestOf(eligible, now);
 }
 
 /**

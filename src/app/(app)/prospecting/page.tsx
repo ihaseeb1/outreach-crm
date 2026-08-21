@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { RunJobButton } from "@/components/run-job-button";
 import { UrlImportForm } from "@/components/url-import-form";
+import { fmtDateTime } from "@/lib/datetime";
 import { WebsiteTable } from "@/components/website-table";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
@@ -135,7 +136,7 @@ export default async function ProspectingPage({
               <tbody>
                 {(jobs as ScrapeJob[]).map((job) => (
                   <tr key={job.id}>
-                    <td>{new Date(job.created_at).toLocaleString()}</td>
+                    <td>{fmtDateTime(job.created_at)}</td>
                     <td>
                       <span className={`badge ${JOB_STATUS_STYLES[job.status] ?? ""}`}>
                         {job.status}

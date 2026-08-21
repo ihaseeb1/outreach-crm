@@ -571,7 +571,11 @@ async function insertInbound(
       to_email: message.toEmail ?? mailbox.email,
       subject: message.subject,
       body: message.text,
-      body_html: message.html,
+      // Inbound HTML is never rendered anywhere in the app, and it is the only
+      // channel through which an inline image or an embedded document could land
+      // in the CRM. Store nothing — the plain-text body is what the inbox shows,
+      // and any real attachment stays in Gmail where it can be opened.
+      body_html: null,
       message_id: message.messageId,
       in_reply_to: message.inReplyTo,
       thread_id: options.threadId ?? message.messageId,

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { NotesPanel, TasksPanel } from "@/components/notes-tasks";
+import { fmtDate, fmtDateTime } from "@/lib/datetime";
 import { StageSelect } from "@/components/stage-select";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import {
@@ -212,9 +213,9 @@ export default async function ContactPage({
         />
         <Fact
           label="Scraped"
-          value={contact.scraped_at ? new Date(contact.scraped_at).toLocaleDateString() : "—"}
+          value={fmtDate(contact.scraped_at)}
         />
-        <Fact label="Added" value={new Date(contact.created_at).toLocaleDateString()} />
+        <Fact label="Added" value={fmtDate(contact.created_at)} />
       </div>
 
       {threadMailbox && (
@@ -257,7 +258,7 @@ export default async function ContactPage({
                 <span className="hint">
                   step {row.current_step}
                   {row.next_send_at
-                    ? ` · next ${new Date(row.next_send_at).toLocaleString()}`
+                    ? ` · next ${fmtDateTime(row.next_send_at)}`
                     : ""}
                 </span>
               </li>
@@ -314,7 +315,7 @@ export default async function ContactPage({
                     engagement.tracked === 1 ? "" : "s"
                   }${
                     engagement.firstOpenAt
-                      ? ` · first ${new Date(engagement.firstOpenAt).toLocaleString()}`
+                      ? ` · first ${fmtDateTime(engagement.firstOpenAt)}`
                       : ""
                   }${engagement.clickedAny ? ` · ${engagement.clicks} click${engagement.clicks === 1 ? "" : "s"}` : ""}`
                 : `No opens recorded on ${engagement.tracked} tracked email${
@@ -339,7 +340,7 @@ export default async function ContactPage({
                     {message.status === "failed" && " (failed)"}
                   </span>
                   <span className="hint">
-                    {new Date(message.created_at).toLocaleString()}
+                    {fmtDateTime(message.created_at)}
                   </span>
                 </div>
                 {/* Named per message, not just once at the top: rotation means
@@ -402,7 +403,7 @@ export default async function ContactPage({
               <li key={entry.id} className="flex items-center justify-between px-5 py-2 text-sm">
                 <span>{entry.action.replace(/[._]/g, " ")}</span>
                 <span className="hint">
-                  {new Date(entry.created_at).toLocaleString()}
+                  {fmtDateTime(entry.created_at)}
                 </span>
               </li>
             ))}

@@ -5,6 +5,7 @@ import {
   type ThreadMessage,
 } from "@/components/conversation-panel";
 import { RunJobButton } from "@/components/run-job-button";
+import { readReplyTemplates } from "@/mail/reply-templates";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
 
@@ -281,6 +282,8 @@ export default async function InboxPage({
                 status={selected.status}
                 messages={messages}
                 hasDeal={hasDeal}
+                templates={readReplyTemplates(session.workspace.settings)}
+                firstName={selected.contacts?.first_name ?? null}
               />
             </div>
           )}

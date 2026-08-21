@@ -605,7 +605,15 @@ function toInboundMessage(uid: number, parsed: ParsedMail): InboundMessage {
     if (typeof value === "string") headers[key.toLowerCase()] = value;
   }
 
-  const text = parsed.text ?? "";
+  // Plain text only. If a reply is HTML-only, fall back to a tag-stripped
+  // version rather than an empty body — but never carry the HTML itself, so
+  // inline images and embedded documents never enter the CRM (attachments in
+  // `parsed.attachments` are likewise ignored; they stay in Gmail).
+  const text = parsed.text?.trim()
+    ? parsed.text
+    : typeof parsed.html === "string"
+      ? htmlToText(parsed.html)
+      : "";
   const classification = classifyInbound({
     fromEmail: from?.address ?? "",
     subject: parsed.subject ?? "",
@@ -630,6 +638,24 @@ function toInboundMessage(uid: number, parsed: ParsedMail): InboundMessage {
     bouncedRecipient: classification.bouncedRecipient,
     bounceType: classification.bounceType,
   };
+}
+
+/** Crude HTML → text for the rare HTML-only reply. Drops scripts/styles and
+ * tags, decodes the handful of entities that matter, collapses blank runs. */
+function htmlToText(html: string): string {
+  return html
+    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, "")
+    .replace(/<br\s*\/?>(?=\s*)/gi, "\n")
+    .replace(/<\/(p|div|tr|li|h[1-6])>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function normalizeReferences(refs: string | string[] | undefined): string[] {

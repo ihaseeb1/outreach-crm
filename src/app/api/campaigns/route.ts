@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { nextSendAt, resolveWindow } from "@/campaigns/schedule";
+import { DEFAULT_TIMEZONE } from "@/lib/datetime";
 import { logActivity } from "@/lib/activity";
 import type { CampaignSettings } from "@/types/db";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -76,7 +77,7 @@ export async function POST(request: Request) {
         send_window_start: 9,
         send_window_end: 17,
         send_days: [1, 2, 3, 4, 5],
-        timezone: "UTC",
+        timezone: DEFAULT_TIMEZONE,
       },
     })
     .select("id")

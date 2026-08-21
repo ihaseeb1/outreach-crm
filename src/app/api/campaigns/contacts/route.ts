@@ -3,6 +3,8 @@ import { z } from "zod";
 
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getSession } from "@/lib/workspace";
+import { logActivity } from "@/lib/activity";
+import { suppressEmail } from "@/mail/suppressions";
 import { enrollContacts } from "@/campaigns/enroll";
 import {
   describeExclusions,
@@ -182,7 +184,22 @@ export async function POST(request: Request) {
   }
 }
 
-/** Removes a contact from a campaign (or stops it, keeping the history). */
+/** Statuses that a bulk purge is allowed to hard-remove. Dead ends only —
+ * a purge must never be able to yank a contact out of a live sequence. */
+const PURGEABLE = new Set(["bounced", "failed", "unsubscribed", "completed"]);
+
+/**
+ * Removes contacts from a campaign.
+ *
+ * Two shapes:
+ * - `?id=` — stops one enrolment, keeping the row and its history (the row-level
+ *   "remove" the contact page uses).
+ * - `?campaign_id=&statuses=bounced,failed[&suppress=1]` — a bulk purge that
+ *   hard-deletes the enrolment rows for those statuses, so a campaign full of
+ *   dead bounces reads clean. Bounced addresses can also be pushed onto the
+ *   suppression list in the same click. Restricted to PURGEABLE statuses so it
+ *   can never remove a contact mid-sequence.
+ */
 export async function DELETE(request: Request) {
   const session = await getSession();
   if (!session) {
@@ -190,10 +207,92 @@ export async function DELETE(request: Request) {
   }
 
   const params = new URL(request.url).searchParams;
+  const supabase = await createSupabaseServerClient();
+
+  const campaignId = params.get("campaign_id");
+  if (campaignId) {
+    const statuses = (params.get("statuses") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => PURGEABLE.has(s));
+    if (statuses.length === 0) {
+      return NextResponse.json(
+        { error: "Nothing to purge — allowed statuses are bounced, failed, unsubscribed, completed." },
+        { status: 400 },
+      );
+    }
+
+    // Own the campaign before touching its rows.
+    const { data: owned } = await supabase
+      .from("campaigns")
+      .select("id")
+      .eq("id", campaignId)
+      .eq("workspace_id", session.workspace.id)
+      .maybeSingle();
+    if (!owned) {
+      return NextResponse.json({ error: "Campaign not found." }, { status: 404 });
+    }
+
+    const { data: rows } = await supabase
+      .from("campaign_contacts")
+      .select("id, status, contacts(email)")
+      .eq("campaign_id", campaignId)
+      .eq("workspace_id", session.workspace.id)
+      .in("status", statuses);
+
+    const matched = (rows ?? []) as unknown as {
+      id: string;
+      status: string;
+      contacts: { email: string | null } | null;
+    }[];
+
+    if (matched.length === 0) {
+      return NextResponse.json({ ok: true, removed: 0, suppressed: 0 });
+    }
+
+    let suppressed = 0;
+    if (params.get("suppress") === "1") {
+      // Only bounced addresses are genuinely bad. A "failed" send is often a
+      // transient SMTP error, so suppressing it would write off a good contact.
+      for (const row of matched) {
+        if (row.status !== "bounced" || !row.contacts?.email) continue;
+        const did = await suppressEmail(supabase, {
+          workspaceId: session.workspace.id,
+          email: row.contacts.email,
+          reason: "hard_bounce",
+          source: "campaign purge",
+          actorId: session.userId,
+        });
+        if (did) suppressed += 1;
+      }
+    }
+
+    const { error } = await supabase
+      .from("campaign_contacts")
+      .delete()
+      .eq("campaign_id", campaignId)
+      .eq("workspace_id", session.workspace.id)
+      .in(
+        "id",
+        matched.map((row) => row.id),
+      );
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+    await logActivity(supabase, {
+      workspaceId: session.workspace.id,
+      actorId: session.userId,
+      action: "campaign.contacts_purged",
+      entityType: "campaign",
+      entityId: campaignId,
+      meta: { statuses, removed: matched.length, suppressed },
+    });
+
+    return NextResponse.json({ ok: true, removed: matched.length, suppressed });
+  }
+
   const id = params.get("id");
   if (!id) return NextResponse.json({ error: "Missing id." }, { status: 400 });
 
-  const supabase = await createSupabaseServerClient();
   const { error } = await supabase
     .from("campaign_contacts")
     .update({ status: "paused", next_send_at: null, paused_reason: "Removed manually" })

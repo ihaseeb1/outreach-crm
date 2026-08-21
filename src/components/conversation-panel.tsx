@@ -4,6 +4,8 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { DealForm, type DealSaveResult } from "@/components/deal-form";
+import { fmtDateTime } from "@/lib/datetime";
+import type { ReplyTemplate } from "@/mail/reply-templates";
 
 export interface ThreadMessage {
   id: string;
@@ -28,6 +30,8 @@ export function ConversationPanel({
   threadMailboxId,
   threadMailboxEmail,
   mailboxes,
+  templates = [],
+  firstName = null,
 }: {
   conversationId: string;
   contactId: string;
@@ -41,6 +45,10 @@ export function ConversationPanel({
   threadMailboxId: string | null;
   threadMailboxEmail: string | null;
   mailboxes: { id: string; email: string }[];
+  /** Saved reply snippets, managed in Settings. */
+  templates?: ReplyTemplate[];
+  /** This contact's first name, for expanding {{first_name}} in a template. */
+  firstName?: string | null;
 }) {
   const router = useRouter();
   const [reply, setReply] = useState("");
@@ -65,6 +73,24 @@ export function ConversationPanel({
       .reverse()
       .map((message) => message.body)
       .join("\n\n---\n\n") || null;
+
+  /** Expand the one merge field a reply commonly needs. */
+  function expand(body: string): string {
+    const name = (firstName ?? "").trim();
+    return body
+      .replace(/\{\{\s*first_name\s*\|\s*([^}]*?)\s*\}\}/gi, (_m, fb) => name || String(fb))
+      .replace(/\{\{\s*first_name\s*\}\}/gi, name || "there");
+  }
+
+  function insertTemplate(id: string) {
+    const template = templates.find((t) => t.id === id);
+    if (!template) return;
+    const text = expand(template.body);
+    setReply((current) =>
+      current.trim() ? `${current.replace(/\s*$/, "")}\n\n${text}` : text,
+    );
+    setSent(false);
+  }
 
   async function patch(body: Record<string, unknown>) {
     await fetch("/api/conversations", {
@@ -212,9 +238,7 @@ export function ConversationPanel({
                   ? (message.from_email ?? contactEmail)
                   : `You → ${message.to_email ?? contactEmail}`}
               </span>
-              <span className="hint">
-                {new Date(message.created_at).toLocaleString()}
-              </span>
+              <span className="hint">{fmtDateTime(message.created_at)}</span>
             </div>
             {message.subject && (
               <p className="mb-2 text-sm font-medium">{message.subject}</p>
@@ -261,9 +285,29 @@ export function ConversationPanel({
           )}
         </div>
 
-        <label className="label" htmlFor="reply-body">
-          Reply
-        </label>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <label className="label" htmlFor="reply-body">
+            Reply
+          </label>
+          {templates.length > 0 && (
+            <select
+              className="input h-8 w-auto py-0 text-xs"
+              value=""
+              onChange={(e) => {
+                if (e.target.value) insertTemplate(e.target.value);
+                e.target.value = "";
+              }}
+              title="Insert a saved template"
+            >
+              <option value="">Insert template…</option>
+              {templates.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
         <textarea
           id="reply-body"
           className="input min-h-32"

@@ -1,7 +1,9 @@
 import { revalidatePath } from "next/cache";
 
+import { ReplyTemplatesManager } from "@/components/reply-templates-manager";
 import { logActivity } from "@/lib/activity";
 import { env } from "@/lib/env";
+import { readReplyTemplates } from "@/mail/reply-templates";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
 import {
@@ -59,6 +61,7 @@ export default async function SettingsPage() {
   const session = await requireSession();
   const appUrl = env.appUrl();
   const tracking = resolveTrackingMode(session.workspace.settings);
+  const replyTemplates = readReplyTemplates(session.workspace.settings);
 
   return (
     <div className="space-y-6">
@@ -141,6 +144,8 @@ export default async function SettingsPage() {
           Save settings
         </button>
       </form>
+
+      <ReplyTemplatesManager initial={replyTemplates} />
 
       <section className="card card-pad space-y-3">
         <h2 className="text-sm font-semibold">External API key</h2>

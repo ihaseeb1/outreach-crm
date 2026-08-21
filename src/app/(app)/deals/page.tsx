@@ -196,7 +196,7 @@ export default async function DealsPage({
             <table className="table">
               <thead>
                 <tr>
-                  <th>Domain</th>
+                  <th className="pin-left">Domain</th>
                   <th>Status</th>
                   <th>Contact</th>
                   <th>Closed on</th>
@@ -207,7 +207,7 @@ export default async function DealsPage({
                   {niches.map((niche) => (
                     <th key={niche}>{niche}</th>
                   ))}
-                  <th>Actions</th>
+                  <th className="pin-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -220,7 +220,7 @@ export default async function DealsPage({
                   );
                   return (
                     <tr key={deal.id}>
-                      <td className="font-medium">{deal.domain}</td>
+                      <td className="pin-left font-medium">{deal.domain}</td>
                       <td>
                         <span className={`badge ${STATUS_STYLES[deal.status] ?? ""}`}>
                           {deal.status}
@@ -246,7 +246,7 @@ export default async function DealsPage({
                           </td>
                         );
                       })}
-                      <td>
+                      <td className="pin-right">
                         <DealRowActions deal={deal} />
                       </td>
                     </tr>

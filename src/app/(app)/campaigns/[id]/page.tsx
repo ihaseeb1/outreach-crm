@@ -1,11 +1,14 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
+import { CampaignAdmin } from "@/components/campaign-admin";
 import { CampaignControls } from "@/components/campaign-controls";
 import { CampaignDuplicateButton } from "@/components/campaign-duplicate-button";
 import { CampaignEnrollForm } from "@/components/campaign-enroll-form";
+import { CampaignPurgeButton } from "@/components/campaign-purge-button";
 import { SequenceEditor, type EditableStep } from "@/components/sequence-editor";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { fmtDateTime } from "@/lib/datetime";
 import {
   readTracking,
   rollUpTracking,
@@ -272,6 +275,12 @@ export default async function CampaignDetailPage({
         }
       />
 
+      <CampaignAdmin
+        campaignId={campaign.id}
+        name={campaign.name}
+        status={campaign.status}
+      />
+
       <SequenceEditor campaignId={campaign.id} initialSteps={editableSteps} />
 
       <CampaignEnrollForm campaignId={campaign.id} />
@@ -279,11 +288,14 @@ export default async function CampaignDetailPage({
       <section className="card" id="enrolled">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--color-line)] px-5 py-3">
           <h2 className="text-sm font-semibold">Enrolled contacts</h2>
-          {total > 0 && (
-            <p className="hint">
-              {firstShown}–{lastShown} of {total.toLocaleString()}
-            </p>
-          )}
+          <div className="flex flex-wrap items-center gap-3">
+            {total > 0 && (
+              <p className="hint">
+                {firstShown}–{lastShown} of {total.toLocaleString()}
+              </p>
+            )}
+            <CampaignPurgeButton campaignId={campaign.id} />
+          </div>
         </div>
         {enrolled.length === 0 ? (
           <p className="px-5 py-6 text-sm text-[var(--color-muted)]">
@@ -334,7 +346,7 @@ export default async function CampaignDetailPage({
                             className="text-[var(--color-ok)]"
                             title={
                               rolled.firstOpenAt
-                                ? `First opened ${new Date(rolled.firstOpenAt).toLocaleString()}`
+                                ? `First opened ${fmtDateTime(rolled.firstOpenAt)}`
                                 : undefined
                             }
                           >
@@ -344,16 +356,8 @@ export default async function CampaignDetailPage({
                         );
                       })()}
                     </td>
-                    <td>
-                      {row.next_send_at
-                        ? new Date(row.next_send_at).toLocaleString()
-                        : "—"}
-                    </td>
-                    <td>
-                      {row.last_sent_at
-                        ? new Date(row.last_sent_at).toLocaleString()
-                        : "—"}
-                    </td>
+                    <td>{fmtDateTime(row.next_send_at)}</td>
+                    <td>{fmtDateTime(row.last_sent_at)}</td>
                   </tr>
                 ))}
               </tbody>

@@ -107,4 +107,29 @@ body {
   .table tbody tr:hover {
     @apply bg-[var(--color-canvas)];
   }
+
+  /* Columns that stay put while the table scrolls sideways. Used on wide
+     tables (Deals) so the domain and the row's actions are always in view. */
+  .table .pin-left,
+  .table .pin-right {
+    position: sticky;
+    z-index: 2;
+    background: var(--color-surface);
+  }
+  .table .pin-left {
+    left: 0;
+    box-shadow: 1px 0 0 var(--color-line);
+  }
+  .table .pin-right {
+    right: 0;
+    box-shadow: -1px 0 0 var(--color-line);
+  }
+  .table th.pin-left,
+  .table th.pin-right {
+    z-index: 3;
+  }
+  .table tbody tr:hover .pin-left,
+  .table tbody tr:hover .pin-right {
+    background: var(--color-canvas);
+  }
 }
