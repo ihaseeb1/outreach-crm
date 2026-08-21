@@ -204,6 +204,69 @@ function trimTrailingBlanks(lines: string[]): string[] {
   return copy;
 }
 
+/**
+ * Splits a single pasted block that carries **both** columns into a websites
+ * column and an emails column.
+ *
+ * This is the "paste once, separate in one click" case: selecting the website
+ * column and the email column together in Google Sheets and copying gives one
+ * block, not two, so pasting it into the two boxes by hand meant splitting it up
+ * first. This does that split, and the two-box importer takes it from there.
+ *
+ * Two shapes are handled, because a copy can arrive as either:
+ *
+ *  - **Row per line** — `example.com<tab>jane@example.com` on each line, which
+ *    is what copying two adjacent columns actually produces. Blank halves are
+ *    kept so a row missing one side stays lined up with its partner on the
+ *    other side — the same reason `pairColumns` preserves mid-column blanks.
+ *  - **Stacked** — every website, then every email (or a single column on its
+ *    own). There is nothing to line up row by row here, so the two sides are
+ *    gathered in the order they appear.
+ *
+ * The result is two newline-separated strings meant to be dropped straight into
+ * the websites and emails boxes, where `pairColumns` re-parses and validates
+ * them — this only decides which side each token belongs on.
+ */
+export function separateCombined(raw: string): {
+  websites: string;
+  emails: string;
+} {
+  const parsed = raw.split(/\r?\n/).map((line) => {
+    const tokens = cellTokens(line.trim());
+    const emailToken = tokens.find((token) => EMAIL_RE.test(token)) ?? null;
+    const siteToken =
+      tokens.find((token) => token !== emailToken && looksLikeSite(token)) ?? null;
+    return { tokens, emailToken, siteToken };
+  });
+
+  // Drop a leading "Website / Email" header, so it does not become a blank pair
+  // that shifts every real row down by one in the row-per-line case.
+  const firstReal = parsed.find((row) => row.tokens.length > 0);
+  if (firstReal && looksLikeHeader(firstReal.tokens)) {
+    parsed.splice(parsed.indexOf(firstReal), 1);
+  }
+
+  const rowPerLine = parsed.some((row) => row.emailToken && row.siteToken);
+
+  if (rowPerLine) {
+    return {
+      websites: trimTrailingBlanks(parsed.map((row) => row.siteToken ?? "")).join("\n"),
+      emails: trimTrailingBlanks(parsed.map((row) => row.emailToken ?? "")).join("\n"),
+    };
+  }
+
+  const collect = (pick: (row: (typeof parsed)[number]) => string | null) =>
+    parsed
+      .map(pick)
+      .filter((token): token is string => Boolean(token))
+      .join("\n");
+
+  return {
+    websites: collect((row) => row.siteToken),
+    emails: collect((row) => row.emailToken),
+  };
+}
+
 export function parseContactImport(raw: string): ParseResult {
   const rows: ParsedRow[] = [];
   const websitesOnly: string[] = [];

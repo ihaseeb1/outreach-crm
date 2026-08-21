@@ -21,6 +21,7 @@ import {
   totals,
   type NichePrice,
 } from "@/reports/metrics";
+import { summariseEngagement } from "@/mail/tracking-summary";
 import {
   parseReportBucket,
   parseReportRange,
@@ -113,12 +114,19 @@ export default async function ReportsPage({
   // `2026-08-20T09:00:00+00:00` and `toISOString()` produces
   // `2026-08-20T00:00:00.000Z`; those two formats do not sort against each other.
   const sinceMs = Date.parse(since);
-  const sent = ((sentRows ?? []) as { sent_at: string | null }[])
-    .map((row) => row.sent_at)
-    .filter(
-      (value): value is string =>
-        Boolean(value) && Date.parse(value as string) >= sinceMs,
-    );
+  const sentInRange = ((sentRows ?? []) as {
+    sent_at: string | null;
+    meta: Record<string, unknown> | null;
+  }[]).filter(
+    (row) => Boolean(row.sent_at) && Date.parse(row.sent_at as string) >= sinceMs,
+  );
+  const sent = sentInRange.map((row) => row.sent_at as string);
+
+  // Opens and clicks across the same period. Reads the tracking record already
+  // sitting on each message's meta (see mail/tracking-summary), so it needs no
+  // extra query and cannot disagree with the sent count above — both come from
+  // the one `messages` read.
+  const engagement = summariseEngagement(sentInRange.map((row) => row.meta));
 
   const inbound = (inboundRows ?? []) as {
     received_at: string | null;
@@ -290,6 +298,60 @@ export default async function ReportsPage({
             range.bucket === "week" &&
             " Chosen automatically for a range this long — 365 daily bars would each be a sliver."}
         </p>
+      </section>
+
+      <section className="card card-pad space-y-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <h2 className="text-sm font-semibold">Opens &amp; clicks</h2>
+          <p className="hint">
+            {engagement.tracked > 0
+              ? `Across the ${engagement.tracked.toLocaleString()} tracked email${engagement.tracked === 1 ? "" : "s"} sent in this period` +
+                (engagement.clickTracked > 0
+                  ? ` — ${engagement.clickTracked.toLocaleString()} with click tracking`
+                  : "")
+              : "No tracked emails sent in this period"}
+          </p>
+        </div>
+
+        {engagement.tracked === 0 ? (
+          <p className="text-sm text-[var(--color-muted)]">
+            Nothing to show yet. Opens and clicks are only recorded on emails
+            sent while tracking is on — check the tracking mode in Settings, and
+            note that mail sent before tracking was added reads as untracked
+            rather than unopened.
+          </p>
+        ) : (
+          <>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <Stat
+                label="Emails opened"
+                value={engagement.openedEmails.toLocaleString()}
+                note={`${formatPercent(engagement.openRate)} of tracked`}
+              />
+              <Stat
+                label="Total opens"
+                value={engagement.opens.toLocaleString()}
+                note="counting repeat opens"
+              />
+              <Stat
+                label="Emails clicked"
+                value={engagement.clickedEmails.toLocaleString()}
+                note={`${formatPercent(engagement.clickRate)} of tracked`}
+              />
+              <Stat
+                label="Total clicks"
+                value={engagement.clicks.toLocaleString()}
+                note={`${engagement.clickTracked.toLocaleString()} of ${engagement.tracked.toLocaleString()} tracked for clicks`}
+              />
+            </div>
+            <p className="hint">
+              Opens are approximate — images blocked means no open is recorded,
+              and a privacy proxy (Apple Mail, some Gmail setups) can fetch the
+              pixel before anyone reads the message. Rates are out of emails sent
+              with tracking on, not every email sent.
+            </p>
+          </>
+        )}
       </section>
 
       <section className="card card-pad space-y-3">

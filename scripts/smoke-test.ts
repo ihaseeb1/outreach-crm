@@ -29,7 +29,11 @@ import {
   verifyClick,
   verifyOpen,
 } from "../src/mail/tracking";
-import { pairColumns as pairImportColumns } from "../src/lib/import-parse";
+import {
+  pairColumns as pairImportColumns,
+  separateCombined,
+} from "../src/lib/import-parse";
+import { summariseEngagement } from "../src/mail/tracking-summary";
 import { TODAY as TODAY_KEY, countsFor as countsForKey } from "../src/mailboxes/volume";
 
 import {
@@ -1512,6 +1516,111 @@ test("a malformed address is reported with its row number", () => {
 test("duplicate addresses across rows collapse to one", () => {
   const result = pairColumns("a.com\nb.com", "same@x.com\nSAME@x.com");
   assert.equal(result.rows.length, 1);
+});
+
+
+console.log("\nseparate one combined paste into two columns");
+
+test("splits tab-separated rows into website and email columns", () => {
+  const { websites, emails } = separateCombined(
+    "example.com\tjane@example.com\nanother.co.uk\teditor@another.co.uk",
+  );
+  assert.equal(websites, "example.com\nanother.co.uk");
+  assert.equal(emails, "jane@example.com\neditor@another.co.uk");
+  // Round-trips through the pairer the two boxes actually use.
+  const paired = pairColumns(websites, emails);
+  assert.equal(paired.rows.length, 2);
+  assert.equal(paired.rows[0]?.domain, "example.com");
+});
+
+test("either order on the line still lands on the right side", () => {
+  const { websites, emails } = separateCombined(
+    "jane@example.com, example.com",
+  );
+  assert.equal(websites, "example.com");
+  assert.equal(emails, "jane@example.com");
+});
+
+test("a Website/Email header row is dropped, not turned into a blank pair", () => {
+  const { websites, emails } = separateCombined(
+    "Website\tEmail\nexample.com\tjane@example.com",
+  );
+  assert.equal(websites, "example.com");
+  assert.equal(emails, "jane@example.com");
+});
+
+test("a row missing its email keeps the website lined up", () => {
+  const { websites, emails } = separateCombined(
+    "first.com\ta@first.com\nsecond.com\nthird.com\tc@third.com",
+  );
+  // second.com has no address, so its email slot is blank and third.com stays
+  // paired with c@third.com rather than being pulled up a row.
+  assert.equal(websites, "first.com\nsecond.com\nthird.com");
+  assert.equal(emails, "a@first.com\n\nc@third.com");
+  const paired = pairColumns(websites, emails);
+  assert.equal(paired.rows.length, 2);
+  assert.equal(paired.websitesOnly.length, 1);
+});
+
+test("a stacked block — all sites then all emails — is gathered in order", () => {
+  const { websites, emails } = separateCombined(
+    "a.com\nb.com\none@a.com\ntwo@b.com",
+  );
+  assert.equal(websites, "a.com\nb.com");
+  assert.equal(emails, "one@a.com\ntwo@b.com");
+});
+
+test("combined cell in one line is split by the pairer, not lost", () => {
+  const { websites, emails } = separateCombined("facebook.com,info@facebook.com");
+  assert.equal(websites, "facebook.com");
+  assert.equal(emails, "info@facebook.com");
+});
+
+
+console.log("\nreports engagement roll-up");
+
+const trackedMeta = (
+  open: number,
+  click: number,
+  mode: "opens" | "opens_and_clicks" = "opens_and_clicks",
+) => ({
+  tracking: {
+    mode,
+    open: { count: open, first_at: null, last_at: null },
+    click: { count: click, first_at: null, last_at: null },
+  },
+});
+
+test("counts opened and clicked emails and their totals", () => {
+  const summary = summariseEngagement([
+    trackedMeta(3, 1),
+    trackedMeta(2, 0),
+    trackedMeta(0, 0),
+  ]);
+  assert.equal(summary.sent, 3);
+  assert.equal(summary.tracked, 3);
+  assert.equal(summary.openedEmails, 2);
+  assert.equal(summary.opens, 5);
+  assert.equal(summary.clickedEmails, 1);
+  assert.equal(summary.clicks, 1);
+});
+
+test("rates are out of tracked emails, not every email sent", () => {
+  // One tracked-and-opened, one untracked (warmup / pre-tracking) — the
+  // untracked one must not drag the open rate down to 50%.
+  const summary = summariseEngagement([trackedMeta(1, 0), { kind: "warmup" }, null]);
+  assert.equal(summary.sent, 3);
+  assert.equal(summary.tracked, 1);
+  assert.equal(summary.openRate, 1);
+});
+
+test("click-tracked counts only opens_and_clicks mode", () => {
+  const summary = summariseEngagement([
+    trackedMeta(1, 0, "opens"),
+    trackedMeta(1, 1, "opens_and_clicks"),
+  ]);
+  assert.equal(summary.tracked, 2);
+  assert.equal(summary.clickTracked, 1);
 });
 
 

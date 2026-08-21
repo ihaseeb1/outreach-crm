@@ -3,6 +3,63 @@
 Read this first, then `DEPLOY_STATUS.md` for hosting and `BUILD_LOG.md` for the
 original seven build phases.
 
+---
+
+## Three fixes, 21 August (fourth session)
+
+Reported after the tracking work went in. All three are done; `npm run typecheck`,
+`npm run smoke` (291 tests, 9 new) and `npm run build` are clean. **No migration**
+— reports reads the same `messages.meta` tracking the contact and campaign pages
+already read. Not yet verified against live data (no `.env.local` in this
+checkout).
+
+### 1. Opens and clicks on Reports
+
+Tracking showed on the contact and campaign pages but never on Reports. New
+**"Opens & clicks"** section on `/reports`, between the volume chart and the
+funnel: emails opened (and the open rate), total opens, emails clicked (and the
+click rate), total clicks, and **how many of the sent emails were tracked for
+clicks** — the "how many emails sent with clicks tracked" that was asked for.
+
+`summariseEngagement` in `mail/tracking-summary.ts` does the roll-up, fed the
+`meta` the reports query already selected — so it costs no extra query and can
+never disagree with the sent count on the same page. **Rates are out of
+*tracked* emails, not every email sent**: an email sent with tracking off can
+never register an open, and counting it against the rate would drag the number
+down for a reason that has nothing to do with the recipient. Warmup and any mail
+sent before tracking existed carry no `meta.tracking`, so they fall out of the
+denominator on their own. The section says "No tracked emails sent in this
+period" rather than showing zeroes when there is nothing tracked — "we do not
+know" must never render as "they did not".
+
+### 2. Paste both columns at once, separate in one click
+
+The two-box importer meant pasting the website column and the email column
+separately. But copying two adjacent columns out of Google Sheets gives **one**
+block (tab-separated rows), not two. New default **"Paste both columns
+together"** mode on the import form: paste the one block, click **Separate into
+website + email**, and each half drops into its own box lined up row by row, to
+check before importing.
+
+`separateCombined` in `lib/import-parse.ts` is the split. It handles the
+row-per-line shape (`site<tab>email`, either order, tab/comma/space) and the
+stacked shape (all sites then all emails). Blank halves are kept in the
+row-per-line case so a row missing one side stays lined up — the same reason
+`pairColumns` preserves mid-column blanks. It only decides which side each token
+belongs on; `pairColumns` still re-parses and validates, so nothing new can slip
+past the existing checks. The two-box and one-per-line modes are still one click
+away.
+
+### 3. Renaming a campaign from the list
+
+Renaming already worked on the campaign's own page ("Manage campaign"), but the
+list — where you see all the names together and notice one is wrong — only
+linked through to it. `CampaignNameCell` puts an inline **Rename** on the name
+itself in `/campaigns`, hitting the same `PATCH /api/campaigns` the detail page
+uses. Enter saves, Escape cancels.
+
+---
+
 Live at **https://crm.orankly.com**. Everything here is on `main` and deployed.
 Pushing `main` deploys straight to production, so ask before pushing.
 

@@ -160,6 +160,78 @@ export function recordEvent(
   return base;
 }
 
+export interface EngagementSummary {
+  /** Outbound emails looked at (whatever their tracking state). */
+  sent: number;
+  /** Of those, how many were sent with tracking on — the honest denominator. */
+  tracked: number;
+  /** How many were sent with click tracking specifically (links rewritten). */
+  clickTracked: number;
+  /** Distinct emails opened at least once. */
+  openedEmails: number;
+  /** Distinct emails clicked at least once. */
+  clickedEmails: number;
+  /** Total opens and clicks across all of them. */
+  opens: number;
+  clicks: number;
+  /** openedEmails / tracked and clickedEmails / tracked. 0 when nothing tracked. */
+  openRate: number;
+  clickRate: number;
+}
+
+/**
+ * Rolls a whole period's worth of sent emails up into open/click totals for the
+ * Reports page.
+ *
+ * The rate denominator is **tracked**, not **sent**: an email sent with
+ * tracking off can never register an open, so counting it against the open rate
+ * would drag the number down for a reason that has nothing to do with the
+ * recipient. Warmup and anything sent before tracking existed carry no
+ * `meta.tracking`, so `readTracking` returns null for them and they fall out of
+ * `tracked` on their own — they still count towards `sent`.
+ */
+export function summariseEngagement(
+  metas: (Record<string, unknown> | null | undefined)[],
+): EngagementSummary {
+  let sent = 0;
+  let tracked = 0;
+  let clickTracked = 0;
+  let openedEmails = 0;
+  let clickedEmails = 0;
+  let opens = 0;
+  let clicks = 0;
+
+  for (const meta of metas) {
+    sent += 1;
+    const summary = readTracking(meta);
+    if (!summary || !summary.tracked) continue;
+
+    tracked += 1;
+    if ((meta?.tracking as TrackingRecord | undefined)?.mode === "opens_and_clicks") {
+      clickTracked += 1;
+    }
+    opens += summary.opens;
+    clicks += summary.clicks;
+    if (summary.opens > 0) openedEmails += 1;
+    if (summary.clicks > 0) clickedEmails += 1;
+  }
+
+  const rate = (numerator: number, denominator: number) =>
+    denominator <= 0 ? 0 : numerator / denominator;
+
+  return {
+    sent,
+    tracked,
+    clickTracked,
+    openedEmails,
+    clickedEmails,
+    opens,
+    clicks,
+    openRate: rate(openedEmails, tracked),
+    clickRate: rate(clickedEmails, tracked),
+  };
+}
+
 /** "Opened 3× · first 20 Aug 14:22 · 1 click" — one line for a timeline row. */
 export function describeTracking(
   summary: TrackingSummary | null,

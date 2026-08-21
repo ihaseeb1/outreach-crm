@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useMemo, useRef, useState } from "react";
 
-import { pairColumns, parseContactImport } from "@/lib/import-parse";
+import { pairColumns, parseContactImport, separateCombined } from "@/lib/import-parse";
 
 interface ImportResult {
   parsed: number;
@@ -15,27 +15,31 @@ interface ImportResult {
   skippedTotal: number;
 }
 
+type Mode = "combined" | "two" | "single";
+
 const countLines = (value: string) =>
   value.split(/\r?\n/).filter((line) => line.trim()).length;
 
 /**
  * Bulk contact import.
  *
- * Two boxes by default — paste the website column in one and the email column
- * in the other, exactly as they come out of a spreadsheet, and they are matched
- * row by row. No reformatting every line into "site, email" by hand.
+ * Three ways in, all feeding the same parser that runs on the server, so the
+ * live count can never disagree with what gets saved:
  *
- * The combined single-box mode is kept behind a toggle for lists that are
- * already one-per-line, and for file uploads.
- *
- * The same parser runs here and on the server, so the live count cannot
- * disagree with what actually gets saved.
+ *  - **Both columns together** (the default). Paste the whole two-column
+ *    selection straight out of Google Sheets — websites and emails in one block
+ *    — and one click separates it into the two boxes. This is the everyday case:
+ *    copying two adjacent columns gives one block, not two.
+ *  - **Two separate boxes** — website column in one, email column in the other —
+ *    for when they are already split.
+ *  - **One per line** — website and email on the same line — and file uploads.
  */
 export function ContactImportForm() {
   const router = useRouter();
   const fileRef = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
-  const [paired, setPaired] = useState(true);
+  const [mode, setMode] = useState<Mode>("combined");
+  const [combined, setCombined] = useState("");
   const [websites, setWebsites] = useState("");
   const [emails, setEmails] = useState("");
   const [text, setText] = useState("");
@@ -43,7 +47,13 @@ export function ContactImportForm() {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
 
+  const paired = mode === "combined" || mode === "two";
+
+  // The preview always reads the two boxes when paired — in combined mode they
+  // are empty until Separate has run, which is exactly the intended flow: paste,
+  // separate, check the split, import.
   const preview = useMemo(
     () => (paired ? pairColumns(websites, emails) : parseContactImport(text)),
     [paired, websites, emails, text],
@@ -55,11 +65,28 @@ export function ContactImportForm() {
   const nothingToDo =
     preview.rows.length === 0 && preview.websitesOnly.length === 0;
 
+  function separate() {
+    const { websites: w, emails: e } = separateCombined(combined);
+    if (!w && !e) {
+      setNote(
+        "Couldn't find any websites or emails in that. Make sure it's the two columns copied together.",
+      );
+      return;
+    }
+    setWebsites(w);
+    setEmails(e);
+    setCombined("");
+    setMode("two");
+    setNote(
+      `Separated into ${countLines(w)} website(s) and ${countLines(e)} email(s). Check the split below, then import.`,
+    );
+  }
+
   async function onFile(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
     const content = await file.text();
-    setPaired(false);
+    setMode("single");
     setText((current) => (current ? `${current}\n${content}` : content));
     if (fileRef.current) fileRef.current.value = "";
   }
@@ -82,9 +109,11 @@ export function ContactImportForm() {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error ?? "Import failed.");
       setResult(payload as ImportResult);
+      setCombined("");
       setWebsites("");
       setEmails("");
       setText("");
+      setNote(null);
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -110,7 +139,48 @@ export function ContactImportForm() {
         </button>
       </div>
 
-      {paired ? (
+      {mode === "combined" && (
+        <>
+          <div>
+            <label className="label" htmlFor="import-combined">
+              Paste both columns together
+            </label>
+            <textarea
+              id="import-combined"
+              className="input min-h-48 font-mono text-xs"
+              placeholder={
+                "Copy the website column and the email column together from\n" +
+                "Google Sheets and paste here:\n\n" +
+                "example.com\tjane@example.com\n" +
+                "another-site.co.uk\teditor@another-site.co.uk\n" +
+                "thirdsite.net\thello@thirdsite.net"
+              }
+              value={combined}
+              onChange={(e) => {
+                setCombined(e.target.value);
+                setNote(null);
+              }}
+            />
+          </div>
+          <p className="hint">
+            One paste for both columns. Click{" "}
+            <strong>Separate into website + email</strong> and each half drops
+            into its own box, lined up row by row, so you can check the split
+            before importing. Tab, comma or space between the two works, in
+            either order.
+          </p>
+          <button
+            className="btn-primary"
+            type="button"
+            disabled={busy || !combined.trim()}
+            onClick={separate}
+          >
+            Separate into website + email
+          </button>
+        </>
+      )}
+
+      {mode === "two" && (
         <>
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
@@ -150,12 +220,6 @@ export function ContactImportForm() {
             emails alone still create contacts, websites alone get queued for
             scraping.
           </p>
-          <p className="hint">
-            Both halves on one line works too —{" "}
-            <code>facebook.com,info@facebook.com</code> pasted into either box is
-            split into the website and the address. The count below is what will
-            actually be saved, so you can check it before importing.
-          </p>
 
           {mismatch && (
             <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-[var(--color-warn)]">
@@ -169,7 +233,9 @@ export function ContactImportForm() {
             </p>
           )}
         </>
-      ) : (
+      )}
+
+      {mode === "single" && (
         <div>
           <label className="label" htmlFor="import-text">
             One per line
@@ -192,15 +258,46 @@ export function ContactImportForm() {
         </div>
       )}
 
-      <button
-        className="text-xs text-[var(--color-brand)] hover:underline"
-        type="button"
-        onClick={() => setPaired((current) => !current)}
-      >
-        {paired
-          ? "My list is already one-per-line instead"
-          : "Use two separate boxes instead"}
-      </button>
+      {note && <p className="text-xs text-[var(--color-brand)]">{note}</p>}
+
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+        {mode !== "combined" && (
+          <button
+            className="text-[var(--color-brand)] hover:underline"
+            type="button"
+            onClick={() => {
+              setMode("combined");
+              setNote(null);
+            }}
+          >
+            Paste both columns together
+          </button>
+        )}
+        {mode !== "two" && (
+          <button
+            className="text-[var(--color-brand)] hover:underline"
+            type="button"
+            onClick={() => {
+              setMode("two");
+              setNote(null);
+            }}
+          >
+            Use two separate boxes
+          </button>
+        )}
+        {mode !== "single" && (
+          <button
+            className="text-[var(--color-brand)] hover:underline"
+            type="button"
+            onClick={() => {
+              setMode("single");
+              setNote(null);
+            }}
+          >
+            My list is one-per-line
+          </button>
+        )}
+      </div>
 
       {(preview.rows.length > 0 ||
         preview.websitesOnly.length > 0 ||

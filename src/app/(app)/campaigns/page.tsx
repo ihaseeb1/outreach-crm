@@ -1,7 +1,6 @@
-import Link from "next/link";
-
 import { CampaignCreateForm } from "@/components/campaign-create-form";
 import { CampaignDeleteButton } from "@/components/campaign-delete-button";
+import { CampaignNameCell } from "@/components/campaign-name-cell";
 import { RunJobButton } from "@/components/run-job-button";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
@@ -86,12 +85,10 @@ export default async function CampaignsPage() {
                   return (
                     <tr key={campaign.id}>
                       <td>
-                        <Link
-                          className="font-medium text-[var(--color-brand)] hover:underline"
-                          href={`/campaigns/${campaign.id}`}
-                        >
-                          {campaign.name}
-                        </Link>
+                        <CampaignNameCell
+                          campaignId={campaign.id}
+                          name={campaign.name}
+                        />
                       </td>
                       <td>
                         <span className={`badge ${STATUS_STYLES[campaign.status] ?? ""}`}>
