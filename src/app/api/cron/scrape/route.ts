@@ -18,6 +18,16 @@ export async function GET(request: Request) {
   );
 
   const supabase = createSupabaseAdminClient();
+
+  // Purge scrape jobs soft-deleted more than 30 days ago (spec §6). Best-effort:
+  // no-ops until migration 0010 adds the deleted_at column.
+  try {
+    const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    await supabase.from("scrape_jobs").delete().lt("deleted_at", cutoff);
+  } catch {
+    // Column not there yet — ignore.
+  }
+
   const result = await runScrapeBatch(supabase, {
     limit: Number.isFinite(limit) ? Math.min(limit, 25) : 8,
   });

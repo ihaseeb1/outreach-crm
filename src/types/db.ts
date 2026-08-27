@@ -47,6 +47,8 @@ export interface ScrapeJob {
   created_at: Timestamp;
   updated_at: Timestamp;
   completed_at: Timestamp | null;
+  /** Soft delete (migration 0010); absent on older rows. */
+  deleted_at?: Timestamp | null;
 }
 
 export type WebsiteStatus =

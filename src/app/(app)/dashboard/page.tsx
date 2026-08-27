@@ -38,12 +38,17 @@ export default async function DashboardPage() {
     .eq("workspace_id", workspaceId)
     .eq("status", "pending");
 
-  const { data: recentJobs } = await supabase
+  const { data: recentJobRows } = await supabase
     .from("scrape_jobs")
-    .select("id, status, total_count, processed_count, found_count, created_at")
+    .select("*")
     .eq("workspace_id", workspaceId)
     .order("created_at", { ascending: false })
-    .limit(5);
+    .limit(15);
+  // Drop soft-deleted jobs in JS so this never references a column that may
+  // predate migration 0010.
+  const recentJobs = ((recentJobRows ?? []) as (JobRow & { deleted_at?: string | null })[])
+    .filter((job) => !job.deleted_at)
+    .slice(0, 5);
 
   const postalAddressSet = Boolean(session.workspace.sending_postal_address);
 

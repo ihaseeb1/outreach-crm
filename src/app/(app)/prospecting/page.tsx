@@ -1,21 +1,14 @@
 import Link from "next/link";
 
 import { RunJobButton } from "@/components/run-job-button";
+import { ScrapeJobsTable } from "@/components/scrape-jobs-table";
 import { UrlImportForm } from "@/components/url-import-form";
-import { fmtDateTime } from "@/lib/datetime";
 import { WebsiteTable } from "@/components/website-table";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
 import type { ScrapeJob, Website } from "@/types/db";
 
 export const dynamic = "force-dynamic";
-
-const JOB_STATUS_STYLES: Record<string, string> = {
-  pending: "bg-gray-100 text-gray-700",
-  running: "bg-blue-50 text-[var(--color-brand)]",
-  completed: "bg-green-50 text-[var(--color-ok)]",
-  failed: "bg-red-50 text-[var(--color-danger)]",
-};
 
 const STATUS_OPTIONS = [
   { value: "", label: "All statuses" },
@@ -53,12 +46,22 @@ export default async function ProspectingPage({
 
   const supabase = await createSupabaseServerClient();
 
-  const { data: jobs } = await supabase
+  // Fetch a few extra and drop soft-deleted ones in JS, so the query never
+  // references the deleted_at column (which may predate migration 0010).
+  const { data: jobRows } = await supabase
     .from("scrape_jobs")
     .select("*")
     .eq("workspace_id", session.workspace.id)
     .order("created_at", { ascending: false })
-    .limit(10);
+    .limit(30);
+  const jobs = ((jobRows ?? []) as ScrapeJob[])
+    .filter((job) => !job.deleted_at)
+    .slice(0, 10);
+
+  const canDeleteJobs =
+    session.workspace.owner_id === session.userId ||
+    session.appRole === "super_admin" ||
+    session.appRole === "admin";
 
   let query = supabase
     .from("websites")
@@ -120,37 +123,10 @@ export default async function ProspectingPage({
         <h2 className="border-b border-[var(--color-line)] px-5 py-3 text-sm font-semibold">
           Scrape jobs
         </h2>
-        {(jobs ?? []).length === 0 ? (
+        {jobs.length === 0 ? (
           <p className="px-5 py-6 text-sm text-[var(--color-muted)]">No jobs yet.</p>
         ) : (
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Created</th>
-                  <th>Status</th>
-                  <th>Processed</th>
-                  <th>Emails found</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(jobs as ScrapeJob[]).map((job) => (
-                  <tr key={job.id}>
-                    <td>{fmtDateTime(job.created_at)}</td>
-                    <td>
-                      <span className={`badge ${JOB_STATUS_STYLES[job.status] ?? ""}`}>
-                        {job.status}
-                      </span>
-                    </td>
-                    <td>
-                      {job.processed_count} / {job.total_count}
-                    </td>
-                    <td>{job.found_count}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <ScrapeJobsTable jobs={jobs} canDelete={canDeleteJobs} />
         )}
       </section>
 
