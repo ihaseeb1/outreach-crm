@@ -1,7 +1,56 @@
-# Handover — 17, 20, 21, 27 August 2026
+# Handover — 17, 20, 21, 27, 28 August 2026
 
 Read this first, then `DEPLOY_STATUS.md` for hosting and `BUILD_LOG.md` for the
 original seven build phases.
+
+---
+
+## Phase 1 of the build spec, 28 August (sixth session)
+
+Deployed to `main`. `npm run typecheck` clean, `npm run smoke` **319 passed /
+0 failed** (11 new), `npm run build` clean. **Needs migration
+`0008_worker_runs.sql`** — apply it by hand in the Supabase SQL editor. The
+code survives a deploy landing before it (heartbeat writes no-op, the banner
+just does not render); apply 0008 to turn the heartbeat on.
+
+A 12-section "Build & Fix Spec" now drives phased work; Phase 0 audit found the
+app already covers ~70% of it. Three gate decisions: **warmup keeps the shared
+daily cap** (not a separate budget), **scheduler stays GitHub Actions**
+(augment, don't re-platform), **build the multi-user approval gate** (a later
+phase). This session shipped Phase 1:
+
+1. **§2 Follow-ups beat first-touch for quota.** `runCampaignBatch` used to
+   loop campaigns and order each by `next_send_at` only, so a new campaign's
+   step-1s raced week-old follow-ups. It now gathers due contacts across every
+   in-window campaign and orders them with the pure `orderByPriority`
+   (`src/campaigns/priority.ts`): tier 1 = step ≥ 2, tier 2 = step 1, and
+   round-robin across campaigns within a tier so a big new list cannot starve
+   the others. Per-campaign resources (steps, mailboxes, config) load once and
+   cache. Covered by smoke tests including the spec's 20-follow-ups-then-30-new
+   scenario.
+2. **§4 "Why isn't this sending?"** `src/campaigns/blockers.ts` — a pure
+   `blockerReason()` returning the first reason a contact is not going out
+   (suppressed, bad address, campaign paused, no step, no mailbox, scheduled,
+   outside window, failed, paused). Shown as a **"Not sending"** column plus an
+   **"N not sending"** badge on the campaign page. Reads one extra suppression
+   lookup over the page's addresses; everything else comes from data already
+   loaded.
+3. **§9 Worker heartbeat.** `worker_runs` table (migration 0008) + best-effort
+   `recordWorkerRun` in all six cron routes + `readHeartbeat`
+   (`src/lib/heartbeat.ts`) driving a red **dashboard banner** when the send
+   dispatcher has not run in > 90 min (three missed 30-min ticks). So "nothing
+   is sending" can no longer pass unnoticed.
+
+**Where to check live after applying 0008 + this deploy:**
+1. **Campaign page** — the enrolled table has a "Not sending" column; stuck
+   step-1 contacts show a concrete reason, and the header shows an "N not
+   sending" badge.
+2. **Dashboard** — no banner while ticks are fresh; the red "send dispatcher
+   may have stopped" banner appears if `worker_runs` for `campaigns` goes stale.
+   Fire a `campaigns` tick (Actions → Cron tick → Run workflow) to seed the
+   first row.
+3. **Priority** — with two active campaigns, one with due follow-ups and one
+   freshly enrolled, the follow-ups send first. (Pure-logic; verified in tests.)
 
 ---
 
