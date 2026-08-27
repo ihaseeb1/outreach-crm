@@ -85,7 +85,7 @@ export default async function DealsPage({
         </p>
       </div>
 
-      <DealsToolbar query={search.toString()} />
+      <DealsToolbar query={search.toString()} placementReady={placementReady} />
 
       <form method="get" className="card card-pad grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <div className="sm:col-span-2">

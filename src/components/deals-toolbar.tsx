@@ -5,7 +5,14 @@ import { useState } from "react";
 import { DealForm } from "@/components/deal-form";
 
 /** Export controls plus the "add a deal by hand" form. */
-export function DealsToolbar({ query }: { query: string }) {
+export function DealsToolbar({
+  query,
+  placementReady = false,
+}: {
+  query: string;
+  /** Migration 0012 applied — show the placement fields on the new-deal form. */
+  placementReady?: boolean;
+}) {
   const [copied, setCopied] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
 
@@ -49,7 +56,10 @@ export function DealsToolbar({ query }: { query: string }) {
       {showForm && (
         <div className="card card-pad">
           <h2 className="mb-3 text-sm font-semibold">New deal</h2>
-          <DealForm onSaved={() => setShowForm(false)} />
+          <DealForm
+            placementReady={placementReady}
+            onSaved={() => setShowForm(false)}
+          />
         </div>
       )}
     </div>
