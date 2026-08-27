@@ -47,6 +47,8 @@ import {
 import { copyName } from "../src/campaigns/duplicate";
 import { orderByPriority, sendTier } from "../src/campaigns/priority";
 import { blockerReason, type BlockerInput } from "../src/campaigns/blockers";
+import { cleanupStatuses, isCleanable } from "../src/campaigns/cleanup";
+import { parseArchiveView } from "../src/lib/contact-archive";
 import { canStartAnother } from "../src/mail/poll";
 import {
   decideInbound,
@@ -3456,6 +3458,41 @@ test("a failed enrolment surfaces its error", () => {
   const b = blockerReason(baseBlocker({ status: "failed", lastError: "SMTP 550" }));
   assert.equal(b?.code, "failed");
   assert.ok(b?.reason.includes("SMTP 550"));
+});
+
+console.log("\ncampaign cleanup + contact archive (§8)");
+
+test("cleanup clears bounced and failed by default, nothing live", () => {
+  const s = cleanupStatuses();
+  assert.deepEqual(s, ["bounced", "failed"]);
+  assert.ok(!s.includes("active" as never));
+  assert.ok(!s.includes("pending" as never));
+});
+
+test("the finished toggle adds completed and opted-out", () => {
+  assert.deepEqual(cleanupStatuses({ finished: true }), [
+    "bounced",
+    "failed",
+    "completed",
+    "unsubscribed",
+  ]);
+});
+
+test("isCleanable only accepts dead-end statuses", () => {
+  for (const ok of ["bounced", "failed", "completed", "unsubscribed"]) {
+    assert.equal(isCleanable(ok), true, ok);
+  }
+  for (const live of ["pending", "active", "replied", "paused", "nonsense"]) {
+    assert.equal(isCleanable(live), false, live);
+  }
+});
+
+test("archive view parses to the working set unless told otherwise", () => {
+  assert.equal(parseArchiveView(undefined), "active");
+  assert.equal(parseArchiveView(""), "active");
+  assert.equal(parseArchiveView("garbage"), "active");
+  assert.equal(parseArchiveView("archived"), "archived");
+  assert.equal(parseArchiveView("all"), "all");
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

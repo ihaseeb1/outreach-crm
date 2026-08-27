@@ -6,6 +6,7 @@ import { getSession } from "@/lib/workspace";
 import { logActivity } from "@/lib/activity";
 import { suppressEmail } from "@/mail/suppressions";
 import { enrollContacts } from "@/campaigns/enroll";
+import { isCleanable } from "@/campaigns/cleanup";
 import {
   describeExclusions,
   loadEnrolments,
@@ -184,10 +185,6 @@ export async function POST(request: Request) {
   }
 }
 
-/** Statuses that a bulk purge is allowed to hard-remove. Dead ends only —
- * a purge must never be able to yank a contact out of a live sequence. */
-const PURGEABLE = new Set(["bounced", "failed", "unsubscribed", "completed"]);
-
 /**
  * Removes contacts from a campaign.
  *
@@ -214,7 +211,7 @@ export async function DELETE(request: Request) {
     const statuses = (params.get("statuses") ?? "")
       .split(",")
       .map((s) => s.trim())
-      .filter((s) => PURGEABLE.has(s));
+      .filter((s) => isCleanable(s));
     if (statuses.length === 0) {
       return NextResponse.json(
         { error: "Nothing to purge — allowed statuses are bounced, failed, unsubscribed, completed." },

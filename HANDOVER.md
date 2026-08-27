@@ -5,6 +5,48 @@ original seven build phases.
 
 ---
 
+## Phase 3b §8 — contact archive + lifecycle filters + campaign cleanup, 28 August (seventh session)
+
+Deployed to `main`. Typecheck clean, smoke **323/0**, build clean. **Needs
+migration `0011_contact_archive.sql`** — hand-apply in Supabase (project ref
+`rqztbqxzhykybnejjuba`). The code is deploy-safe before it runs: readers probe
+for the `archived_at` column and only apply the archive filter when it exists,
+so the Contacts list keeps working; the archive button returns a clear "apply
+migration 0011" message until then.
+
+§8 splits into three, two of which were genuinely missing:
+
+- **Contact archive / soft-delete** — `contacts.archived_at` (0011). Archiving
+  hides a contact from the working list *and* stops any live sequence (batched
+  `pending`/`active` → `completed`, `paused_reason = "Contact archived"`), but
+  keeps the record and its history — the reversible opposite of the permanent
+  DELETE. `POST /api/contacts/archive` (`{ids, archived}`) archives or restores;
+  `src/lib/contact-archive.ts` holds the column probe + `parseArchiveView`. The
+  Contacts table gains **Archive selected** / **Restore selected**, and Delete
+  is reworded **Delete permanently**. A **Show: Active / Archived / All** filter
+  (defaults to Active) appears once 0011 is applied.
+- **Lifecycle filters** — the Contacts filter form gains a **Lifecycle** select
+  over the workspace's pipeline stages (New → Contacted → Replied → … → Not a
+  fit), backed by the already-indexed `contacts.pipeline_stage`. Export honours
+  it too (the export route already accepted `stage`).
+- **One-click campaign cleanup** — already existed as `CampaignPurgeButton`
+  (bounced + failed). Extended: a **"also finished & opted-out"** toggle adds
+  `completed` + `unsubscribed`, so a finished campaign clears in one click. The
+  removable-status set now lives in `src/campaigns/cleanup.ts` (`cleanupStatuses`
+  / `isCleanable`), shared by the button and the DELETE route so they can never
+  disagree — and a live sequence is still impossible to purge.
+
+**Check live after applying 0011:** on Contacts, select a row → **Archive
+selected** hides it (and stops its sequence); the **Show** filter flips to
+**Archived** to find it → **Restore selected** brings it back. The **Lifecycle**
+select filters by stage. On a campaign, tick **also finished & opted-out** →
+the cleanup button clears completed/opted-out enrolments too.
+
+**Remaining build-spec work:** §7 crawler hardening + robots toggle, §9
+link-building placement tracker + live backlink verifier.
+
+---
+
 ## Phase 3a §6 — delete scrape jobs, 28 August (sixth session)
 
 Deployed to `main`. **Migration `0010_scrape_job_soft_delete.sql`** — APPLIED.

@@ -116,6 +116,8 @@ export interface Contact {
   pipeline_stage: string;
   tags: string[];
   meta: Record<string, unknown>;
+  /** Soft-delete (spec §8): set = archived/hidden from the working list. */
+  archived_at?: Timestamp | null;
   created_at: Timestamp;
   updated_at: Timestamp;
 }

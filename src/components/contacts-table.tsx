@@ -47,9 +47,15 @@ function verificationScore(contact: Contact): string {
 export function ContactsTable({
   contacts,
   stages,
+  archiveReady = false,
+  archiveView = "active",
 }: {
   contacts: Contact[];
   stages: StageOption[];
+  /** Whether migration 0011 is applied — gates the archive/restore controls. */
+  archiveReady?: boolean;
+  /** Which slice is on screen: the working set, the archived set, or all. */
+  archiveView?: "active" | "archived" | "all";
 }) {
   const router = useRouter();
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -144,6 +150,42 @@ export function ContactsTable({
     }
   }
 
+  /**
+   * Archive (soft-delete) or restore the selected contacts. Archiving hides
+   * them from the working list and stops any live sequence, but keeps the
+   * record — the safe, reversible alternative to Delete.
+   */
+  async function archive(archived: boolean) {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const response = await fetch("/api/contacts/archive", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ids: [...selected], archived }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Failed.");
+      setMessage(
+        archived
+          ? `Archived ${payload.archived}${
+              payload.sequences_stopped
+                ? `, stopped ${payload.sequences_stopped} sequence(s)`
+                : ""
+            }.`
+          : `Restored ${payload.archived}.`,
+      );
+      setSelected(new Set());
+      router.refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const showRestore = archiveView === "archived" || archiveView === "all";
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -164,13 +206,36 @@ export function ContactsTable({
         >
           Re-check
         </button>
+        {archiveReady && !showRestore && (
+          <button
+            className="btn-secondary"
+            type="button"
+            disabled={busy || selected.size === 0}
+            title="Hide from the list and stop any sequence, but keep the record — reversible"
+            onClick={() => void archive(true)}
+          >
+            Archive selected
+          </button>
+        )}
+        {archiveReady && showRestore && (
+          <button
+            className="btn-secondary"
+            type="button"
+            disabled={busy || selected.size === 0}
+            title="Return the archived contacts to the working list"
+            onClick={() => void archive(false)}
+          >
+            Restore selected
+          </button>
+        )}
         <button
           className="btn-secondary text-[var(--color-danger)]"
           type="button"
           disabled={busy || selected.size === 0}
+          title="Permanently remove the record. A re-scrape of the same site can re-add them."
           onClick={() => void remove(false)}
         >
-          Delete selected
+          Delete permanently
         </button>
         <button
           className="btn-secondary text-[var(--color-danger)]"
@@ -254,6 +319,11 @@ export function ContactsTable({
                   >
                     {contact.email}
                   </Link>
+                  {showRestore && contact.archived_at && (
+                    <span className="badge ml-2 bg-gray-100 text-gray-600">
+                      archived
+                    </span>
+                  )}
                 </td>
                 <td>
                   {[contact.first_name, contact.last_name]

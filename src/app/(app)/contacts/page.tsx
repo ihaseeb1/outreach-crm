@@ -3,6 +3,7 @@ import Link from "next/link";
 import { ContactImportForm } from "@/components/contact-import-form";
 import { ContactAddForm, ContactsTable } from "@/components/contacts-table";
 import { RunJobButton } from "@/components/run-job-button";
+import { archiveColumnExists, parseArchiveView } from "@/lib/contact-archive";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
 import type { Contact } from "@/types/db";
@@ -40,9 +41,18 @@ export default async function ContactsPage({
   const status = typeof params.status === "string" ? params.status : "";
   const domain = typeof params.domain === "string" ? params.domain : "";
   const search = typeof params.q === "string" ? params.q : "";
+  const stage = typeof params.stage === "string" ? params.stage : "";
   const page = Math.max(1, Number.parseInt(String(params.page ?? "1"), 10) || 1);
 
   const supabase = await createSupabaseServerClient();
+
+  // Archive is a soft-delete column that may not exist yet (migration 0011).
+  // Probe once; only apply the archive filter when it is really there, so the
+  // list keeps working before the migration is applied.
+  const archiveReady = await archiveColumnExists(supabase);
+  const archiveView = parseArchiveView(
+    typeof params.archive === "string" ? params.archive : undefined,
+  );
 
   let query = supabase
     .from("contacts")
@@ -52,18 +62,24 @@ export default async function ContactsPage({
     .range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
 
   if (status) query = query.eq("validation_status", status);
+  if (stage) query = query.eq("pipeline_stage", stage);
   if (domain) query = query.ilike("domain", `%${domain}%`);
   if (search) query = query.ilike("email", `%${search}%`);
+  if (archiveReady && archiveView === "active") query = query.is("archived_at", null);
+  if (archiveReady && archiveView === "archived")
+    query = query.not("archived_at", "is", null);
 
   const { data, count } = await query;
   const contacts = (data ?? []) as Contact[];
   const total = count ?? 0;
 
-  const { count: unvalidated } = await supabase
+  let unvalidatedQuery = supabase
     .from("contacts")
     .select("id", { count: "exact", head: true })
     .eq("workspace_id", session.workspace.id)
     .eq("validation_status", "unknown");
+  if (archiveReady) unvalidatedQuery = unvalidatedQuery.is("archived_at", null);
+  const { count: unvalidated } = await unvalidatedQuery;
 
   const { data: stageRows } = await supabase
     .from("pipeline_stages")
@@ -76,11 +92,17 @@ export default async function ContactsPage({
 
   const exportQuery = new URLSearchParams();
   if (status) exportQuery.set("status", status);
+  if (stage) exportQuery.set("stage", stage);
   if (domain) exportQuery.set("domain", domain);
   if (search) exportQuery.set("q", search);
 
+  // The archive view rides on the page/filter links but not on the CSV export
+  // (export always dumps the working set of matching columns).
+  const viewQuery = new URLSearchParams(exportQuery);
+  if (archiveView !== "active") viewQuery.set("archive", archiveView);
+
   const pageHref = (targetPage: number) => {
-    const next = new URLSearchParams(exportQuery);
+    const next = new URLSearchParams(viewQuery);
     next.set("page", String(targetPage));
     return `/contacts?${next.toString()}`;
   };
@@ -126,7 +148,7 @@ export default async function ContactsPage({
         </p>
       )}
 
-      <form method="get" className="card card-pad grid gap-3 sm:grid-cols-4">
+      <form method="get" className="card card-pad grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <div>
           <label className="label" htmlFor="q">
             Email contains
@@ -151,6 +173,36 @@ export default async function ContactsPage({
             ))}
           </select>
         </div>
+        <div>
+          <label className="label" htmlFor="stage">
+            Lifecycle
+          </label>
+          <select id="stage" name="stage" className="input" defaultValue={stage}>
+            <option value="">All stages</option>
+            {stages.map((option) => (
+              <option key={option.key} value={option.key}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        {archiveReady && (
+          <div>
+            <label className="label" htmlFor="archive">
+              Show
+            </label>
+            <select
+              id="archive"
+              name="archive"
+              className="input"
+              defaultValue={archiveView}
+            >
+              <option value="active">Active</option>
+              <option value="archived">Archived</option>
+              <option value="all">All</option>
+            </select>
+          </div>
+        )}
         <div className="flex items-end gap-2">
           <button className="btn-primary" type="submit">
             Filter
@@ -172,7 +224,12 @@ export default async function ContactsPage({
           </p>
         ) : (
           <div className="p-5">
-            <ContactsTable contacts={contacts} stages={stages} />
+            <ContactsTable
+              contacts={contacts}
+              stages={stages}
+              archiveReady={archiveReady}
+              archiveView={archiveView}
+            />
           </div>
         )}
       </section>
