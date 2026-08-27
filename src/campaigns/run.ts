@@ -347,6 +347,13 @@ async function processCampaignContact(
           : null,
         locked_until: null,
         last_error: null,
+        // Reset the attempt counter on every successful send. The claim RPC
+        // increments `attempts` on *every* claim (not every failure), and this
+        // was never cleared — so across a few steps a contact accumulated
+        // enough attempts that the next transient hiccup flipped it to "failed"
+        // and it silently dropped out of the follow-up queue forever. Counting
+        // attempts since the last success is what we actually want.
+        attempts: 0,
       })
       .eq("id", entry.id);
 

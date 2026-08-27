@@ -106,12 +106,22 @@ export async function runHealthChecks(
 
       if (verdict.status === "paused") {
         result.paused += 1;
+        // Drop the mailbox into warmup-only recovery: outreach is already
+        // blocked (loadMailboxes and the reserve both exclude paused), and
+        // turning warmup on — from a gentle floor, not the volume that got it
+        // paused — is what rebuilds the reputation. If warmup was already on this
+        // just resets the volume; if it was off, it starts now.
+        await supabase
+          .from("warmup_settings")
+          .update({ enabled: true, current_daily_volume: 5, last_ramped_on: today })
+          .eq("mailbox_id", mailbox.id);
+
         await logActivity(supabase, {
           workspaceId: mailbox.workspace_id,
           action: "mailbox.auto_paused",
           entityType: "mailbox",
           entityId: mailbox.id,
-          meta: { score: verdict.score, issues: verdict.issues },
+          meta: { score: verdict.score, issues: verdict.issues, warmup: "kept-on for recovery" },
         });
       } else if (mailbox.health_status === "paused") {
         result.recovered += 1;

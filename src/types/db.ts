@@ -77,9 +77,15 @@ export interface WebsiteMeta {
 export type ValidationStatus =
   | "unknown"
   | "valid"
+  | "safe"
+  | "catch_all"
+  | "invalid"
   | "invalid_syntax"
   | "no_mx"
   | "disposable"
+  | "spamtrap"
+  | "disabled"
+  | "inbox_full"
   | "role_account"
   | "suppressed"
   | "bounced";

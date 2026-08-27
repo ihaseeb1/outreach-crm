@@ -357,6 +357,8 @@ export default async function MailboxesPage({
                   id={mailbox.id}
                   email={mailbox.email}
                   isActive={mailbox.is_active}
+                  healthStatus={mailbox.health_status}
+                  pausedReason={mailbox.paused_reason}
                 />
               </div>
             );

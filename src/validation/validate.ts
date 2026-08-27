@@ -1,16 +1,21 @@
-import dns from "node:dns/promises";
-import validator from "validator";
-
-import { emailDomain, isRoleAccount, normalizeEmail } from "@/lib/email";
-import { isDisposableDomainName } from "@/validation/disposable";
+import {
+  isSendableStatus as engineIsSendable,
+  resolveMxRecords,
+  verifyEmail as engineVerify,
+  verifyMany as engineVerifyMany,
+  type VerificationMode,
+  type VerificationResult,
+} from "@/validation/verify-engine";
 import type { ValidationStatus } from "@/types/db";
 
 /**
- * Free email validation: syntax + MX + disposable-domain filter.
+ * Thin compatibility layer over the verification engine.
  *
- * Deliberately NOT an SMTP handshake / catch-all probe — those get your IP
- * blocked and are unreliable. True deliverability is confirmed downstream by
- * bounce handling (phase 3), which writes hard bounces to `suppressions`.
+ * The real work now lives in `verify-engine.ts` (the Reoon-style verifier:
+ * syntax, disposable, MX, role, free-provider, typo, gibberish and — in power
+ * mode — a real SMTP mailbox-existence + catch-all check). This file keeps the
+ * older `validateEmail`/`isSendableStatus`/`validateMany` surface that the rest
+ * of the app imports, so nothing else had to change name.
  */
 
 export interface ValidationResult {
@@ -20,98 +25,42 @@ export interface ValidationResult {
   isRole: boolean;
   checkedAt: string;
   detail?: string;
+  /** Full engine result, for callers that want the Reoon-style detail. */
+  verification: VerificationResult;
 }
-
-/** Per-process MX cache — one lookup per domain per job run. */
-const mxCache = new Map<string, { host: string | null; at: number }>();
-const MX_CACHE_TTL_MS = 60 * 60 * 1000;
 
 export async function resolveMxHost(domain: string): Promise<string | null> {
-  const key = domain.toLowerCase();
-  const cached = mxCache.get(key);
-  if (cached && Date.now() - cached.at < MX_CACHE_TTL_MS) return cached.host;
-
-  let host: string | null = null;
-  try {
-    const records = await dns.resolveMx(key);
-    if (records.length > 0) {
-      const best = [...records].sort((a, b) => a.priority - b.priority)[0];
-      host = best?.exchange ?? null;
-    }
-  } catch {
-    host = null;
-  }
-
-  mxCache.set(key, { host, at: Date.now() });
-  return host;
+  const records = await resolveMxRecords(domain);
+  return records[0] ?? null;
 }
 
-export async function validateEmail(rawEmail: string): Promise<ValidationResult> {
-  const email = normalizeEmail(rawEmail);
-  const checkedAt = new Date().toISOString();
-  const isRole = isRoleAccount(email);
-
-  if (!email || !validator.isEmail(email)) {
-    return {
-      email,
-      status: "invalid_syntax",
-      mxHost: null,
-      isRole,
-      checkedAt,
-      detail: "Failed RFC syntax check.",
-    };
-  }
-
-  const domain = emailDomain(email);
-
-  if (isDisposableDomainName(domain)) {
-    return {
-      email,
-      status: "disposable",
-      mxHost: null,
-      isRole,
-      checkedAt,
-      detail: "Domain is on the disposable-provider blocklist.",
-    };
-  }
-
-  const mxHost = await resolveMxHost(domain);
-  if (!mxHost) {
-    return {
-      email,
-      status: "no_mx",
-      mxHost: null,
-      isRole,
-      checkedAt,
-      detail: "Domain publishes no MX records — it cannot receive mail.",
-    };
-  }
-
-  // Role accounts are the normal target for link-building outreach, so they
-  // are tracked separately but still sendable.
+function toLegacy(result: VerificationResult): ValidationResult {
   return {
-    email,
-    status: isRole ? "role_account" : "valid",
-    mxHost,
-    isRole,
-    checkedAt,
+    email: result.email,
+    status: result.status,
+    mxHost: result.mxRecords[0] ?? null,
+    isRole: result.isRoleAccount,
+    checkedAt: result.checkedAt,
+    detail: result.detail,
+    verification: result,
   };
+}
+
+export async function validateEmail(
+  rawEmail: string,
+  options: { mode?: VerificationMode; mailFrom?: string } = {},
+): Promise<ValidationResult> {
+  return toLegacy(await engineVerify(rawEmail, options));
 }
 
 /** Statuses that are safe to send to (still subject to canSend()). */
 export function isSendableStatus(status: ValidationStatus): boolean {
-  return status === "valid" || status === "role_account";
+  return engineIsSendable(status);
 }
 
 export async function validateMany(
   emails: string[],
 ): Promise<ValidationResult[]> {
-  const results: ValidationResult[] = [];
-  // Small concurrency so a big batch does not open hundreds of DNS sockets.
-  const CONCURRENCY = 8;
-  for (let i = 0; i < emails.length; i += CONCURRENCY) {
-    const slice = emails.slice(i, i + CONCURRENCY);
-    results.push(...(await Promise.all(slice.map(validateEmail))));
-  }
-  return results;
+  const results = await engineVerifyMany(emails, { mode: "quick" });
+  return results.map(toLegacy);
 }

@@ -28,6 +28,9 @@ export async function GET(request: Request) {
       valid: result.valid,
       invalid: result.invalid,
       suppressed: result.suppressed,
+      removed: result.removed,
+      queued_for_power: result.queuedForPower,
+      deferred: result.deferred,
     },
   });
 }

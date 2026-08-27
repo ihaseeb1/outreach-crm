@@ -27,7 +27,9 @@ import type { Mailbox } from "@/types/db";
  *
  * Guards, in order, every time:
  *   1. warmup enabled for the mailbox
- *   2. mailbox active and not health-paused  (a paused mailbox stops warmup too)
+ *   2. mailbox active (a *manually* paused mailbox stops warmup; a *health*
+ *      auto-paused one keeps warming up so it can recover — outreach stays
+ *      blocked separately)
  *   3. rested since its last send
  *   4. within today's warmup volume
  *   5. canSend() inside sendEmail — so a suppressed address is never warmed to
@@ -142,7 +144,11 @@ export async function runWarmupSends(
 
       const { mailbox, settings, sentToday } = entry;
 
-      if (!mailbox.is_active || mailbox.health_status === "paused") continue;
+      // A manually paused mailbox (is_active false) stops everything. A
+      // health-auto-paused one keeps warming up on purpose: warmup is exactly
+      // how it recovers, while outreach stays blocked elsewhere. sendEmail
+      // passes allow_paused for warmup so the reserve does not refuse it.
+      if (!mailbox.is_active) continue;
       if (quotaRemaining(settings.current_daily_volume, sentToday) <= 0) continue;
       if (
         !mailboxIsRested(

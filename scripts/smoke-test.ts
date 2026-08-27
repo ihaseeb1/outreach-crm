@@ -138,6 +138,15 @@ import { extractFromHtml, isJunkEmail } from "../src/scraper/extract";
 import { isAllowed, parseRobots } from "../src/scraper/robots";
 import { isDisposableDomain } from "../src/validation/disposable";
 import {
+  deriveVerdict,
+  isSendableStatus,
+  isUndeliverableStatus,
+  type Signals,
+} from "../src/validation/verify-engine";
+import { editDistance, suggestDomain } from "../src/validation/typos";
+import { isGibberishLocalPart, isKnownTrapDomain } from "../src/validation/spamtrap";
+import { isFreeEmailDomain } from "../src/validation/free-providers";
+import {
   MAX_REPORT_MAILBOX_WINDOW,
   MAX_VOLUME_WINDOW,
   REPORT_MAILBOX_WINDOWS,
@@ -3144,6 +3153,171 @@ test("the workspace setting falls back rather than switching tracking off", () =
   assert.equal(resolveTrackingMode({ tracking: "nonsense" }), DEFAULT_TRACKING_MODE);
   assert.equal(resolveTrackingMode({ tracking: "off" }), "off");
   assert.equal(resolveTrackingMode({ tracking: "opens" }), "opens");
+});
+
+console.log("\nemail verification engine");
+
+function signals(overrides: Partial<Signals>): Signals {
+  return {
+    email: "jane@example.com",
+    username: "jane",
+    domain: "example.com",
+    validSyntax: true,
+    disposable: false,
+    role: false,
+    free: false,
+    mxRecords: ["mx.example.com"],
+    mxLookupFailed: false,
+    gibberish: false,
+    trapDomain: false,
+    didYouMean: null,
+    smtp: null,
+    ...overrides,
+  };
+}
+
+test("bad syntax is invalid_syntax and never sendable", () => {
+  const v = deriveVerdict(signals({ validSyntax: false }));
+  assert.equal(v.status, "invalid_syntax");
+  assert.equal(isSendableStatus(v.status), false);
+  assert.equal(isUndeliverableStatus(v.status), true);
+});
+
+test("a known trap domain is spamtrap", () => {
+  assert.equal(deriveVerdict(signals({ trapDomain: true })).status, "spamtrap");
+});
+
+test("disposable beats a good MX", () => {
+  assert.equal(deriveVerdict(signals({ disposable: true })).status, "disposable");
+});
+
+test("no MX records (a real lookup, no records) is no_mx", () => {
+  assert.equal(
+    deriveVerdict(signals({ mxRecords: [], mxLookupFailed: false })).status,
+    "no_mx",
+  );
+});
+
+test("a transient MX lookup failure is unknown, never no_mx — good contacts are not deleted", () => {
+  const v = deriveVerdict(signals({ mxRecords: [], mxLookupFailed: true }));
+  assert.equal(v.status, "unknown");
+  assert.equal(isUndeliverableStatus(v.status), false);
+});
+
+test("quick check with a clean domain is valid and sendable, and asks for a power check", () => {
+  const v = deriveVerdict(signals({}));
+  assert.equal(v.status, "valid");
+  assert.equal(v.deliverable, null); // not confirmed until power mode
+  assert.equal(isSendableStatus(v.status), true);
+});
+
+test("a role address on a clean domain is role_account, still sendable", () => {
+  assert.equal(deriveVerdict(signals({ role: true })).status, "role_account");
+});
+
+test("gibberish local part on a real domain is held as unknown, not deleted", () => {
+  const v = deriveVerdict(signals({ gibberish: true }));
+  assert.equal(v.status, "unknown");
+  assert.equal(isSendableStatus(v.status), false);
+  assert.equal(isUndeliverableStatus(v.status), false); // never auto-removed
+});
+
+test("power: SMTP accept becomes safe and deliverable", () => {
+  const v = deriveVerdict(
+    signals({
+      smtp: {
+        connected: true,
+        accepted: true,
+        catchAll: false,
+        rejected: false,
+        inboxFull: false,
+        disabled: false,
+        code: 250,
+        detail: "",
+      },
+    }),
+  );
+  assert.equal(v.status, "safe");
+  assert.equal(v.deliverable, true);
+});
+
+test("power: catch-all is sendable (won't bounce) but unconfirmed", () => {
+  const v = deriveVerdict(
+    signals({
+      smtp: {
+        connected: true,
+        accepted: true,
+        catchAll: true,
+        rejected: false,
+        inboxFull: false,
+        disabled: false,
+        code: 250,
+        detail: "",
+      },
+    }),
+  );
+  assert.equal(v.status, "catch_all");
+  assert.equal(isSendableStatus(v.status), true);
+});
+
+test("power: a 5xx rejection is invalid and gets removed", () => {
+  const v = deriveVerdict(
+    signals({
+      smtp: {
+        connected: true,
+        accepted: false,
+        catchAll: false,
+        rejected: true,
+        inboxFull: false,
+        disabled: false,
+        code: 550,
+        detail: "",
+      },
+    }),
+  );
+  assert.equal(v.status, "invalid");
+  assert.equal(isUndeliverableStatus(v.status), true);
+});
+
+test("power: a blocked/timed-out SMTP step keeps the quick verdict, never invalid", () => {
+  const v = deriveVerdict(
+    signals({
+      smtp: {
+        connected: false,
+        accepted: false,
+        catchAll: false,
+        rejected: false,
+        inboxFull: false,
+        disabled: false,
+        code: null,
+        detail: "smtp timeout",
+      },
+    }),
+  );
+  // Port 25 blocked (e.g. on Vercel) must not write off a good address.
+  assert.equal(v.status, "valid");
+});
+
+test("typo distance and domain suggestion", () => {
+  assert.equal(editDistance("gmial.com", "gmail.com"), 2);
+  assert.equal(suggestDomain("gmial.com"), "gmail.com");
+  assert.equal(suggestDomain("hotmial.com"), "hotmail.com");
+  assert.equal(suggestDomain("gmail.com"), null); // already correct
+  assert.equal(suggestDomain("some-real-company.co"), null); // not a typo of a consumer domain
+});
+
+test("gibberish detection is lenient with real local parts", () => {
+  assert.equal(isGibberishLocalPart("info"), false);
+  assert.equal(isGibberishLocalPart("jane.smith"), false);
+  assert.equal(isGibberishLocalPart("sales.team2024"), false);
+  assert.equal(isGibberishLocalPart("x7f9qz2kwptbvhr"), true);
+});
+
+test("free-provider and trap-domain lookups", () => {
+  assert.equal(isFreeEmailDomain("gmail.com"), true);
+  assert.equal(isFreeEmailDomain("acme-corp.com"), false);
+  assert.equal(isKnownTrapDomain("spamtrap.com"), true);
+  assert.equal(isKnownTrapDomain("gmail.com"), false);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

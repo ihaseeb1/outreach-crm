@@ -107,9 +107,12 @@ export async function sendEmail(
 
   // 2. Daily limit. Reserved before sending so two concurrent jobs can never
   //    push a mailbox past its cap.
-  const { data: reserved, error: reserveError } = await supabase.rpc(
-    "mailbox_reserve_send",
-    { mailbox: input.mailboxId },
+  // Warmup is allowed to run from a health-auto-paused mailbox — that is how a
+  // paused box recovers — but campaign and one-off sends are not.
+  const { data: reserved, error: reserveError } = await reserveSend(
+    supabase,
+    input.mailboxId,
+    kind === "warmup",
   );
   if (reserveError) {
     return { ok: false, code: "send_failed", reason: reserveError.message };
@@ -321,6 +324,35 @@ export async function sendEmail(
   } finally {
     await provider.close().catch(() => undefined);
   }
+}
+
+/**
+ * Reserves a daily-limit slot. Campaigns and one-off sends call the strict
+ * one-argument form (blocks a paused mailbox), which exists in every schema
+ * version. Warmup asks for the `allow_paused` form so a health-paused mailbox
+ * can still warm up — and if that migration has not been applied yet, it falls
+ * back to the strict form rather than failing the send. This is what lets a
+ * deploy land before the SQL migration without breaking sending.
+ */
+async function reserveSend(
+  supabase: SupabaseClient,
+  mailboxId: string,
+  allowPaused: boolean,
+): Promise<{ data: unknown; error: { message: string } | null }> {
+  if (!allowPaused) {
+    return supabase.rpc("mailbox_reserve_send", { mailbox: mailboxId });
+  }
+  const result = await supabase.rpc("mailbox_reserve_send", {
+    mailbox: mailboxId,
+    allow_paused: true,
+  });
+  if (
+    result.error &&
+    /function|schema cache|PGRST202|does not exist/i.test(result.error.message)
+  ) {
+    return supabase.rpc("mailbox_reserve_send", { mailbox: mailboxId });
+  }
+  return result;
 }
 
 /**

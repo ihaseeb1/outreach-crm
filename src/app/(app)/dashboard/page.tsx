@@ -29,7 +29,7 @@ export default async function DashboardPage() {
     .from("contacts")
     .select("id", { count: "exact", head: true })
     .eq("workspace_id", workspaceId)
-    .in("validation_status", ["valid", "role_account"]);
+    .in("validation_status", ["valid", "safe", "role_account", "catch_all"]);
 
   const { count: pendingSites } = await supabase
     .from("websites")

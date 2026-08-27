@@ -26,7 +26,7 @@ export default async function ComposePage() {
       .from("contacts")
       .select("id, email, first_name, last_name, website, domain, phone")
       .eq("workspace_id", session.workspace.id)
-      .in("validation_status", ["valid", "role_account"])
+      .in("validation_status", ["valid", "safe", "role_account", "catch_all"])
       .order("created_at", { ascending: false })
       .limit(300),
   ]);

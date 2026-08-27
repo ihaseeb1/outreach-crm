@@ -10,10 +10,16 @@ import type { Contact, ValidationStatus } from "@/types/db";
 const VALIDATION_STYLES: Record<ValidationStatus, string> = {
   unknown: "bg-gray-100 text-gray-700",
   valid: "bg-green-50 text-[var(--color-ok)]",
+  safe: "bg-green-50 text-[var(--color-ok)]",
+  catch_all: "bg-amber-50 text-[var(--color-warn)]",
   role_account: "bg-blue-50 text-[var(--color-brand)]",
+  invalid: "bg-red-50 text-[var(--color-danger)]",
   invalid_syntax: "bg-red-50 text-[var(--color-danger)]",
   no_mx: "bg-red-50 text-[var(--color-danger)]",
   disposable: "bg-amber-50 text-[var(--color-warn)]",
+  spamtrap: "bg-red-50 text-[var(--color-danger)]",
+  disabled: "bg-red-50 text-[var(--color-danger)]",
+  inbox_full: "bg-amber-50 text-[var(--color-warn)]",
   suppressed: "bg-amber-50 text-[var(--color-warn)]",
   bounced: "bg-red-50 text-[var(--color-danger)]",
 };

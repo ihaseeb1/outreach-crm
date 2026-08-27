@@ -107,7 +107,7 @@ export async function POST(request: Request) {
       if (filter.validation_status) {
         query = query.eq("validation_status", filter.validation_status);
       } else {
-        query = query.in("validation_status", ["valid", "role_account"]);
+        query = query.in("validation_status", ["valid", "safe", "role_account", "catch_all"]);
       }
       if (filter.domain) query = query.ilike("domain", `%${filter.domain}%`);
       if (filter.q) query = query.ilike("email", `%${filter.q}%`);

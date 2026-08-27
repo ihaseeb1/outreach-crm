@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { ClearAutoPauseButton } from "@/components/clear-auto-pause";
 import { RunJobButton } from "@/components/run-job-button";
 import { WarmupControls, type WarmupState } from "@/components/warmup-controls";
 import { fmtDateTime } from "@/lib/datetime";
@@ -100,8 +101,10 @@ export default async function DeliverabilityPage() {
             tell there is.
           </li>
           <li>
-            Warmup counts against the same daily limit as campaigns, and a mailbox
-            paused for health stops both.
+            Warmup counts against the same daily limit as campaigns. A mailbox
+            auto-paused for poor health stops <em>outreach</em> but keeps warming
+            up, so it can recover — you stay in control of the warmup toggle and
+            can resume sending by hand any time.
           </li>
           <li>Warmup mail never appears in your unified inbox.</li>
         </ul>
@@ -155,10 +158,16 @@ export default async function DeliverabilityPage() {
                   </div>
                 </div>
 
-                {mailbox.paused_reason && (
-                  <p className="rounded-md bg-red-50 px-3 py-2 text-xs text-[var(--color-danger)]">
-                    Auto-paused: {mailbox.paused_reason}
-                  </p>
+                {mailbox.health_status === "paused" && (
+                  <div className="rounded-md bg-red-50 px-3 py-2 text-xs text-[var(--color-danger)]">
+                    <p>Auto-paused{mailbox.paused_reason ? `: ${mailbox.paused_reason}` : "."}</p>
+                    <p className="mt-1 text-[var(--color-muted)]">
+                      Outreach is stopped. Warmup keeps running below so the
+                      mailbox can recover — you can also turn it on/off here by
+                      hand. Resume sending once it looks healthy again.
+                    </p>
+                    <ClearAutoPauseButton mailboxId={mailbox.id} />
+                  </div>
                 )}
 
                 <div className="grid gap-4 lg:grid-cols-2">

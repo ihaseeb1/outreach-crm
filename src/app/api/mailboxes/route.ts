@@ -180,6 +180,15 @@ export async function POST(request: Request) {
 const patchSchema = z.object({
   id: z.string().uuid(),
   is_active: z.boolean().optional(),
+  /**
+   * Clears an auto-pause set by the health job. Auto-pause lives on
+   * `health_status`, which the ordinary Pause/Resume button (that toggles
+   * `is_active`) never touched — so a mailbox the health job paused could not be
+   * revived from the UI at all, and the only way back was to remove and re-add
+   * it. Setting this to "healthy" is the explicit "I've looked, resume it" and
+   * also clears the stored reason.
+   */
+  health_status: z.enum(["healthy", "warning", "paused"]).optional(),
   daily_limit: z.number().int().min(1).max(2000).optional(),
   from_name: z.string().max(120).nullable().optional(),
   signature: z.string().max(2000).nullable().optional(),
@@ -259,6 +268,12 @@ export async function PATCH(request: Request) {
 
   for (const target of targets) {
     const row: Record<string, unknown> = { ...patch };
+    // Clearing an auto-pause also clears the reason it carried, so a revived
+    // mailbox does not keep showing "Auto-paused: bounce rate 9%".
+    if (patch.health_status === "healthy") {
+      row.paused_reason = null;
+      row.last_error = null;
+    }
     if (socials !== undefined) {
       row.meta = { ...(metaById.get(target) ?? {}), socials };
     }

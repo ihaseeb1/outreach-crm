@@ -1,7 +1,116 @@
-# Handover — 17, 20, 21 August 2026
+# Handover — 17, 20, 21, 27 August 2026
 
 Read this first, then `DEPLOY_STATUS.md` for hosting and `BUILD_LOG.md` for the
 original seven build phases.
+
+---
+
+## Four fixes, 27 August (fifth session)
+
+`npm run typecheck`, `npm run smoke` (305 tests, 14 new) and `npm run build` are
+all clean. **This session needs a migration: `0007_threads_verification_pause.sql`.**
+Apply it by hand in the Supabase SQL editor. The code is written to survive a
+deploy that lands *before* the migration (sending never breaks; the new features
+just stay dormant until the SQL is applied), but apply 0007 to actually turn them
+on.
+
+### 1. Two pitches to the same address now open as separate threads
+
+Conversations were keyed on `(workspace_id, contact_id)` — one thread per
+contact ever — so two different website pitches to the same publisher email
+collapsed into one inbox thread. They are now keyed on the **email thread**:
+`thread_key = coalesce(thread_id, 'contact:'||contact_id)`. Each pitch is its own
+outbound thread (its own root Message-ID, carried on replies via In-Reply-To), so
+the two split apart, while one back-and-forth exchange still stays together. Mail
+with no thread id falls back to the old per-contact grouping. Migration 0007 part
+A rewrites the `messages_attach_conversation` trigger and rebuilds existing
+conversations (they are derived data, and the workspace had no live reply threads,
+so the rebuild is safe).
+
+### 2. An auto-paused mailbox can be revived — and keeps warming up
+
+The health job auto-pauses by setting `health_status = 'paused'`, a field the
+Pause/Resume button (which only ever toggled `is_active`) never touched — so an
+auto-paused mailbox could not be un-paused from the UI at all, and the only way
+back was to remove and re-add it. Fixed on both ends:
+
+- **Manual un-pause.** `PATCH /api/mailboxes` now accepts `health_status`, and a
+  **"Resume sending (clear auto-pause)"** button appears on the mailbox card and
+  on Deliverability whenever a mailbox is auto-paused. It clears `health_status`
+  and `paused_reason`.
+- **Auto-paused → warmup only.** On auto-pause the health job now turns warmup on
+  and drops its volume to a floor of 5. Outreach stays blocked (loadMailboxes and
+  the send reserve both exclude paused), but **warmup keeps running so the mailbox
+  recovers**. `mailbox_reserve_send` gained an `allow_paused` argument (migration
+  0007 part C); `sendEmail` passes it true only for warmup, and falls back to the
+  strict one-arg call if the migration isn't applied yet.
+- The warmup on/off toggle and pacing were always reachable regardless of health
+  and still are — the manual controls are never locked now.
+
+### 3. Follow-ups keep sending; "agreed" reliably stops them
+
+- **The real bug:** the claim RPC increments `attempts` on *every* claim (not
+  every failure) and nothing ever reset it, so after a few steps a contact had
+  enough attempts that the next transient hiccup flipped it to `status = 'failed'`
+  and it silently dropped out of the follow-up queue forever. The successful-send
+  path now resets `attempts = 0`.
+- **Marking a deal "agreed" now stops the sequence even from the deals list.** The
+  stop only fired when the edit payload carried `contact_id`, which an edit
+  usually omits. It now resolves the contact from the saved deal
+  (`effectiveContactId`), so agreed/live/rejected stop the follow-ups as intended.
+- A genuine reply already stops the sequence (sets `status = 'replied'`); contacts
+  who never reply keep getting follow-ups on schedule, which is the default.
+
+### 4. Your own email verifier (Reoon-style, no third-party API)
+
+A full in-house verifier under **Verify** in the nav, plus automatic cleaning of
+imported/scraped lists. No external service — nothing leaves your infrastructure.
+
+- **Engine** (`src/validation/verify-engine.ts`) with two modes, exactly like the
+  reference tool: **quick** (syntax, disposable, MX, role, free-provider, typo and
+  gibberish heuristics — runs anywhere) and **power** (adds a real SMTP
+  conversation with the MX to confirm the mailbox exists and detect
+  catch-all / full / disabled — `src/validation/smtp-probe.ts`). Statuses match
+  the reference taxonomy: safe, valid, role_account, catch_all, disposable,
+  invalid, no_mx, invalid_syntax, disabled, inbox_full, spamtrap, unknown — with
+  an `overall_score` out of 100 and per-check detail.
+- **Auto-clean.** Imported and scraped contacts are quick-checked; anything
+  *permanently* undeliverable (bad syntax, genuinely dead domain, disposable,
+  spam-trap, disabled account, hard SMTP reject) is **removed from the list and
+  added to the suppression list** (per the "Delete + suppress" choice), so it can
+  never be emailed or re-imported. Survivors are queued for a deep power check.
+  Catch-all and valid remain sendable (per the "send to both" choice). A workspace
+  setting `settings.verification.auto_purge` (default on) can turn deletion off.
+- **Never deletes on a maybe.** Two deliberate safeguards, both covered by tests:
+  a *transient* MX lookup failure (DNS timeout / SERVFAIL) is held as `unknown`
+  and retried — it is never confused with a genuine no-MX and never deletes a
+  good contact (and failed lookups aren't cached, so one flaky moment can't write
+  off a whole domain). And `inbox_full` (over quota today) is *held*, not deleted
+  — the recipient is real and may be receiving again tomorrow.
+- **The power check needs outbound port 25**, which Vercel and GitHub Actions
+  block. It runs from **`scripts/verify-worker.ts`** on a box that allows port 25
+  (a small VPS is the reliable choice — many ISPs block 25). Until it runs,
+  quick-checked contacts stay sendable; running it further cuts bounces by dropping
+  addresses whose mailbox does not exist. The engine treats a blocked/timed-out
+  SMTP step as *indeterminate* (keeps the quick verdict) — a blocked host never
+  writes off a good address.
+- **UI:** `/verify` has a single-address checker (quick/power) with the full
+  detail card, and a bulk paste-a-list checker (quick, up to 300) with a summary
+  and a "copy the sendable ones" button.
+
+**Where to check live after applying 0007 and deploying:**
+1. **Verify** page — paste a mix of good/bad addresses into the list checker; bad
+   ones come back invalid/disposable/no_mx, and "copy sendable" copies only the
+   good ones.
+2. **Import** a small list with an obvious typo/disposable — the result says
+   "removed N undeliverable" and they land on Suppressions.
+3. **Mailboxes / Deliverability** — an auto-paused mailbox shows a red banner with
+   **Resume sending**; clicking it clears the pause. Warmup toggle still works.
+4. **Deals** — mark a deal **agreed** from the list; the contact's sequence stops
+   (check the campaign's enrolled table shows them completed).
+5. **Power worker** — run `npx tsx scripts/verify-worker.ts` on a port-25 box with
+   `NEXT_PUBLIC_SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` set; it reports
+   "checked N, removed M".
 
 ---
 

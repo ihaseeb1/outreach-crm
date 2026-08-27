@@ -7,6 +7,7 @@ import { pairColumns, parseContactImport } from "@/lib/import-parse";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getSession } from "@/lib/workspace";
 import { suppressedSubset } from "@/mail/suppressions";
+import { validateContacts } from "@/validation/run";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -64,6 +65,7 @@ export async function POST(request: Request) {
     : new Set<string>();
 
   let added = 0;
+  let importedIds: string[] = [];
 
   if (rows.length > 0) {
     const now = new Date().toISOString();
@@ -88,6 +90,21 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
     added = (data ?? []).length;
+    importedIds = ((data ?? []) as { id: string }[]).map((row) => row.id);
+  }
+
+  // Verify what just came in and drop the undeliverable straight away, so a bad
+  // paste never sits in the list waiting to bounce. Quick mode (no port 25), and
+  // bounded so the request still returns in time — the rest are picked up by the
+  // validate cron, which removes undeliverable addresses the same way.
+  let removedInvalid = 0;
+  if (importedIds.length > 0) {
+    const verdict = await validateContacts(supabase, {
+      workspaceId,
+      ids: importedIds.slice(0, 150),
+      mode: "quick",
+    });
+    removedInvalid = verdict.removed;
   }
 
   // Websites: the ones pasted alone, plus — when asked — the ones that came
@@ -143,6 +160,7 @@ export async function POST(request: Request) {
       parsed: result.rows.length,
       added,
       queued,
+      removed_invalid: removedInvalid,
       skipped: result.skipped.length,
     },
   });
@@ -150,7 +168,8 @@ export async function POST(request: Request) {
   return NextResponse.json({
     ok: true,
     parsed: result.rows.length,
-    added,
+    added: added - removedInvalid,
+    removedInvalid,
     duplicates: rows.length - added,
     queued,
     truncated,

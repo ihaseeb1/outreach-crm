@@ -205,15 +205,38 @@ export async function POST(request: Request) {
   // not turn a successful save into an error. The outcome is reported back so
   // the form can say what happened instead of pretending it worked.
   let starred: StarOutcome | null = null;
+
+  // The contact this deal is about. On an *edit* the client often omits
+  // contact_id (it only sends changed fields), so fall back to whatever the
+  // saved deal already carries — otherwise marking a deal "agreed" from the
+  // deals list would never stop the follow-up sequence, and the publisher you
+  // just agreed terms with keeps getting chased.
+  const effectiveContactId =
+    fields.contact_id ??
+    ((
+      await supabase
+        .from("deals")
+        .select("contact_id")
+        .eq("id", dealId)
+        .eq("workspace_id", session.workspace.id)
+        .maybeSingle()
+    ).data as { contact_id: string | null } | null)?.contact_id ??
+    null;
+
   const conversationId =
     fields.conversation_id ??
-    (fields.contact_id
+    (effectiveContactId
       ? ((
           await supabase
             .from("conversations")
             .select("id")
-            .eq("contact_id", fields.contact_id)
+            .eq("contact_id", effectiveContactId)
             .eq("workspace_id", session.workspace.id)
+            // A contact can now have several threads (one per pitch), so pick the
+            // most recent rather than assuming exactly one — maybeSingle() would
+            // error on more than one row.
+            .order("last_message_at", { ascending: false })
+            .limit(1)
             .maybeSingle()
         ).data as { id: string } | null)?.id ?? null
       : null);
@@ -227,13 +250,13 @@ export async function POST(request: Request) {
 
   // Closing a deal has to stop the follow-ups, otherwise the sequence keeps
   // chasing somebody you have already agreed terms with.
-  const stop = fields.contact_id ? dealStatusStops(fields.status) : null;
+  const stop = effectiveContactId ? dealStatusStops(fields.status) : null;
   let stoppedSequences = 0;
 
-  if (stop && fields.contact_id) {
+  if (stop && effectiveContactId) {
     const outcome = await stopOutreachForContact(supabase, {
       workspaceId: session.workspace.id,
-      contactId: fields.contact_id,
+      contactId: effectiveContactId,
       reason: stop.reason,
       suppress: stop.suppress,
       suppressionReason: stop.suppressionReason,

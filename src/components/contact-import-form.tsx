@@ -8,6 +8,7 @@ import { pairColumns, parseContactImport, separateCombined } from "@/lib/import-
 interface ImportResult {
   parsed: number;
   added: number;
+  removedInvalid: number;
   duplicates: number;
   queued: number;
   truncated: number;
@@ -355,6 +356,14 @@ export function ContactImportForm() {
             {result.duplicates > 0 && `, ${result.duplicates} already existed`}
             {result.queued > 0 && `, queued ${result.queued} website(s) for scraping`}.
           </p>
+          {result.removedInvalid > 0 && (
+            <p className="text-[var(--color-warn)]">
+              Removed {result.removedInvalid} undeliverable address(es) on the way
+              in (bad syntax, dead domain, disposable or spam-trap) and added them
+              to your suppression list. The rest are being deep-checked in the
+              background.
+            </p>
+          )}
           {result.truncated > 0 && (
             <p className="text-[var(--color-warn)]">
               {result.truncated} row(s) past the 5,000 limit were not imported —
