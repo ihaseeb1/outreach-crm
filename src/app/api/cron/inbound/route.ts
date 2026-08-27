@@ -1,5 +1,6 @@
 import { assertCronAuthorized, jobResponse } from "@/lib/cron";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { recordWorkerRun } from "@/lib/heartbeat";
 import { runInboundPoll, summarisePoll } from "@/mail/poll";
 
 export const runtime = "nodejs";
@@ -29,6 +30,13 @@ export async function GET(request: Request) {
     concurrency: 6,
     budgetMs: 40_000,
     includeInactive: true,
+  });
+
+  await recordWorkerRun(supabase, {
+    job: "inbound",
+    ok: true,
+    processed: polled,
+    skipped: deferred,
   });
 
   return jobResponse({

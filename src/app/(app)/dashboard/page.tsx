@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { fmtDateTime } from "@/lib/datetime";
+import { readHeartbeat } from "@/lib/heartbeat";
 import { requireSession } from "@/lib/workspace";
 
 export const dynamic = "force-dynamic";
@@ -46,6 +47,10 @@ export default async function DashboardPage() {
 
   const postalAddressSet = Boolean(session.workspace.sending_postal_address);
 
+  // Heartbeat: has the send dispatcher run recently? Null means the table is
+  // not there yet (migration 0008 unapplied) — then we simply show nothing.
+  const heartbeat = await readHeartbeat(supabase);
+
   const stats = [
     { label: "Websites", value: websites, href: "/prospecting" },
     { label: "Contacts", value: contacts, href: "/contacts" },
@@ -59,6 +64,23 @@ export default async function DashboardPage() {
         <h1 className="text-2xl font-semibold">Dashboard</h1>
         <p className="hint mt-1">{session.workspace.name}</p>
       </div>
+
+      {heartbeat?.stale && (
+        <div className="card card-pad border-[var(--color-danger)] bg-red-50">
+          <p className="text-sm font-semibold text-[var(--color-danger)]">
+            ⚠ The send dispatcher may have stopped.
+          </p>
+          <p className="hint mt-1">
+            {heartbeat.lastRunAt
+              ? `Last successful campaign tick was ${fmtDateTime(
+                  heartbeat.lastRunAt,
+                )} (${heartbeat.ageMinutes} min ago). Ticks normally run every 30 minutes.`
+              : "No campaign tick has been recorded yet."}{" "}
+            Check the GitHub Actions “Cron tick” workflow (and its Actions-minutes
+            budget), then run it manually if needed.
+          </p>
+        </div>
+      )}
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {stats.map((stat) => (

@@ -12,6 +12,7 @@ import {
   recordSend,
   type RotationMailbox,
 } from "@/campaigns/rotation";
+import { orderByPriority } from "@/campaigns/priority";
 import { sendingAllowance } from "@/warmup/plan";
 import { contactVars, renderTemplate } from "@/mail/template";
 import { fetchSendingConfig, sendEmail } from "@/mail/send";
@@ -80,58 +81,113 @@ export async function runCampaignBatch(
   const campaigns = (campaignRows ?? []) as Campaign[];
 
   const now = new Date();
-  let remaining = budget;
+  const ignoreWindow = options.ignoreWindow ?? false;
 
+  // First pass: which campaigns may send this tick. A campaign outside its
+  // window is skipped (noted) unless this is a manual, window-ignoring run.
+  const windows = new Map<string, ResolvedWindow>();
+  const sendable: Campaign[] = [];
   for (const campaign of campaigns) {
-    if (remaining <= 0) break;
-
     const window = resolveWindow(campaign.settings);
-    if (!options.ignoreWindow && !isWithinSendWindow(now, window)) {
+    const inWindow = isWithinSendWindow(now, window);
+    if (!ignoreWindow && !inWindow) {
       result.notes.push(`${campaign.name}: outside sending window`);
       continue;
     }
-    if (options.ignoreWindow && !isWithinSendWindow(now, window)) {
+    if (ignoreWindow && !inWindow) {
       result.notes.push(
         `${campaign.name}: sent outside the window because this was a manual run`,
       );
     }
+    windows.set(campaign.id, window);
+    sendable.push(campaign);
+  }
 
-    const used = await runCampaign(
-      supabase,
-      campaign,
-      window,
-      remaining,
-      result,
-      options.ignoreWindow ?? false,
-    );
-    remaining -= used;
+  // Gather every due contact across all sendable campaigns, then order them so
+  // follow-ups (step >= 2) spend the tick's quota before any first-touch, and
+  // so one freshly-enrolled campaign cannot starve the others (spec §2). The
+  // ordering is a pure function; see campaigns/priority.ts.
+  const due: CampaignContact[] = [];
+  for (const campaign of sendable) {
+    const rows = await loadDueContacts(supabase, campaign, budget, ignoreWindow);
+    due.push(...rows);
+  }
+  const ordered = orderByPriority(due);
+
+  // Second pass: process in priority order until the tick's send budget is
+  // spent. Per-campaign resources (steps, mailboxes, sending config) are loaded
+  // once and cached — an unusable campaign caches as null so its remaining
+  // contacts are skipped without re-querying.
+  const contexts = new Map<string, CampaignContext | null>();
+  let remaining = budget;
+
+  for (const entry of ordered) {
+    if (remaining <= 0) break;
+
+    let ctx = contexts.get(entry.campaign_id);
+    if (ctx === undefined) {
+      const campaign = sendable.find((c) => c.id === entry.campaign_id);
+      ctx = campaign
+        ? await loadCampaignContext(
+            supabase,
+            campaign,
+            windows.get(campaign.id) ?? resolveWindow(campaign.settings),
+            result,
+          )
+        : null;
+      contexts.set(entry.campaign_id, ctx);
+    }
+    if (!ctx) continue; // no steps or no mailbox — note already recorded
+
+    const { data: claimed } = await supabase.rpc("campaign_contact_claim", {
+      contact_row: entry.id,
+      lock_seconds: 300,
+    });
+    if (claimed !== true) continue;
+
+    const outcome = await processCampaignContact(supabase, {
+      campaign: ctx.campaign,
+      entry,
+      steps: ctx.steps,
+      mailboxes: ctx.mailboxes,
+      window: ctx.window,
+      postalAddress: ctx.postalAddress,
+      tracking: ctx.tracking,
+    });
+
+    switch (outcome) {
+      case "sent":
+        result.sent += 1;
+        remaining -= 1;
+        break;
+      case "completed":
+        result.completed += 1;
+        break;
+      case "stopped":
+        result.stopped += 1;
+        break;
+      case "failed":
+        result.failed += 1;
+        break;
+      default:
+        result.skipped += 1;
+    }
   }
 
   return result;
 }
 
-async function runCampaign(
+/** The due, unclaimed contacts for one campaign — capped so a big campaign
+ * cannot pull the whole table into memory. Ordering across campaigns is done
+ * afterwards by orderByPriority; the SQL order here only bounds *which* rows
+ * a cap of budget*2 keeps (the oldest-due ones). */
+async function loadDueContacts(
   supabase: SupabaseClient,
   campaign: Campaign,
-  window: ResolvedWindow,
   budget: number,
-  result: CampaignBatchResult,
   ignoreWindow: boolean,
-): Promise<number> {
-  const steps = await loadSteps(supabase, campaign.id);
-  if (steps.length === 0) {
-    result.notes.push(`${campaign.name}: no sequence steps`);
-    return 0;
-  }
-
-  const mailboxes = await loadMailboxes(supabase, campaign);
-  if (mailboxes.length === 0) {
-    result.notes.push(`${campaign.name}: no usable mailbox`);
-    return 0;
-  }
-
-  const now = new Date();
-  const iso = now.toISOString();
+): Promise<CampaignContact[]> {
+  const iso = new Date().toISOString();
 
   let dueQuery = supabase
     .from("campaign_contacts")
@@ -155,58 +211,47 @@ async function runCampaign(
     dueQuery = dueQuery.lte("next_send_at", iso);
   }
 
-  const { data: dueRows } = await dueQuery;
+  const { data } = await dueQuery;
+  return (data ?? []) as CampaignContact[];
+}
 
-  const due = (dueRows ?? []) as CampaignContact[];
-  let used = 0;
+interface CampaignContext {
+  campaign: Campaign;
+  window: ResolvedWindow;
+  steps: SequenceStep[];
+  mailboxes: RotationMailbox[];
+  postalAddress: string | null;
+  tracking: TrackingMode;
+}
 
-  // Read once for the whole batch: both the postal address and whether these
-  // sends carry tracking come off the same workspace row, and sendEmail would
-  // otherwise fetch it again for every contact.
+/** Loads everything a campaign needs to send: its steps, its usable mailbox
+ * pool, and the workspace's postal address + tracking mode (read once so
+ * sendEmail does not re-fetch per contact). Returns null — and records why —
+ * when the campaign has no steps or no usable mailbox. */
+async function loadCampaignContext(
+  supabase: SupabaseClient,
+  campaign: Campaign,
+  window: ResolvedWindow,
+  result: CampaignBatchResult,
+): Promise<CampaignContext | null> {
+  const steps = await loadSteps(supabase, campaign.id);
+  if (steps.length === 0) {
+    result.notes.push(`${campaign.name}: no sequence steps`);
+    return null;
+  }
+
+  const mailboxes = await loadMailboxes(supabase, campaign);
+  if (mailboxes.length === 0) {
+    result.notes.push(`${campaign.name}: no usable mailbox`);
+    return null;
+  }
+
   const { postalAddress, tracking } = await fetchSendingConfig(
     supabase,
     campaign.workspace_id,
   );
 
-  for (const entry of due) {
-    if (used >= budget) break;
-
-    const { data: claimed } = await supabase.rpc("campaign_contact_claim", {
-      contact_row: entry.id,
-      lock_seconds: 300,
-    });
-    if (claimed !== true) continue;
-
-    const outcome = await processCampaignContact(supabase, {
-      campaign,
-      entry,
-      steps,
-      mailboxes,
-      window,
-      postalAddress,
-      tracking,
-    });
-
-    switch (outcome) {
-      case "sent":
-        result.sent += 1;
-        used += 1;
-        break;
-      case "completed":
-        result.completed += 1;
-        break;
-      case "stopped":
-        result.stopped += 1;
-        break;
-      case "failed":
-        result.failed += 1;
-        break;
-      default:
-        result.skipped += 1;
-    }
-  }
-
-  return used;
+  return { campaign, window, steps, mailboxes, postalAddress, tracking };
 }
 
 type ContactOutcome = "sent" | "completed" | "stopped" | "failed" | "skipped";

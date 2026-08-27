@@ -1,5 +1,6 @@
 import { assertCronAuthorized, jobResponse } from "@/lib/cron";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { recordWorkerRun } from "@/lib/heartbeat";
 import { runCampaignBatch } from "@/campaigns/run";
 import { syncSuppressedCampaignContacts } from "@/campaigns/enroll";
 
@@ -18,11 +19,24 @@ export async function GET(request: Request) {
   );
 
   const supabase = createSupabaseAdminClient();
+  const startedAt = new Date().toISOString();
 
   // Clear out anything that has been suppressed since it was queued, then send.
   const { stopped } = await syncSuppressedCampaignContacts(supabase, { limit: 200 });
   const result = await runCampaignBatch(supabase, {
     limit: Number.isFinite(limit) ? Math.min(limit, 40) : 10,
+  });
+
+  // Heartbeat: this is the send dispatcher, so its freshness is what "nothing
+  // is sending" is measured against.
+  await recordWorkerRun(supabase, {
+    job: "campaigns",
+    ok: true,
+    processed: result.sent,
+    skipped: result.skipped,
+    failed: result.failed,
+    notes: result.notes,
+    startedAt,
   });
 
   return jobResponse({

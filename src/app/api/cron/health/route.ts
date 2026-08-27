@@ -1,5 +1,6 @@
 import { assertCronAuthorized, jobResponse } from "@/lib/cron";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { recordWorkerRun } from "@/lib/heartbeat";
 import { runHealthChecks } from "@/health/run";
 
 export const runtime = "nodejs";
@@ -16,6 +17,12 @@ export async function GET(request: Request) {
 
   const supabase = createSupabaseAdminClient();
   const result = await runHealthChecks(supabase, { limit: 5 });
+
+  await recordWorkerRun(supabase, {
+    job: "health",
+    ok: true,
+    processed: result.checked,
+  });
 
   return jobResponse({
     job: "health",

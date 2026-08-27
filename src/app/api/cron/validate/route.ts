@@ -1,5 +1,6 @@
 import { assertCronAuthorized, jobResponse } from "@/lib/cron";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { recordWorkerRun } from "@/lib/heartbeat";
 import { runValidationBatch } from "@/validation/run";
 
 export const runtime = "nodejs";
@@ -19,6 +20,13 @@ export async function GET(request: Request) {
   const supabase = createSupabaseAdminClient();
   const result = await runValidationBatch(supabase, {
     limit: Number.isFinite(limit) ? Math.min(limit, 500) : 150,
+  });
+
+  await recordWorkerRun(supabase, {
+    job: "validate",
+    ok: true,
+    processed: result.processed,
+    skipped: result.deferred,
   });
 
   return jobResponse({

@@ -45,6 +45,8 @@ import {
   type RotationMailbox,
 } from "../src/campaigns/rotation";
 import { copyName } from "../src/campaigns/duplicate";
+import { orderByPriority, sendTier } from "../src/campaigns/priority";
+import { blockerReason, type BlockerInput } from "../src/campaigns/blockers";
 import { canStartAnother } from "../src/mail/poll";
 import {
   decideInbound,
@@ -3318,6 +3320,142 @@ test("free-provider and trap-domain lookups", () => {
   assert.equal(isFreeEmailDomain("acme-corp.com"), false);
   assert.equal(isKnownTrapDomain("spamtrap.com"), true);
   assert.equal(isKnownTrapDomain("gmail.com"), false);
+});
+
+console.log("\nsend priority (§2 follow-ups beat first-touch)");
+
+const pc = (id: string, campaign_id: string, current_step: number, next_send_at: string | null) => ({
+  id,
+  campaign_id,
+  current_step,
+  next_send_at,
+});
+
+test("current_step maps to the right tier", () => {
+  assert.equal(sendTier(0), 2); // next send is step 1 — first touch
+  assert.equal(sendTier(1), 1); // next send is step 2 — follow-up
+  assert.equal(sendTier(5), 1);
+});
+
+test("every follow-up sends before any first-touch, across campaigns", () => {
+  const rows = [
+    pc("b1", "B", 0, "2026-08-01T00:00:00Z"), // B step-1, oldest of all
+    pc("a2", "A", 2, "2026-08-05T00:00:00Z"), // A follow-up
+    pc("b2", "B", 0, "2026-08-02T00:00:00Z"),
+    pc("a1", "A", 1, "2026-08-06T00:00:00Z"), // A follow-up
+  ];
+  const order = orderByPriority(rows).map((r) => r.id);
+  // Follow-ups (a1/a2) first even though B's first-touch is older.
+  assert.deepEqual(order.slice(0, 2).sort(), ["a1", "a2"]);
+  assert.deepEqual(order.slice(2).sort(), ["b1", "b2"]);
+});
+
+test("the spec scenario: 20 follow-ups drain before B's step-1s", () => {
+  const followups = Array.from({ length: 20 }, (_, i) =>
+    pc(`f${i}`, "A", 2, `2026-08-01T00:${String(i).padStart(2, "0")}:00Z`),
+  );
+  const newOnes = Array.from({ length: 100 }, (_, i) =>
+    pc(`n${i}`, "B", 0, `2026-08-02T00:${String(i % 60).padStart(2, "0")}:00Z`),
+  );
+  const order = orderByPriority([...newOnes, ...followups]);
+  // With a cap of 50, the first 50 processed are all 20 follow-ups then 30 new.
+  const first50 = order.slice(0, 50);
+  assert.equal(first50.filter((r) => r.campaign_id === "A").length, 20);
+  assert.equal(first50.filter((r) => r.campaign_id === "B").length, 30);
+});
+
+test("round-robin: a big campaign cannot starve a small one within a tier", () => {
+  const big = Array.from({ length: 10 }, (_, i) =>
+    pc(`big${i}`, "BIG", 0, `2026-08-01T00:0${i}:00Z`),
+  );
+  const small = [pc("small0", "SMALL", 0, "2026-08-01T00:05:00Z")];
+  const order = orderByPriority([...big, ...small]).map((r) => r.campaign_id);
+  // SMALL's single contact must appear within the first two slots, not last.
+  assert.ok(order.indexOf("SMALL") <= 1);
+});
+
+test("a null next_send_at is treated as overdue, not last", () => {
+  const rows = [
+    pc("later", "A", 1, "2026-08-10T00:00:00Z"),
+    pc("nownull", "A", 1, null),
+  ];
+  assert.deepEqual(orderByPriority(rows).map((r) => r.id), ["nownull", "later"]);
+});
+
+console.log("\nblocker reasons (§4 why isn't this sending)");
+
+// A window open 09:00–17:00 Mon–Fri UTC, and two instants inside/outside it.
+const bWindow = resolveWindow({
+  send_window_start: 9,
+  send_window_end: 17,
+  send_days: [1, 2, 3, 4, 5],
+  timezone: "UTC",
+});
+const inHours = new Date("2026-08-04T12:00:00Z"); // Tuesday noon
+const offHours = new Date("2026-08-04T03:00:00Z"); // Tuesday 3am
+
+const baseBlocker = (over: Partial<BlockerInput> = {}): BlockerInput => ({
+  status: "active",
+  currentStep: 1,
+  nextSendAt: "2026-08-04T11:00:00Z", // past → due
+  lastError: null,
+  pausedReason: null,
+  validationStatus: "valid",
+  suppressed: false,
+  campaignStatus: "active",
+  hasSequenceStep: true,
+  hasActiveMailbox: true,
+  now: inHours,
+  window: bWindow,
+  ...over,
+});
+
+test("a due, in-window, valid contact has no blocker", () => {
+  assert.equal(blockerReason(baseBlocker()), null);
+});
+
+test("resolved statuses are not treated as blocked", () => {
+  for (const status of ["replied", "completed", "unsubscribed", "bounced"]) {
+    assert.equal(blockerReason(baseBlocker({ status })), null);
+  }
+});
+
+test("suppression outranks every other reason", () => {
+  const b = blockerReason(
+    baseBlocker({ suppressed: true, campaignStatus: "paused", now: offHours }),
+  );
+  assert.equal(b?.code, "suppressed");
+});
+
+test("a paused campaign explains itself", () => {
+  assert.equal(blockerReason(baseBlocker({ campaignStatus: "paused" }))?.code, "campaign_inactive");
+});
+
+test("a future next_send_at reads as scheduled, not stuck", () => {
+  assert.equal(
+    blockerReason(baseBlocker({ nextSendAt: "2026-09-01T12:00:00Z" }))?.code,
+    "scheduled",
+  );
+});
+
+test("outside the window is named, and only when otherwise sendable", () => {
+  // Due (next_send_at already passed) but the clock is at 3am — a future
+  // next_send_at would read as "scheduled" first, which is the correct order.
+  const b = blockerReason(
+    baseBlocker({ now: offHours, nextSendAt: "2026-08-04T02:00:00Z" }),
+  );
+  assert.equal(b?.code, "outside_window");
+});
+
+test("no mailbox and missing step are caught", () => {
+  assert.equal(blockerReason(baseBlocker({ hasActiveMailbox: false }))?.code, "no_mailbox");
+  assert.equal(blockerReason(baseBlocker({ hasSequenceStep: false }))?.code, "no_step");
+});
+
+test("a failed enrolment surfaces its error", () => {
+  const b = blockerReason(baseBlocker({ status: "failed", lastError: "SMTP 550" }));
+  assert.equal(b?.code, "failed");
+  assert.ok(b?.reason.includes("SMTP 550"));
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

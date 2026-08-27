@@ -8,6 +8,8 @@ import { CampaignEnrollForm } from "@/components/campaign-enroll-form";
 import { CampaignPurgeButton } from "@/components/campaign-purge-button";
 import { SequenceEditor, type EditableStep } from "@/components/sequence-editor";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { blockerReason } from "@/campaigns/blockers";
+import { resolveWindow } from "@/campaigns/schedule";
 import { fmtDateTime } from "@/lib/datetime";
 import {
   readTracking,
@@ -38,7 +40,12 @@ interface EnrolledRow {
   next_send_at: string | null;
   last_sent_at: string | null;
   last_error: string | null;
-  contacts: { email: string; domain: string | null } | null;
+  paused_reason: string | null;
+  contacts: {
+    email: string;
+    domain: string | null;
+    validation_status: string | null;
+  } | null;
 }
 
 /**
@@ -110,7 +117,7 @@ export default async function CampaignDetailPage({
       supabase
         .from("campaign_contacts")
         .select(
-          "id, contact_id, current_step, status, next_send_at, last_sent_at, last_error, contacts(email, domain)",
+          "id, contact_id, current_step, status, next_send_at, last_sent_at, last_error, paused_reason, contacts(email, domain, validation_status)",
           { count: "exact" },
         )
         .eq("campaign_id", id)
@@ -146,6 +153,60 @@ export default async function CampaignDetailPage({
 
   const enrolled = (enrolledRows ?? []) as unknown as EnrolledRow[];
   const stat = (statRow ?? {}) as Record<string, number>;
+
+  // "Why isn't this sending?" — computed per row from the data already loaded,
+  // plus a single suppression lookup over the addresses on this page.
+  const now = new Date();
+  const window = resolveWindow(campaign.settings);
+  const stepNumbers = new Set(steps.map((step) => step.step_number));
+  const activeMailboxIds = new Set(
+    ((mailboxRows ?? []) as { id: string }[]).map((mailbox) => mailbox.id),
+  );
+  const campaignMailboxIds = Array.isArray(campaign.mailbox_ids)
+    ? campaign.mailbox_ids
+    : [];
+  const hasActiveMailbox =
+    campaignMailboxIds.length === 0
+      ? activeMailboxIds.size > 0
+      : campaignMailboxIds.some((mid) => activeMailboxIds.has(mid));
+
+  const pageEmails = enrolled
+    .map((row) => row.contacts?.email)
+    .filter((email): email is string => Boolean(email));
+  const { data: supRows } = pageEmails.length
+    ? await supabase
+        .from("suppressions")
+        .select("email")
+        .eq("workspace_id", session.workspace.id)
+        .in("email", pageEmails)
+    : { data: [] as { email: string }[] };
+  const suppressed = new Set(
+    ((supRows ?? []) as { email: string }[]).map((row) => row.email),
+  );
+
+  const blockerByRow = new Map<string, ReturnType<typeof blockerReason>>();
+  for (const row of enrolled) {
+    blockerByRow.set(
+      row.id,
+      blockerReason({
+        status: row.status,
+        currentStep: row.current_step,
+        nextSendAt: row.next_send_at,
+        lastError: row.last_error,
+        pausedReason: row.paused_reason,
+        validationStatus: row.contacts?.validation_status ?? null,
+        suppressed: row.contacts?.email
+          ? suppressed.has(row.contacts.email)
+          : false,
+        campaignStatus: campaign.status,
+        hasSequenceStep: stepNumbers.has(row.current_step + 1),
+        hasActiveMailbox,
+        now,
+        window,
+      }),
+    );
+  }
+  const blockedOnPage = [...blockerByRow.values()].filter(Boolean).length;
 
   // Tracking, bucketed two ways from one read.
   const trackingByContact = new Map<string, TrackingSummary[]>();
@@ -289,6 +350,14 @@ export default async function CampaignDetailPage({
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--color-line)] px-5 py-3">
           <h2 className="text-sm font-semibold">Enrolled contacts</h2>
           <div className="flex flex-wrap items-center gap-3">
+            {blockedOnPage > 0 && (
+              <span
+                className="badge bg-amber-50 text-[var(--color-warn)]"
+                title="Contacts on this page that are not sending — see the Not sending column for why."
+              >
+                {blockedOnPage} not sending
+              </span>
+            )}
             {total > 0 && (
               <p className="hint">
                 {firstShown}–{lastShown} of {total.toLocaleString()}
@@ -314,6 +383,7 @@ export default async function CampaignDetailPage({
                   <th>Opened</th>
                   <th>Next send</th>
                   <th>Last sent</th>
+                  <th>Not sending</th>
                 </tr>
               </thead>
               <tbody>
@@ -358,6 +428,29 @@ export default async function CampaignDetailPage({
                     </td>
                     <td>{fmtDateTime(row.next_send_at)}</td>
                     <td>{fmtDateTime(row.last_sent_at)}</td>
+                    <td>
+                      {(() => {
+                        const blocker = blockerByRow.get(row.id);
+                        if (blocker) {
+                          return (
+                            <span
+                              className="text-[var(--color-warn)]"
+                              title={blocker.reason}
+                            >
+                              {blocker.reason}
+                            </span>
+                          );
+                        }
+                        if (row.status === "pending" || row.status === "active") {
+                          return (
+                            <span className="text-[var(--color-ok)]">
+                              sending soon
+                            </span>
+                          );
+                        }
+                        return <span className="hint">—</span>;
+                      })()}
+                    </td>
                   </tr>
                 ))}
               </tbody>
