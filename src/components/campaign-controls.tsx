@@ -78,6 +78,63 @@ function RunNowButton({
   );
 }
 
+/**
+ * Force any stalled follow-ups through. Reactivates enrolments stuck on `failed`
+ * (that have not replied / bounced / opted out), clears expired claim locks,
+ * makes every overdue step due now, and sends ignoring the window — for when a
+ * follow-up "got stuck" and you want it to go on time rather than wait for the
+ * next tick.
+ */
+function PushFollowupsButton({
+  campaignId,
+  disabled,
+}: {
+  campaignId: string;
+  disabled: boolean;
+}) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function run() {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const response = await fetch("/api/jobs/run", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ job: "campaigns", campaignId, release: true, limit: 40 }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Run failed.");
+      const notes = Array.isArray(payload.notes) ? payload.notes.join(" · ") : "";
+      setMessage(
+        `Revived ${payload.reactivated ?? 0} stuck, sent ${payload.sent}, ` +
+          `skipped ${payload.skipped}, failed ${payload.failed}.${notes ? ` ${notes}` : ""}`,
+      );
+      router.refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <button
+        className="btn-secondary"
+        type="button"
+        disabled={busy || disabled}
+        onClick={() => void run()}
+      >
+        {busy ? "Pushing…" : "Push stuck follow-ups now"}
+      </button>
+      {message && <span className="hint">{message}</span>}
+    </div>
+  );
+}
+
 export function CampaignControls({
   campaignId,
   status,
@@ -166,6 +223,17 @@ export function CampaignControls({
         {status !== "active" && (
           <p className="hint">Start sending first — a draft has nothing due.</p>
         )}
+      </div>
+
+      <div className="space-y-2 rounded-md border border-[var(--color-line)] p-3">
+        <p className="text-sm font-medium">Follow-ups stuck?</p>
+        <p className="hint">
+          Pushes any stalled follow-ups through now: revives contacts stuck on a
+          failed step (unless they replied, bounced or opted out), clears expired
+          locks, and sends everything overdue ignoring the window. Use this if a
+          scheduled follow-up did not go out on time.
+        </p>
+        <PushFollowupsButton campaignId={campaignId} disabled={status !== "active"} />
       </div>
 
       <div>

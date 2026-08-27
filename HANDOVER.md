@@ -98,6 +98,20 @@ imported/scraped lists. No external service — nothing leaves your infrastructu
   detail card, and a bulk paste-a-list checker (quick, up to 300) with a summary
   and a "copy the sendable ones" button.
 
+**Correction, same day:** the standalone `/verify` page was removed — verification
+belongs *inside* the workflow, not as a separate tool. It now lives on the
+**Contacts** page: the score shows as a column, "Verify selected" / "Re-check" /
+"Delete" / "Delete and suppress" clean the list, the status filter covers every
+new verdict, and imported/scraped contacts are verified (and undeliverable ones
+removed) automatically. The `/api/verify/*` routes and the bulk paste tool are
+gone; the engine, `verify-worker.ts` and the auto-clean pipeline stay.
+
+Also added: **"Push stuck follow-ups now"** on each campaign (Campaign controls).
+It reactivates enrolments stuck on `failed` (unless they replied / bounced /
+opted out), clears expired claim locks, makes overdue steps due now, and sends
+ignoring the window — for when a scheduled follow-up did not go out on time.
+Backed by `POST /api/jobs/run { job:"campaigns", campaignId, release:true }`.
+
 **Where to check live after applying 0007 and deploying:**
 1. **Verify** page — paste a mix of good/bad addresses into the list checker; bad
    ones come back invalid/disposable/no_mx, and "copy sendable" copies only the

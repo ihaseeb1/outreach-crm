@@ -29,6 +29,13 @@ export interface StageOption {
   label: string;
 }
 
+/** The 0–100 verification score the engine stored on the contact, if any. */
+function verificationScore(contact: Contact): string {
+  const meta = contact.meta as { verification?: { overall_score?: unknown } } | null;
+  const score = meta?.verification?.overall_score;
+  return typeof score === "number" ? String(score) : "—";
+}
+
 /**
  * Contacts list with selection.
  *
@@ -224,7 +231,8 @@ export function ContactsTable({
               <th>Name</th>
               <th>Domain</th>
               <th>Stage</th>
-              <th>Validation</th>
+              <th>Verification</th>
+              <th>Score</th>
               <th>Added</th>
             </tr>
           </thead>
@@ -273,9 +281,10 @@ export function ContactsTable({
                   <span
                     className={`badge ${VALIDATION_STYLES[contact.validation_status]}`}
                   >
-                    {contact.validation_status.replace("_", " ")}
+                    {contact.validation_status.replace(/_/g, " ")}
                   </span>
                 </td>
+                <td>{verificationScore(contact)}</td>
                 <td>{new Date(contact.created_at).toLocaleDateString()}</td>
               </tr>
             ))}

@@ -22,6 +22,15 @@ const bodySchema = z.object({
   limit: z.number().int().positive().max(1000).optional(),
   /** Campaigns only: send now even though the clock is outside the window. */
   ignoreWindow: z.boolean().optional(),
+  /** Campaigns only: restrict the run to one campaign. */
+  campaignId: z.string().uuid().optional(),
+  /**
+   * Campaigns only: before sending, un-stick contacts whose sequence stalled —
+   * reactivate any `failed` enrolment (that has not replied / bounced / opted
+   * out) and make every overdue step due now, then send ignoring the window.
+   * This is the "my follow-ups got stuck, push them" button.
+   */
+  release: z.boolean().optional(),
   /** Inbound only: re-read this many UIDs below each mailbox's checkpoint. */
   rescan: z.number().int().min(0).max(500).optional(),
 });
@@ -95,15 +104,57 @@ export async function POST(request: Request) {
 
   if (parsed.data.job === "campaigns") {
     await syncSuppressedCampaignContacts(supabase, { workspaceId, limit: 200 });
+
+    // "Push stuck follow-ups": revive enrolments that stalled and make every
+    // overdue step due right now. Only `failed` rows are revived, and never one
+    // that has already replied / bounced / opted out — those stopped for real
+    // reasons. It also clears expired claim locks and pulls any past-due
+    // next_send_at up to now, so a follow-up that missed its window goes on the
+    // next send instead of waiting.
+    let reactivated = 0;
+    if (parsed.data.release) {
+      const nowIso = new Date().toISOString();
+      const campaignId = parsed.data.campaignId;
+
+      let revive = supabase
+        .from("campaign_contacts")
+        .update({
+          status: "active",
+          next_send_at: nowIso,
+          attempts: 0,
+          locked_until: null,
+          last_error: null,
+          paused_reason: null,
+        })
+        .eq("workspace_id", workspaceId)
+        .eq("status", "failed");
+      if (campaignId) revive = revive.eq("campaign_id", campaignId);
+      const { data: revived } = await revive.select("id");
+      reactivated = (revived ?? []).length;
+
+      // Release expired claim locks on live rows so nothing is stuck behind a
+      // lock from a run that died mid-send.
+      let unlock = supabase
+        .from("campaign_contacts")
+        .update({ locked_until: null })
+        .eq("workspace_id", workspaceId)
+        .in("status", ["pending", "active"])
+        .not("locked_until", "is", null)
+        .lt("locked_until", nowIso);
+      if (campaignId) unlock = unlock.eq("campaign_id", campaignId);
+      await unlock;
+    }
+
     const result = await runCampaignBatch(supabase, {
       workspaceId,
+      campaignId: parsed.data.campaignId,
       limit: Math.min(parsed.data.limit ?? 10, 40),
       // Safe here and only here: this route requires a session, so the
       // override can only ever come from a person pressing a button. The cron
-      // routes never pass it.
-      ignoreWindow: parsed.data.ignoreWindow,
+      // routes never pass it. A "release" push always ignores the window.
+      ignoreWindow: parsed.data.ignoreWindow || parsed.data.release,
     });
-    return NextResponse.json({ ok: true, job: "campaigns", ...result });
+    return NextResponse.json({ ok: true, job: "campaigns", reactivated, ...result });
   }
 
   if (parsed.data.job === "warmup") {

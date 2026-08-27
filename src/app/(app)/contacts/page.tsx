@@ -13,12 +13,18 @@ const PAGE_SIZE = 50;
 
 const STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: "", label: "All statuses" },
+  { value: "safe", label: "Safe (mailbox confirmed)" },
   { value: "valid", label: "Valid" },
+  { value: "catch_all", label: "Catch-all" },
   { value: "role_account", label: "Role account" },
-  { value: "unknown", label: "Not validated" },
+  { value: "unknown", label: "Not verified" },
   { value: "no_mx", label: "No MX" },
+  { value: "invalid", label: "Invalid (no such mailbox)" },
   { value: "invalid_syntax", label: "Invalid syntax" },
   { value: "disposable", label: "Disposable" },
+  { value: "spamtrap", label: "Spam trap" },
+  { value: "disabled", label: "Disabled" },
+  { value: "inbox_full", label: "Inbox full" },
   { value: "suppressed", label: "Suppressed" },
   { value: "bounced", label: "Bounced" },
 ];
@@ -101,19 +107,22 @@ export default async function ContactsPage({
         <ContactAddForm />
         <RunJobButton
           job="validate"
-          label={`Validate ${unvalidated ?? 0} unchecked`}
+          label={`Verify ${unvalidated ?? 0} unchecked`}
           limit={100}
         />
       </div>
 
       {(unvalidated ?? 0) > 0 && (
         <p className="hint">
-          A contact added by hand or pasted in starts as{" "}
-          <strong>not validated</strong>. Validation checks the syntax, rejects
-          disposable domains, and looks up the domain&rsquo;s MX records to see
-          whether it can receive mail at all — it does not prove the individual
-          mailbox exists. It also runs automatically on every cron tick, 100 at
-          a time.
+          A contact added by hand, pasted in, or scraped starts as{" "}
+          <strong>not verified</strong>. Verification checks syntax, rejects
+          disposable and spam-trap domains, catches likely typos, and looks up
+          the domain&rsquo;s MX records — anything undeliverable is removed and
+          suppressed automatically. It runs on every cron tick (100 at a time),
+          on import, and when you press <strong>Verify selected</strong> below.
+          The individual-mailbox (deep SMTP) check runs from the verify worker;
+          each contact&rsquo;s <strong>score</strong> shows in the table so you
+          can clean the list before adding anyone to a campaign.
         </p>
       )}
 
