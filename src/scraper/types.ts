@@ -17,6 +17,8 @@ export interface FetchFailure {
   url: string;
   status: number | null;
   error: string;
+  /** From a Retry-After header, when the server sent one (§7 back-off). */
+  retryAfterSeconds?: number | null;
 }
 
 export type FetchOutcome =

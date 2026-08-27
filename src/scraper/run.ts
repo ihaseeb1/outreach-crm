@@ -6,6 +6,7 @@ import { logActivity } from "@/lib/activity";
 import { suppressedSubset } from "@/mail/suppressions";
 import { extractFromHtml } from "@/scraper/extract";
 import { crawlDelayMs, fetchRobots, isAllowed } from "@/scraper/robots";
+import { crawlableUrl, resolveRespectRobots } from "@/scraper/safety";
 import { defaultScraper } from "@/scraper/static-scraper";
 import type { ExtractedContact, Scraper } from "@/scraper/types";
 import type { Website, WebsiteMeta } from "@/types/db";
@@ -53,6 +54,23 @@ export async function runScrapeBatch(
   };
 
   const touchedJobs = new Set<string>();
+  // Per-workspace "respect robots.txt" flag, read once per workspace. The batch
+  // mixes websites from many workspaces, so this cannot be a single option.
+  const respectRobotsByWorkspace = new Map<string, boolean>();
+  const respectRobotsFor = async (workspaceId: string): Promise<boolean> => {
+    const cached = respectRobotsByWorkspace.get(workspaceId);
+    if (cached !== undefined) return cached;
+    const { data } = await supabase
+      .from("workspaces")
+      .select("settings")
+      .eq("id", workspaceId)
+      .maybeSingle();
+    const respect = resolveRespectRobots(
+      (data as { settings?: Record<string, unknown> } | null)?.settings,
+    );
+    respectRobotsByWorkspace.set(workspaceId, respect);
+    return respect;
+  };
 
   for (const row of (pending ?? []) as Website[]) {
     // Atomic claim: only the caller that flips pending -> scraping proceeds.
@@ -67,8 +85,24 @@ export async function runScrapeBatch(
 
     if (row.scrape_job_id) touchedJobs.add(row.scrape_job_id);
 
+    // SSRF guard: never fetch a private / internal / non-http(s) seed URL.
+    const seedGuard = crawlableUrl(row.url);
+    if (!seedGuard.ok) {
+      result.failed += 1;
+      await supabase
+        .from("websites")
+        .update({
+          status: "failed",
+          error: seedGuard.reason,
+          scraped_at: new Date().toISOString(),
+        })
+        .eq("id", row.id);
+      continue;
+    }
+
     try {
-      const outcome = await scrapeWebsite(supabase, row, scraper);
+      const respectRobots = await respectRobotsFor(row.workspace_id);
+      const outcome = await scrapeWebsite(supabase, row, scraper, respectRobots);
       result.processed += 1;
       result.contactsCreated += outcome.contactsCreated;
       if (outcome.status === "skipped_robots") result.skippedRobots += 1;
@@ -102,13 +136,16 @@ async function scrapeWebsite(
   supabase: SupabaseClient,
   site: Website,
   scraper: Scraper,
+  respectRobots: boolean,
 ): Promise<SiteOutcome> {
   const startUrl = site.url;
   const origin = new URL(startUrl).origin;
   const robots = await fetchRobots(origin);
+  // Crawl-delay and the politeness floor are always honoured; only the Disallow
+  // gating is skipped when a workspace has turned robots off for its own sites.
   const delay = crawlDelayMs(robots);
 
-  if (!isAllowed(robots, new URL(startUrl).pathname)) {
+  if (respectRobots && !isAllowed(robots, new URL(startUrl).pathname)) {
     await supabase
       .from("websites")
       .update({
@@ -135,7 +172,9 @@ async function scrapeWebsite(
     const url = queue.shift();
     if (!url || visited.includes(url)) continue;
 
-    if (!isAllowed(robots, new URL(url).pathname)) continue;
+    if (respectRobots && !isAllowed(robots, new URL(url).pathname)) continue;
+    // A followed link could point at a private/internal host; guard it too.
+    if (!crawlableUrl(url).ok) continue;
     if (visited.length > 0) await sleep(delay);
 
     const outcome = await scraper.fetchPage(url);

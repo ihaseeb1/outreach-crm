@@ -5,6 +5,42 @@ original seven build phases.
 
 ---
 
+## Phase 4 §7 — crawler hardening + robots toggle, 28 August (seventh session)
+
+Deployed to `main`. Typecheck clean, smoke **329/0**, build clean. **No
+migration** — the robots toggle rides on the existing `workspaces.settings`
+jsonb.
+
+`src/scraper/safety.ts` is the new pure core (fully smoke-tested):
+
+- **SSRF guard.** `crawlableUrl()` / `isBlockedHost()` refuse anything that is
+  not a real http(s) URL, and every private / loopback / link-local / internal
+  address — `127.0.0.0/8`, `10/8`, `172.16-31`, `192.168`, `169.254` (cloud
+  metadata), CGNAT `100.64/10`, IPv6 `::1`/`fc00::/7`/`fe80::`, and
+  `*.local`/`*.internal`/`localhost`. Wired in three places: the seed URL (marks
+  the website `failed` without fetching), every followed link, and — inside the
+  static scraper — the **final URL after redirects**, so a public page cannot
+  302 the crawler onto an internal host.
+- **Retry with back-off.** The static scraper now retries transient failures
+  (network error, 429, 5xx) up to 3 attempts with capped exponential back-off
+  that honours a server's `Retry-After` (seconds or HTTP-date). `404` / `Not
+  HTML` stay one-shot. `FetchFailure` gained `retryAfterSeconds`.
+- **Robots toggle.** `resolveRespectRobots(settings)` — on by default, off only
+  when a workspace explicitly sets `respect_robots: false`. Settings page has a
+  labelled checkbox with the caveat that Disallow is skipped but crawl-delay,
+  the politeness floor and the SSRF guard are always enforced. `runScrapeBatch`
+  reads it per workspace (cached), since one batch mixes many workspaces' sites.
+
+**Check live:** Settings → the "Respect robots.txt when crawling" checkbox
+saves. A queued site pointing at `http://169.254.169.254/…` or `localhost` ends
+as **failed** with "Blocked host…". A flaky publisher that 503s once now
+succeeds on retry instead of failing outright.
+
+**Remaining build-spec work:** §9 link-building placement tracker + live
+backlink verifier.
+
+---
+
 ## Phase 3b §8 — contact archive + lifecycle filters + campaign cleanup, 28 August (seventh session)
 
 Deployed to `main`. Typecheck clean, smoke **323/0**, build clean. **Needs

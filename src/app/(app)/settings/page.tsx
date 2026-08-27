@@ -4,6 +4,7 @@ import { ReplyTemplatesManager } from "@/components/reply-templates-manager";
 import { logActivity } from "@/lib/activity";
 import { env } from "@/lib/env";
 import { readReplyTemplates } from "@/mail/reply-templates";
+import { resolveRespectRobots } from "@/scraper/safety";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
 import {
@@ -24,12 +25,15 @@ async function saveSettings(formData: FormData) {
   const postalAddress = String(formData.get("postal_address") ?? "").trim();
   const name = String(formData.get("name") ?? "").trim();
   const tracking = String(formData.get("tracking") ?? "");
+  // An unchecked checkbox submits nothing, so absence = "do not respect".
+  const respectRobots = formData.get("respect_robots") === "on";
 
   // Merged, not replaced: `settings` is a shared jsonb column and writing a
   // fresh object here would silently drop anything else stored in it.
   const settings = {
     ...(session.workspace.settings ?? {}),
     ...(isTrackingMode(tracking) ? { tracking } : {}),
+    respect_robots: respectRobots,
   };
 
   await supabase
@@ -62,6 +66,7 @@ export default async function SettingsPage() {
   const appUrl = env.appUrl();
   const tracking = resolveTrackingMode(session.workspace.settings);
   const replyTemplates = readReplyTemplates(session.workspace.settings);
+  const respectRobots = resolveRespectRobots(session.workspace.settings);
 
   return (
     <div className="space-y-6">
@@ -138,6 +143,28 @@ export default async function SettingsPage() {
               own mailboxes, so there is nothing to measure.
             </p>
           </div>
+        </div>
+
+        <div className="border-t border-[var(--color-line)] pt-4">
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              name="respect_robots"
+              defaultChecked={respectRobots}
+              className="mt-1"
+            />
+            <span>
+              <span className="label">Respect robots.txt when crawling</span>
+              <span className="hint mt-1 block">
+                On by default and the right choice for prospecting strangers&rsquo;
+                sites: the crawler obeys each site&rsquo;s <code>Disallow</code>{" "}
+                rules. Turn it off only for domains you own or have permission to
+                crawl. Crawl-delay and the politeness floor are always honoured,
+                and private or internal addresses are always refused, whatever
+                this says.
+              </span>
+            </span>
+          </label>
         </div>
 
         <button className="btn-primary" type="submit">

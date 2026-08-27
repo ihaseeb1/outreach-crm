@@ -49,6 +49,14 @@ import { orderByPriority, sendTier } from "../src/campaigns/priority";
 import { blockerReason, type BlockerInput } from "../src/campaigns/blockers";
 import { cleanupStatuses, isCleanable } from "../src/campaigns/cleanup";
 import { parseArchiveView } from "../src/lib/contact-archive";
+import {
+  crawlableUrl,
+  isBlockedHost,
+  isRetriableStatus,
+  parseRetryAfter,
+  resolveRespectRobots,
+  retryDelayMs,
+} from "../src/scraper/safety";
 import { canStartAnother } from "../src/mail/poll";
 import {
   decideInbound,
@@ -3493,6 +3501,71 @@ test("archive view parses to the working set unless told otherwise", () => {
   assert.equal(parseArchiveView("garbage"), "active");
   assert.equal(parseArchiveView("archived"), "archived");
   assert.equal(parseArchiveView("all"), "all");
+});
+
+console.log("\ncrawler hardening (§7)");
+
+test("blocks loopback, private, link-local and internal hosts", () => {
+  for (const bad of [
+    "localhost",
+    "foo.local",
+    "svc.internal",
+    "box.lan",
+    "127.0.0.1",
+    "10.1.2.3",
+    "172.16.0.1",
+    "172.31.255.255",
+    "192.168.1.1",
+    "169.254.169.254", // cloud metadata
+    "100.64.0.1", // CGNAT
+    "0.0.0.0",
+    "::1",
+    "[::1]",
+    "fe80::1",
+    "fd00::1",
+  ]) {
+    assert.equal(isBlockedHost(bad), true, bad);
+  }
+});
+
+test("allows real public hosts", () => {
+  for (const ok of ["example.com", "blog.example.co.uk", "8.8.8.8", "172.15.0.1", "172.32.0.1"]) {
+    assert.equal(isBlockedHost(ok), false, ok);
+  }
+});
+
+test("crawlableUrl rejects non-http schemes and internal hosts", () => {
+  assert.equal(crawlableUrl("ftp://example.com").ok, false);
+  assert.equal(crawlableUrl("file:///etc/passwd").ok, false);
+  assert.equal(crawlableUrl("http://169.254.169.254/latest/meta-data").ok, false);
+  assert.equal(crawlableUrl("not a url").ok, false);
+  const good = crawlableUrl("https://example.com/contact");
+  assert.equal(good.ok, true);
+});
+
+test("retriable statuses are the transient ones only", () => {
+  for (const s of [408, 429, 500, 502, 503, 504]) assert.equal(isRetriableStatus(s), true, String(s));
+  for (const s of [200, 301, 400, 403, 404, 410]) assert.equal(isRetriableStatus(s), false, String(s));
+});
+
+test("Retry-After parses seconds and HTTP dates, and back-off honours it", () => {
+  assert.equal(parseRetryAfter("120"), 120);
+  assert.equal(parseRetryAfter(null), null);
+  const base = 1_000_000_000_000;
+  assert.equal(parseRetryAfter(new Date(base + 5000).toUTCString(), base), 5);
+  // Retry-After wins over exponential and is capped at maxMs.
+  assert.equal(retryDelayMs({ attempt: 1, retryAfterSeconds: 3 }), 3000);
+  assert.equal(retryDelayMs({ attempt: 99, retryAfterSeconds: 9999, maxMs: 30_000 }), 30_000);
+  // Exponential without a header: 1s, 2s, 4s…
+  assert.equal(retryDelayMs({ attempt: 1 }), 1000);
+  assert.equal(retryDelayMs({ attempt: 3 }), 4000);
+});
+
+test("respect_robots defaults on, off only when explicitly false", () => {
+  assert.equal(resolveRespectRobots(null), true);
+  assert.equal(resolveRespectRobots({}), true);
+  assert.equal(resolveRespectRobots({ respect_robots: true }), true);
+  assert.equal(resolveRespectRobots({ respect_robots: false }), false);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
