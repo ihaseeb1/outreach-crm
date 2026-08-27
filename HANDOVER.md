@@ -5,6 +5,26 @@ original seven build phases.
 
 ---
 
+## Phase 3a §6 — delete scrape jobs, 28 August (sixth session)
+
+Deployed to `main`. **Migration `0010_scrape_job_soft_delete.sql`** — APPLIED.
+`scrape_jobs.deleted_at` (soft delete). `DELETE /api/scrape-jobs` (owner/admin,
+single + bulk) soft-deletes the job, removes its raw website rows (contacts
+kept via `websites.on delete set null`), optionally removes contacts that came
+only from those jobs and were never enrolled; falls back to hard delete if 0010
+is absent; audit-logged. The scrape cron hard-purges jobs deleted > 30 days ago.
+Prospecting shows `ScrapeJobsTable` (per-row + bulk delete + a "remove
+never-contacted contacts" toggle). Deleted jobs are filtered in JS (dashboard
+too) so no query references `deleted_at` before the migration.
+
+**Migrations 0008 + 0009 + 0010 are all APPLIED** (Supabase project ref
+`rqztbqxzhykybnejjuba` — the live app DB; do not confuse with any other
+project). So Phase 1 (heartbeat), Phase 2 (roles/approval + session fix) and §6
+are fully live. **Remaining build-spec work:** §8 contact archive/cleanup, §7
+crawler hardening + robots toggle, §9 link-building placement tracker.
+
+---
+
 ## Phase 2 of the build spec, 28 August (sixth session)
 
 Deployed to `main`. Typecheck clean, smoke 319/0, build clean. **Needs migration
