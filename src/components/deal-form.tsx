@@ -131,6 +131,7 @@ export function DealForm({
   onSaved,
   compact,
   quoteSource,
+  placementReady = false,
 }: {
   defaults?: DealFormDefaults;
   existing?: DealWithPrices | null;
@@ -139,6 +140,8 @@ export function DealForm({
   compact?: boolean;
   /** Their reply, so the rate card can be read off it instead of retyped. */
   quoteSource?: string | null;
+  /** Migration 0012 applied — gates the placement + verification fields (§9). */
+  placementReady?: boolean;
 }) {
   const router = useRouter();
 
@@ -158,6 +161,11 @@ export function DealForm({
   const [paymentTerms, setPaymentTerms] = useState(existing?.payment_terms ?? "");
   const [paymentMethod, setPaymentMethod] = useState(existing?.payment_method ?? "");
   const [notes, setNotes] = useState(existing?.notes ?? "");
+  const [placedUrl, setPlacedUrl] = useState(existing?.placed_url ?? "");
+  const [targetUrl, setTargetUrl] = useState(existing?.target_url ?? "");
+  const [anchorText, setAnchorText] = useState(existing?.anchor_text ?? "");
+  const [verifying, setVerifying] = useState(false);
+  const [verifyNote, setVerifyNote] = useState<string | null>(null);
   const [prices, setPrices] = useState<PriceRow[]>(
     existing?.deal_prices?.length
       ? existing.deal_prices.map((price) => ({
@@ -370,6 +378,15 @@ export function DealForm({
           payment_terms: paymentTerms || null,
           payment_method: paymentMethod || null,
           notes: notes || null,
+          // Only send placement fields once the columns exist, so a save cannot
+          // fail on an unknown column before migration 0012 is applied.
+          ...(placementReady
+            ? {
+                placed_url: placedUrl.trim() || null,
+                target_url: targetUrl.trim() || null,
+                anchor_text: anchorText.trim() || null,
+              }
+            : {}),
           prices: prices
             .filter((row) => row.niche.trim() && row.price.trim())
             .map((row) => ({
@@ -390,6 +407,32 @@ export function DealForm({
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
+    }
+  }
+
+  /**
+   * Fetches the placed page and checks the backlink is live (§9). Only offered
+   * on a saved deal — the verifier reads the stored placed/target URLs, so save
+   * first, then verify.
+   */
+  async function verifyBacklink() {
+    if (!existing?.id) return;
+    setVerifying(true);
+    setVerifyNote(null);
+    try {
+      const response = await fetch("/api/deals/verify", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: existing.id }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Verification failed.");
+      setVerifyNote(payload.detail ?? "Checked.");
+      router.refresh();
+    } catch (err) {
+      setVerifyNote(err instanceof Error ? err.message : String(err));
+    } finally {
+      setVerifying(false);
     }
   }
 
@@ -797,6 +840,100 @@ export function DealForm({
           options={OPTIONS.paymentTerms}
         />
       </div>
+
+      {placementReady && (
+        <fieldset className="rounded-md border border-[var(--color-line)] p-4">
+          <legend className="px-1 text-sm font-medium">Placement &amp; verification</legend>
+          <p className="hint">
+            Where the link actually went live. Once both URLs are saved,{" "}
+            <strong>Verify now</strong> fetches the page and confirms the link to
+            your target is present and dofollow. The backlinks cron re-checks it
+            daily, so a link quietly pulled or nofollowed is caught.
+          </p>
+          <div className="mt-3 grid gap-3 sm:grid-cols-3">
+            <div className="sm:col-span-2">
+              <label className="label" htmlFor="deal-placed-url">
+                Placed URL (the live article)
+              </label>
+              <input
+                id="deal-placed-url"
+                className="input"
+                placeholder="https://publisher.com/the-article"
+                value={placedUrl}
+                onChange={(e) => setPlacedUrl(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="deal-anchor">
+                Anchor text
+              </label>
+              <input
+                id="deal-anchor"
+                className="input"
+                placeholder="best running shoes"
+                value={anchorText}
+                onChange={(e) => setAnchorText(e.target.value)}
+              />
+            </div>
+            <div className="sm:col-span-3">
+              <label className="label" htmlFor="deal-target-url">
+                Target URL (your page it should link to)
+              </label>
+              <input
+                id="deal-target-url"
+                className="input"
+                placeholder="https://yoursite.com/landing-page"
+                value={targetUrl}
+                onChange={(e) => setTargetUrl(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <button
+              className="btn-secondary px-2.5 py-1.5 text-xs"
+              type="button"
+              disabled={verifying || !existing?.id}
+              title={
+                existing?.id
+                  ? "Fetch the placed page and check the link"
+                  : "Save the deal first, then verify"
+              }
+              onClick={() => void verifyBacklink()}
+            >
+              {verifying ? "Checking…" : "Verify now"}
+            </button>
+            {existing?.link_status && existing.link_status !== "unchecked" && (
+              <span
+                className={`badge ${
+                  existing.link_status === "found" && existing.link_is_dofollow
+                    ? "bg-green-50 text-[var(--color-ok)]"
+                    : existing.link_status === "found"
+                      ? "bg-amber-50 text-[var(--color-warn)]"
+                      : "bg-red-50 text-[var(--color-danger)]"
+                }`}
+              >
+                {existing.link_status === "found" && existing.link_is_dofollow
+                  ? "live · dofollow"
+                  : existing.link_status === "found"
+                    ? "live · nofollow"
+                    : existing.link_status}
+              </span>
+            )}
+            {existing?.link_checked_at && (
+              <span className="hint">
+                checked {new Date(existing.link_checked_at).toLocaleString()}
+              </span>
+            )}
+          </div>
+          {(verifyNote || existing?.link_detail) && (
+            <p className="hint mt-2">{verifyNote ?? existing?.link_detail}</p>
+          )}
+          {!existing?.id && (
+            <p className="hint mt-2">Save the deal, then Verify now becomes available.</p>
+          )}
+        </fieldset>
+      )}
 
       <div>
         <label className="label" htmlFor="deal-notes">

@@ -57,6 +57,7 @@ import {
   resolveRespectRobots,
   retryDelayMs,
 } from "../src/scraper/safety";
+import { normalizeLinkUrl, parseBacklink, sameTarget } from "../src/deals/backlink";
 import { canStartAnother } from "../src/mail/poll";
 import {
   decideInbound,
@@ -3566,6 +3567,63 @@ test("respect_robots defaults on, off only when explicitly false", () => {
   assert.equal(resolveRespectRobots({}), true);
   assert.equal(resolveRespectRobots({ respect_robots: true }), true);
   assert.equal(resolveRespectRobots({ respect_robots: false }), false);
+});
+
+console.log("\nlive backlink verifier (§9)");
+
+test("normalizeLinkUrl strips scheme, www and trailing slash", () => {
+  assert.equal(normalizeLinkUrl("https://www.Example.com/Page/"), "example.com/page");
+  assert.equal(normalizeLinkUrl("example.com/page"), "example.com/page");
+  assert.equal(normalizeLinkUrl("http://example.com"), "example.com");
+  assert.equal(normalizeLinkUrl("https://example.com/p?id=1"), "example.com/p?id=1");
+  assert.equal(normalizeLinkUrl("  "), null);
+});
+
+test("sameTarget matches across www/scheme/trailing slash but not different paths", () => {
+  assert.equal(sameTarget("https://site.com/a", "http://www.site.com/a/"), true);
+  assert.equal(sameTarget("https://site.com/a", "https://site.com/b"), false);
+  assert.equal(sameTarget("https://site.com/p?id=1", "https://site.com/p?id=2"), false);
+});
+
+test("parseBacklink finds a dofollow link to the target", () => {
+  const html = `<p>read <a href="https://mysite.com/landing">best shoes</a> now</p>`;
+  const v = parseBacklink(html, { targetUrl: "https://www.mysite.com/landing", anchorText: "best shoes" });
+  assert.equal(v.status, "found");
+  assert.equal(v.isDofollow, true);
+  assert.equal(v.anchorMatches, true);
+});
+
+test("parseBacklink flags a nofollow/sponsored link as found-but-not-dofollow", () => {
+  const html = `<a href="https://mysite.com/x" rel="nofollow sponsored">anchor</a>`;
+  const v = parseBacklink(html, { targetUrl: "https://mysite.com/x" });
+  assert.equal(v.status, "found");
+  assert.equal(v.isDofollow, false);
+});
+
+test("parseBacklink reports missing when the link is not on the page", () => {
+  const html = `<a href="https://other.com/y">nope</a>`;
+  const v = parseBacklink(html, { targetUrl: "https://mysite.com/x", anchorText: "hi" });
+  assert.equal(v.status, "missing");
+  assert.equal(v.anchorMatches, false);
+});
+
+test("parseBacklink resolves relative hrefs against the page URL", () => {
+  const html = `<a href="/landing">anchor</a>`;
+  const v = parseBacklink(html, {
+    targetUrl: "https://mysite.com/landing",
+    pageUrl: "https://mysite.com/blog/post",
+  });
+  assert.equal(v.status, "found");
+});
+
+test("parseBacklink prefers a dofollow match when both exist", () => {
+  const html = `
+    <a href="https://mysite.com/x" rel="nofollow">first</a>
+    <a href="https://mysite.com/x">second</a>`;
+  const v = parseBacklink(html, { targetUrl: "https://mysite.com/x" });
+  assert.equal(v.status, "found");
+  assert.equal(v.isDofollow, true);
+  assert.equal(v.anchorFound, "second");
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

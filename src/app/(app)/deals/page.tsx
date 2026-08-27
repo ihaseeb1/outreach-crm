@@ -4,6 +4,7 @@ import { DealRowActions } from "@/components/deal-row-actions";
 import { DealsToolbar } from "@/components/deals-toolbar";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
+import { dealPlacementReady } from "@/deals/verify";
 import { nicheColumns } from "@/deals/export";
 import {
   contactEmailMap,
@@ -63,6 +64,7 @@ export default async function DealsPage({
     ]),
   );
   const niches = nicheColumns(deals);
+  const placementReady = await dealPlacementReady(supabase);
 
   const liveValue = deals
     .filter((deal) => deal.status === "live" || deal.status === "ordered")
@@ -204,6 +206,7 @@ export default async function DealsPage({
                   <th>TAT</th>
                   <th>DR</th>
                   <th>Traffic</th>
+                  {placementReady && <th>Backlink</th>}
                   {niches.map((niche) => (
                     <th key={niche}>{niche}</th>
                   ))}
@@ -236,6 +239,11 @@ export default async function DealsPage({
                       <td>{deal.tat_days ?? "—"}</td>
                       <td>{deal.dr ?? "—"}</td>
                       <td>{deal.monthly_traffic?.toLocaleString() ?? "—"}</td>
+                      {placementReady && (
+                        <td>
+                          <BacklinkBadge deal={deal} />
+                        </td>
+                      )}
                       {niches.map((niche) => {
                         const price = priceByNiche.get(niche);
                         return (
@@ -247,7 +255,7 @@ export default async function DealsPage({
                         );
                       })}
                       <td className="pin-right">
-                        <DealRowActions deal={deal} />
+                        <DealRowActions deal={deal} placementReady={placementReady} />
                       </td>
                     </tr>
                   );
@@ -270,5 +278,39 @@ export default async function DealsPage({
         </code>
       </section>
     </div>
+  );
+}
+
+/** The live-backlink verdict for a deal row (spec §9). */
+function BacklinkBadge({
+  deal,
+}: {
+  deal: { placed_url?: string | null; link_status?: string; link_is_dofollow?: boolean | null; link_detail?: string | null };
+}) {
+  if (!deal.placed_url) return <span className="hint">—</span>;
+
+  const status = deal.link_status ?? "unchecked";
+  if (status === "unchecked") {
+    return <span className="badge bg-gray-100 text-gray-700">unchecked</span>;
+  }
+
+  const label =
+    status === "found"
+      ? deal.link_is_dofollow
+        ? "dofollow"
+        : "nofollow"
+      : status; // missing / error
+
+  const style =
+    status === "found" && deal.link_is_dofollow
+      ? "bg-green-50 text-[var(--color-ok)]"
+      : status === "found"
+        ? "bg-amber-50 text-[var(--color-warn)]"
+        : "bg-red-50 text-[var(--color-danger)]";
+
+  return (
+    <span className={`badge ${style}`} title={deal.link_detail ?? undefined}>
+      {label}
+    </span>
   );
 }

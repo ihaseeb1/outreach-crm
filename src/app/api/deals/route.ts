@@ -121,6 +121,11 @@ const dealSchema = z.object({
   max_links: z.number().int().min(0).max(100).nullable().optional(),
   payment_terms: z.string().max(500).nullable().optional(),
   payment_method: z.string().max(120).nullable().optional(),
+  // Link placement (spec §9). Only sent once migration 0012 is applied; the
+  // verifier fills in link_status/checked/etc., so those are not accepted here.
+  placed_url: z.string().max(2000).nullable().optional(),
+  target_url: z.string().max(2000).nullable().optional(),
+  anchor_text: z.string().max(300).nullable().optional(),
   currency: z.string().min(1).max(8).default("USD"),
   status: z
     .enum(["negotiating", "agreed", "ordered", "live", "rejected"])

@@ -345,6 +345,14 @@ export interface Deal {
   currency: string;
   status: DealStatus;
   notes: string | null;
+  /** Link-building placement tracker (spec §9, migration 0012). */
+  placed_url?: string | null;
+  target_url?: string | null;
+  anchor_text?: string | null;
+  link_status?: "unchecked" | "found" | "missing" | "error";
+  link_is_dofollow?: boolean | null;
+  link_checked_at?: Timestamp | null;
+  link_detail?: string | null;
   created_by: Uuid | null;
   created_at: Timestamp;
   updated_at: Timestamp;

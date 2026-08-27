@@ -18,7 +18,13 @@ import type { DealWithPrices } from "@/types/db";
  * uses when a publisher revises a quote — so this needed no new endpoint, just a
  * way to reach it from the page where the deals actually are.
  */
-export function DealRowActions({ deal }: { deal: DealWithPrices }) {
+export function DealRowActions({
+  deal,
+  placementReady = false,
+}: {
+  deal: DealWithPrices;
+  placementReady?: boolean;
+}) {
   const router = useRouter();
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -111,6 +117,7 @@ export function DealRowActions({ deal }: { deal: DealWithPrices }) {
             <DealForm
               existing={deal}
               quoteSource={deal.notes}
+              placementReady={placementReady}
               onSaved={() => setEditing(false)}
             />
           </div>

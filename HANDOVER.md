@@ -5,6 +5,47 @@ original seven build phases.
 
 ---
 
+## Phase 5 §9 — link placement tracker + live backlink verifier, 28 August (seventh session)
+
+Deployed to `main`. Typecheck clean, smoke **336/0**, build clean. **Needs
+migration `0012_link_placements.sql`** — hand-apply in Supabase (ref
+`rqztbqxzhykybnejjuba`). Deploy-safe: readers probe for the new columns
+(`dealPlacementReady`) and the backlinks cron try/catches its query, so the
+deals page and form work unchanged until 0012 is applied; the placement fields,
+the Backlink column and the Verify button appear once it is.
+
+§9 completes the build spec:
+
+- **Placement columns** on `deals` (0012): `placed_url`, `target_url`,
+  `anchor_text`, `link_status` (unchecked/found/missing/error),
+  `link_is_dofollow`, `link_checked_at`, `link_detail`. The deal form gains a
+  **Placement & verification** fieldset (placed URL, target URL, anchor).
+- **Live verifier.** `src/deals/backlink.ts` is the pure core (cheerio,
+  smoke-tested): `parseBacklink(html, {targetUrl, anchorText, pageUrl})` finds an
+  `<a>` to the target, resolves relative hrefs, prefers a dofollow match, and
+  reports dofollow + anchor-match. `normalizeLinkUrl`/`sameTarget` match across
+  scheme/`www`/trailing-slash but keep the query string. `src/deals/verify.ts`
+  orchestrates: fetches `placed_url` **through the hardened §7 scraper** (SSRF
+  guard + retries), writes the verdict, logs `deal.backlink_checked`.
+- **On demand + scheduled.** `POST /api/deals/verify {id}` powers the form's
+  **Verify now**; `GET/POST /api/cron/backlinks` re-checks the least-recently
+  checked placements (≥24h old) each tick — added to `.github/workflows/tick.yml`
+  as a seventh parallel `hit backlinks`, and it records a `backlinks`
+  worker_runs heartbeat. The deals table shows a **Backlink** badge
+  (dofollow / nofollow / missing / error) with the detail on hover.
+
+**Check live after applying 0012:** on a deal, Edit → fill Placed URL + Target
+URL + anchor → Save → **Verify now**. A real live dofollow link shows
+"live · dofollow"; a pulled link shows "missing"; a nofollowed one shows
+"nofollow". The Backlink column reflects it, and the cron keeps it current.
+
+**Build spec COMPLETE** — §1–§9 all shipped. (§2 priority, §4 blockers + row
+actions, §5 roles/approval, §6 scrape delete, §7 crawler hardening, §8 archive/
+cleanup, §9 placement/verifier; §1/§3 were already in the app per the Phase 0
+audit.)
+
+---
+
 ## Phase 4 §7 — crawler hardening + robots toggle, 28 August (seventh session)
 
 Deployed to `main`. Typecheck clean, smoke **329/0**, build clean. **No

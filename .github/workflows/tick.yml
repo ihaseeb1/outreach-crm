@@ -78,6 +78,7 @@ jobs:
           hit health &
           hit validate &
           hit scrape &
+          hit backlinks &
           wait
 
           failed=""
