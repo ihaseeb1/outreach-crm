@@ -415,6 +415,67 @@ async function processCampaignContact(
   return handleSendFailure(supabase, campaign, entry, outcome.code, outcome.reason);
 }
 
+/**
+ * Sends one enrolled contact's current step immediately, ignoring the window
+ * (spec §4.2 "Send now"). Reuses the exact same per-contact path as the batch —
+ * suppression, daily cap and the closing block all still apply — so this can
+ * never send something the scheduled run would refuse; it only skips the wait.
+ * The caller is responsible for reactivating a failed/paused enrolment first.
+ */
+export async function sendCampaignContactNow(
+  supabase: SupabaseClient,
+  params: { workspaceId: string; campaignContactId: string },
+): Promise<{ ok: boolean; outcome?: ContactOutcome; error?: string }> {
+  const { data: ccRow } = await supabase
+    .from("campaign_contacts")
+    .select("*")
+    .eq("id", params.campaignContactId)
+    .eq("workspace_id", params.workspaceId)
+    .maybeSingle();
+  if (!ccRow) return { ok: false, error: "Enrolment not found." };
+  const entry = ccRow as CampaignContact;
+
+  const { data: campaignRow } = await supabase
+    .from("campaigns")
+    .select("*")
+    .eq("id", entry.campaign_id)
+    .eq("workspace_id", params.workspaceId)
+    .maybeSingle();
+  if (!campaignRow) return { ok: false, error: "Campaign not found." };
+  const campaign = campaignRow as Campaign;
+
+  const steps = await loadSteps(supabase, campaign.id);
+  if (steps.length === 0) return { ok: false, error: "Campaign has no sequence steps." };
+  const mailboxes = await loadMailboxes(supabase, campaign);
+  if (mailboxes.length === 0) {
+    return { ok: false, error: "No active mailbox to send from." };
+  }
+  const { postalAddress, tracking } = await fetchSendingConfig(
+    supabase,
+    campaign.workspace_id,
+  );
+
+  const { data: claimed } = await supabase.rpc("campaign_contact_claim", {
+    contact_row: entry.id,
+    lock_seconds: 300,
+  });
+  if (claimed !== true) {
+    return { ok: false, error: "This contact is already sending — try again shortly." };
+  }
+
+  const outcome = await processCampaignContact(supabase, {
+    campaign,
+    entry,
+    steps,
+    mailboxes,
+    window: resolveWindow(campaign.settings),
+    postalAddress,
+    tracking,
+  });
+
+  return { ok: outcome === "sent" || outcome === "completed", outcome };
+}
+
 async function handleSendFailure(
   supabase: SupabaseClient,
   campaign: Campaign,

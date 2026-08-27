@@ -59,6 +59,13 @@ export const env = {
   cronSecret: () => required("CRON_SECRET"),
   encryptionKey: () => required("APP_ENCRYPTION_KEY"),
 
+  // Registration controls (spec §5.1). Both default to the safe setting: new
+  // accounts must be approved, and registration is open. Set SIGNUPS_OPEN=false
+  // to close it entirely; SIGNUPS_REQUIRE_APPROVAL=false to auto-activate.
+  signupsOpen: () => optional("SIGNUPS_OPEN", "true") !== "false",
+  signupsRequireApproval: () =>
+    optional("SIGNUPS_REQUIRE_APPROVAL", "true") !== "false",
+
   scraperUserAgent: () =>
     optional(
       "SCRAPER_USER_AGENT",

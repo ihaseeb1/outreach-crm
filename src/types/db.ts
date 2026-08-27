@@ -6,10 +6,17 @@
 export type Uuid = string;
 export type Timestamp = string;
 
+export type AccountStatus = "pending" | "active" | "rejected" | "banned";
+export type AppRole = "super_admin" | "admin" | "member";
+
 export interface Profile {
   id: Uuid;
   email: string;
   full_name: string | null;
+  status: AccountStatus;
+  app_role: AppRole;
+  approved_at: Timestamp | null;
+  approved_by: Uuid | null;
   created_at: Timestamp;
   updated_at: Timestamp;
 }

@@ -9,6 +9,7 @@ const PUBLIC_PREFIXES = [
   "/auth",
   "/unsubscribe",
   "/api/cron",
+  "/api/auth",
   "/api/unsubscribe",
   "/api/public",
   // Open and click tracking. Fetched by the recipient's mail client, which has

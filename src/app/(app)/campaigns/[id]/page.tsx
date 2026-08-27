@@ -9,6 +9,7 @@ import { CampaignPurgeButton } from "@/components/campaign-purge-button";
 import { SequenceEditor, type EditableStep } from "@/components/sequence-editor";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { blockerReason } from "@/campaigns/blockers";
+import { EnrolledRowActions } from "@/components/enrolled-row-actions";
 import { resolveWindow } from "@/campaigns/schedule";
 import { fmtDateTime } from "@/lib/datetime";
 import {
@@ -384,6 +385,7 @@ export default async function CampaignDetailPage({
                   <th>Next send</th>
                   <th>Last sent</th>
                   <th>Not sending</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -450,6 +452,9 @@ export default async function CampaignDetailPage({
                         }
                         return <span className="hint">—</span>;
                       })()}
+                    </td>
+                    <td>
+                      <EnrolledRowActions id={row.id} status={row.status} />
                     </td>
                   </tr>
                 ))}

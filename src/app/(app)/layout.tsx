@@ -21,12 +21,19 @@ const NAV: NavItem[] = [
   { href: "/settings", label: "Settings" },
 ];
 
+const ADMIN_NAV: NavItem = { href: "/admin/approvals", label: "Approvals" };
+
 export default async function AppLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
   const session = await requireSession();
+
+  const nav =
+    session.appRole === "super_admin" || session.appRole === "admin"
+      ? [...NAV, ADMIN_NAV]
+      : NAV;
 
   return (
     <div className="flex min-h-screen">
@@ -36,7 +43,7 @@ export default async function AppLayout({
           <span className="hint block truncate">{session.workspace.name}</span>
         </Link>
 
-        <SideNav items={NAV} />
+        <SideNav items={nav} />
 
         <form action="/auth/signout" method="post" className="mt-6">
           <button className="btn-secondary w-full" type="submit">
