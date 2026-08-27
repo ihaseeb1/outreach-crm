@@ -5,6 +5,50 @@ original seven build phases.
 
 ---
 
+## Phase 2 of the build spec, 28 August (sixth session)
+
+Deployed to `main`. Typecheck clean, smoke 319/0, build clean. **Needs migration
+`0009_roles_approval.sql`** — hand-apply in Supabase. Code falls back to
+`active`/`member` when the new columns are absent, so this deploy is safe to
+land first; the gate turns on when 0009 runs.
+
+§5 **Roles + approval gate.** `profiles` gains `status`
+(pending/active/rejected/banned) and `app_role`
+(super_admin/admin/member). The gate is enforced centrally: `is_workspace_member()`
+— already the guard on every workspace table — now also requires the caller be
+`active`, so a pending account reads no workspace data anywhere. Existing
+accounts are grandfathered `active` and the founding account becomes
+`super_admin` (no lockout). New signups default to `pending`. **Security fix
+found while building this:** the `profiles` self-update policy let a user set
+their *own* status/role (self-approve to super_admin) — 0009 revokes table
+UPDATE and re-grants only `full_name`, so status/role are service-role only.
+
+- Server-side signup `/api/auth/signup` (service role) enforces `SIGNUPS_OPEN`
+  and `SIGNUPS_REQUIRE_APPROVAL`; the signup page is a server gate + client
+  form ending on a "what happens next" screen.
+- `/admin/approvals` — Approve/Reject/Ban, audit-logged, self + super_admin
+  protected. Nav link shows only to admins.
+- `/pending` waiting room, outside the `(app)` group so it never loops.
+
+§5.2 **Logout fix.** `requireSession`/`getSession` now send an authenticated
+but unapproved account to `/pending`, and an active-but-empty-workspace read to
+`/pending?issue=workspace` — **never `/login`**. Only a genuinely absent user
+hits `/login`. This is the "empty RLS read looked like a logout" bounce, gone.
+
+§4.2 **Enrolled-row actions** (asked for after Phase 1). The campaign enrolled
+table now has per-row **Send now** (pushes one contact's current step out
+immediately, reactivating a stalled enrolment first) and **Remove** (out of the
+campaign, contact record untouched). Backed by
+`/api/campaigns/contacts/actions` + `sendCampaignContactNow`, which reuses the
+batch send path so suppression/cap/footer still apply.
+
+**Check live after applying 0009:** you (founding account) are super_admin —
+the **Approvals** link appears in the nav; a test signup shows as pending there
+and is blocked until you Approve it. On a campaign, each enrolled row has
+**Send now** / **Remove**. A normal session no longer bounces to /login.
+
+---
+
 ## Phase 1 of the build spec, 28 August (sixth session)
 
 Deployed to `main`. `npm run typecheck` clean, `npm run smoke` **319 passed /
