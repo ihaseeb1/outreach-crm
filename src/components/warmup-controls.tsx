@@ -80,11 +80,15 @@ export function WarmupControls({
       {state.enabled && (
         <>
           <div>
-            <div className="flex items-center justify-between text-xs text-[var(--color-muted)]">
-              <span>Ramp progress</span>
-              <span>
-                {state.current_daily_volume} → {state.target_daily_volume} /day
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-[var(--color-muted)]">
+                Warming up at{" "}
+                <strong className="text-[var(--color-ink)]">
+                  {state.current_daily_volume}
+                </strong>{" "}
+                emails a day, climbing to {state.target_daily_volume}
               </span>
+              <span className="text-[var(--color-muted)]">{progress}%</span>
             </div>
             <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-[var(--color-canvas)]">
               <div
@@ -96,7 +100,7 @@ export function WarmupControls({
 
           <div className="grid grid-cols-3 gap-2">
             <label className="block">
-              <span className="hint">Target/day</span>
+              <span className="hint">Goal / day</span>
               <input
                 className="input px-2 py-1 text-sm"
                 type="number"
@@ -111,7 +115,7 @@ export function WarmupControls({
               />
             </label>
             <label className="block">
-              <span className="hint">Ramp/day</span>
+              <span className="hint">Increase / day</span>
               <input
                 className="input px-2 py-1 text-sm"
                 type="number"
@@ -126,7 +130,7 @@ export function WarmupControls({
               />
             </label>
             <label className="block">
-              <span className="hint">Reply rate</span>
+              <span className="hint">Reply %</span>
               <input
                 className="input px-2 py-1 text-sm"
                 type="number"
@@ -142,6 +146,11 @@ export function WarmupControls({
               />
             </label>
           </div>
+          <p className="hint">
+            Goal is the most it will send a day; it adds “increase / day” each day
+            until it gets there, only while the mailbox is healthy. Reply % is how
+            often a received warmup email gets a reply.
+          </p>
         </>
       )}
 

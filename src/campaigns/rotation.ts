@@ -60,6 +60,9 @@ export function isEligible(
   if (remainingCapacity(mailbox, now) <= 0) return false;
 
   if (!options.ignoreRest) {
+    // The mailbox's own inter-send gap is the pacing — never bypassed, so a
+    // mailbox never fires two sends seconds apart. It sends at most once per
+    // rest gap, which across the day's ticks is what fills its daily limit.
     return mailboxIsRested(
       mailbox.last_send_at,
       mailbox.min_gap_seconds,

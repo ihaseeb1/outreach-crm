@@ -158,9 +158,11 @@ export async function POST(request: Request) {
   }
 
   if (parsed.data.job === "warmup") {
+    // Bounded by the engine's own time guard, so a manual run does as many as it
+    // safely can and defers the rest — it never bursts a single mailbox.
     const result = await runWarmupBatch(supabase, {
       workspaceId,
-      sendLimit: Math.min(parsed.data.limit ?? 5, 20),
+      sendLimit: Math.min(parsed.data.limit ?? 40, 40),
     });
     return NextResponse.json({ ok: true, job: "warmup", ...result });
   }

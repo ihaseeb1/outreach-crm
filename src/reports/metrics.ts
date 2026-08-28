@@ -97,6 +97,36 @@ export interface SeriesPoint extends DailyPoint {
 }
 
 /**
+ * A dense day series built from per-day counts rather than raw timestamps.
+ *
+ * The chart used to be handed every send/reply/bounce timestamp and tally them
+ * here. That only works while every row fits under the database's row cap;
+ * past it, the chart silently under-counts. `report_series` now does the
+ * counting in SQL and hands back one row per day, so this fills the gaps (a
+ * quiet day is a zero, not a missing bar) and nothing is ever capped.
+ */
+export function densifyDaily(
+  days: number,
+  counts: Map<string, { sent: number; replies: number; bounces: number }>,
+  today: Date = new Date(),
+): DailyPoint[] {
+  const series: DailyPoint[] = [];
+  for (let offset = days - 1; offset >= 0; offset -= 1) {
+    const day = new Date(today.getTime() - offset * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    const found = counts.get(day);
+    series.push({
+      date: day,
+      sent: found?.sent ?? 0,
+      replies: found?.replies ?? 0,
+      bounces: found?.bounces ?? 0,
+    });
+  }
+  return series;
+}
+
+/**
  * The volume chart's data, bucketed by day or by week.
  *
  * A 12-month report has 365 days in it. Rendered as one bar each inside a card
@@ -113,8 +143,18 @@ export function buildSeries(
   bucket: "day" | "week" | "month" = "day",
   today: Date = new Date(),
 ): SeriesPoint[] {
-  const daily = buildDailySeries(days, input, today);
+  return bucketSeries(buildDailySeries(days, input, today), bucket);
+}
 
+/**
+ * Folds a dense day series into day / week / month bars. Split out from
+ * buildSeries so the same bucketing serves both the timestamp path (tests) and
+ * the counted path (`densifyDaily` + report_series).
+ */
+export function bucketSeries(
+  daily: DailyPoint[],
+  bucket: "day" | "week" | "month" = "day",
+): SeriesPoint[] {
   if (bucket === "day") {
     return daily.map((point) => ({ ...point, endDate: point.date, days: 1 }));
   }

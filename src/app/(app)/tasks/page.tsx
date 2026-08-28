@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-import { TasksPanel, type TaskItem } from "@/components/notes-tasks";
+import { DoneTasksList, TasksPanel, type TaskItem } from "@/components/notes-tasks";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
 
@@ -67,18 +67,7 @@ export default async function TasksPage() {
         </section>
       )}
 
-      {done.length > 0 && (
-        <section className="card card-pad">
-          <h2 className="mb-2 text-sm font-semibold">Recently done</h2>
-          <ul className="space-y-1 text-sm text-[var(--color-muted)]">
-            {done.slice(0, 20).map((task) => (
-              <li key={task.id} className="line-through">
-                {task.title}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+      <DoneTasksList tasks={done.slice(0, 50)} />
     </div>
   );
 }

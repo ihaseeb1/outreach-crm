@@ -103,6 +103,65 @@ export function NotesPanel({
   );
 }
 
+/**
+ * The completed-tasks list, with a Clear-all and per-row delete. Split out so
+ * the Tasks page can show done tasks (which its open TasksPanel filters out)
+ * and still let them be cleared.
+ */
+export function DoneTasksList({ tasks }: { tasks: TaskItem[] }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+
+  async function remove(id: string) {
+    await fetch(`/api/tasks?id=${id}`, { method: "DELETE" });
+    router.refresh();
+  }
+
+  async function clearAll() {
+    setBusy(true);
+    try {
+      await fetch("/api/tasks?clear=done", { method: "DELETE" });
+      router.refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (tasks.length === 0) return null;
+
+  return (
+    <section className="card card-pad">
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-sm font-semibold">Recently done</h2>
+        <button
+          type="button"
+          className="hint hover:text-[var(--color-danger)] hover:underline"
+          onClick={clearAll}
+          disabled={busy}
+        >
+          {busy ? "Clearing…" : "Clear all"}
+        </button>
+      </div>
+      <ul className="space-y-1 text-sm text-[var(--color-muted)]">
+        {tasks.map((task) => (
+          <li key={task.id} className="group flex items-center gap-2">
+            <span className="line-through">{task.title}</span>
+            <button
+              type="button"
+              aria-label={`Delete task: ${task.title}`}
+              title="Delete task"
+              className="ml-auto opacity-0 transition-opacity hover:text-[var(--color-danger)] group-hover:opacity-100"
+              onClick={() => remove(task.id)}
+            >
+              Delete
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export function TasksPanel({
   contactId,
   tasks,
@@ -153,11 +212,39 @@ export function TasksPanel({
     router.refresh();
   }
 
+  async function remove(id: string) {
+    await fetch(`/api/tasks?id=${id}`, { method: "DELETE" });
+    router.refresh();
+  }
+
+  async function clearDone() {
+    setBusy(true);
+    try {
+      await fetch("/api/tasks?clear=done", { method: "DELETE" });
+      router.refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const today = new Date().toISOString().slice(0, 10);
+  const doneCount = tasks.filter((task) => task.done).length;
 
   return (
     <section className="card card-pad space-y-3">
-      <h2 className="text-sm font-semibold">{title}</h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold">{title}</h2>
+        {doneCount > 0 && (
+          <button
+            type="button"
+            className="hint hover:text-[var(--color-danger)] hover:underline"
+            onClick={clearDone}
+            disabled={busy}
+          >
+            Clear completed ({doneCount})
+          </button>
+        )}
+      </div>
 
       <form onSubmit={add} className="flex flex-wrap gap-2">
         <input
@@ -185,7 +272,7 @@ export function TasksPanel({
           {tasks.map((task) => {
             const overdue = !task.done && task.due_date && task.due_date < today;
             return (
-              <li key={task.id} className="flex items-center gap-2 text-sm">
+              <li key={task.id} className="group flex items-center gap-2 text-sm">
                 <input
                   type="checkbox"
                   checked={task.done}
@@ -202,6 +289,15 @@ export function TasksPanel({
                     {task.due_date}
                   </span>
                 )}
+                <button
+                  type="button"
+                  aria-label={`Delete task: ${task.title}`}
+                  title="Delete task"
+                  className="ml-auto hint opacity-0 transition-opacity hover:text-[var(--color-danger)] group-hover:opacity-100"
+                  onClick={() => remove(task.id)}
+                >
+                  Delete
+                </button>
               </li>
             );
           })}

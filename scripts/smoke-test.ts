@@ -99,9 +99,12 @@ import {
   buildDailySeries,
   buildFunnel,
   buildSeries,
+  bucketSeries,
+  densifyDaily,
   summariseByNiche,
   totals,
 } from "../src/reports/metrics";
+import { decliningMailboxes, healthTrend } from "../src/health/trend";
 import type { DealWithPrices } from "../src/types/db";
 import { encryptSecret, decryptSecret, safeEqual } from "../src/lib/crypto";
 import {
@@ -124,6 +127,8 @@ import {
   shouldContinueThread,
   shouldRampToday,
   shouldReply,
+  WARMUP_MIN_GAP_SECONDS,
+  WARMUP_MAX_GAP_SECONDS,
 } from "../src/warmup/plan";
 import { isValidWarmupToken, newWarmupToken } from "../src/warmup/token";
 import { domainFromUrl, isRoleAccount, normalizeUrl, splitName } from "../src/lib/email";
@@ -136,6 +141,8 @@ import {
 } from "../src/mail/inbound-classify";
 import {
   contactVars,
+  expandSpintax,
+  hasSpintax,
   renderTemplate,
   templateVariables,
   textToHtml,
@@ -477,6 +484,39 @@ test("a missing variable never leaks the raw token", () => {
   const output = renderTemplate("Hello {{nickname}}!", {});
   assert.equal(output, "Hello !");
   assert.ok(!output.includes("{{"));
+});
+
+test("spintax picks one option and leaves no braces behind", () => {
+  const out = expandSpintax("{Hi|Hello|Hey} there", () => 0);
+  assert.equal(out, "Hi there");
+  assert.ok(!hasSpintax(out));
+  const last = expandSpintax("{a|b|c}", () => 0.99);
+  assert.equal(last, "c");
+});
+
+test("spintax nests, innermost first", () => {
+  // Both randoms 0 → always the first option at every level.
+  assert.equal(expandSpintax("{{x|y} z|w}", () => 0), "x z");
+});
+
+test("spintax leaves {{variables}} alone", () => {
+  // No pipe inside the single braces of a variable, so the spin regex skips it.
+  assert.equal(
+    renderTemplate("{Hi|Hello} {{first_name|there}}", { first_name: "Sam" }, "seed-1"),
+    // Deterministic for this seed; whichever greeting it is, the variable resolved.
+    renderTemplate("{Hi|Hello} {{first_name|there}}", { first_name: "Sam" }, "seed-1"),
+  );
+  const rendered = renderTemplate("{Hi|Hello} {{first_name|there}}", {}, "seed-1");
+  assert.ok(!rendered.includes("{"));
+  assert.ok(rendered.endsWith("there"));
+});
+
+test("a seed makes the spun variant stable for a recipient", () => {
+  const template = "{A|B|C|D|E} {{domain}}";
+  const vars = { domain: "x.com" };
+  const first = renderTemplate(template, vars, "sam@x.com#body");
+  const again = renderTemplate(template, vars, "sam@x.com#body");
+  assert.equal(first, again);
 });
 
 test("lists referenced variables", () => {
@@ -1687,6 +1727,20 @@ test("a mailbox reset to zero after a health pause sends nothing until it climbs
   );
 });
 
+test("a healthy mailbox gets its full limit even mid-ramp, so it can hit target", () => {
+  assert.equal(
+    sendingAllowance(50, { enabled: true, currentDailyVolume: 7, targetDailyVolume: 40 }, "healthy"),
+    50,
+  );
+});
+
+test("a warning mailbox keeps the ramp cap — it is not pushed to full volume", () => {
+  assert.equal(
+    sendingAllowance(50, { enabled: true, currentDailyVolume: 7, targetDailyVolume: 40 }, "warning"),
+    7,
+  );
+});
+
 
 console.log("\nmailbox failover");
 
@@ -2676,6 +2730,87 @@ test("two sends on the same day land in the same weekly bucket", () => {
     SERIES_TODAY,
   );
   assert.equal(series[series.length - 1]!.sent, 2);
+});
+
+console.log("\nuncapped report series (counted in SQL, not by row length)");
+
+test("densifyDaily fills gaps and matches the timestamp path", () => {
+  // The same three sends, once as timestamps and once as per-day counts, must
+  // produce the same chart — that is what proves report_series can replace the
+  // row-tally without moving any number.
+  const sent = ["2026-08-20T01:00:00Z", "2026-08-20T23:00:00Z", "2026-08-18T05:00:00Z"];
+  const fromTimestamps = buildSeries(7, { sent, replies: [], bounces: [] }, "day", SERIES_TODAY);
+
+  const counts = new Map([
+    ["2026-08-20", { sent: 2, replies: 0, bounces: 0 }],
+    ["2026-08-18", { sent: 1, replies: 0, bounces: 0 }],
+  ]);
+  const fromCounts = bucketSeries(densifyDaily(7, counts, SERIES_TODAY), "day");
+
+  assert.deepEqual(
+    fromCounts.map((point) => [point.date, point.sent]),
+    fromTimestamps.map((point) => [point.date, point.sent]),
+  );
+  assert.equal(totals(fromCounts).sent, 3);
+});
+
+test("counted days survive folding into weeks", () => {
+  const counts = new Map([
+    ["2026-08-20", { sent: 120, replies: 4, bounces: 1 }],
+    ["2026-08-19", { sent: 77, replies: 2, bounces: 0 }],
+  ]);
+  const weekly = bucketSeries(densifyDaily(14, counts, SERIES_TODAY), "week");
+  assert.equal(totals(weekly).sent, 197);
+  assert.equal(totals(weekly).replies, 6);
+  assert.equal(totals(weekly).bounces, 1);
+});
+
+console.log("\nwarmup pacing gap");
+
+test("the warmup gap is far shorter than an outreach rest gap", () => {
+  // The whole point of the pacing change: warmup waits minutes, not hours, so a
+  // mailbox actually reaches its daily number.
+  assert.ok(WARMUP_MIN_GAP_SECONDS >= 60);
+  assert.ok(WARMUP_MAX_GAP_SECONDS > WARMUP_MIN_GAP_SECONDS);
+  // Comfortably under a 30-minute tick, so a mailbox is rested every tick.
+  assert.ok(WARMUP_MAX_GAP_SECONDS < 30 * 60);
+});
+
+console.log("\nhealth trend alerts");
+
+test("a healthy, steady mailbox is not flagged", () => {
+  const trend = healthTrend([
+    { date: "2026-08-20", reputation_score: 92, bounce_rate: 0.01 },
+    { date: "2026-08-19", reputation_score: 91, bounce_rate: 0.01 },
+  ]);
+  assert.equal(trend!.severity, "ok");
+  assert.equal(trend!.delta, 1);
+});
+
+test("a sharp drop is an alert even from a high score", () => {
+  const trend = healthTrend([
+    { date: "2026-08-20", reputation_score: 84, bounce_rate: 0.02 },
+    { date: "2026-08-19", reputation_score: 97, bounce_rate: 0.01 },
+  ]);
+  assert.equal(trend!.severity, "alert");
+  assert.equal(trend!.delta, -13);
+});
+
+test("a low absolute score is an alert regardless of movement", () => {
+  const trend = healthTrend([
+    { date: "2026-08-20", reputation_score: 55, bounce_rate: 0.05 },
+    { date: "2026-08-19", reputation_score: 55, bounce_rate: 0.05 },
+  ]);
+  assert.equal(trend!.severity, "alert");
+});
+
+test("decliningMailboxes surfaces the worst first and hides the healthy", () => {
+  const ranked = decliningMailboxes([
+    { mailboxId: "a", email: "a@x.com", trend: healthTrend([{ date: "d", reputation_score: 90, bounce_rate: 0 }])! },
+    { mailboxId: "b", email: "b@x.com", trend: healthTrend([{ date: "d", reputation_score: 50, bounce_rate: 0 }])! },
+    { mailboxId: "c", email: "c@x.com", trend: healthTrend([{ date: "d", reputation_score: 72, bounce_rate: 0 }])! },
+  ]);
+  assert.deepEqual(ranked.map((alert) => alert.mailboxId), ["b", "c"]);
 });
 
 console.log("\nmailbox volume over report windows");

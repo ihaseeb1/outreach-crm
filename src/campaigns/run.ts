@@ -46,6 +46,9 @@ export interface CampaignBatchResult {
 
 const MAX_ATTEMPTS = 3;
 
+/** Leaves headroom under the 60s function limit for the final send to finish. */
+const BATCH_BUDGET_MS = 45_000;
+
 export async function runCampaignBatch(
   supabase: SupabaseClient,
   options: {
@@ -121,8 +124,13 @@ export async function runCampaignBatch(
   const contexts = new Map<string, CampaignContext | null>();
   let remaining = budget;
 
+  // Stops the batch before the 60s function limit so a larger budget can never
+  // cut a send off mid-flight — the unsent contacts stay due for the next tick.
+  // This bounds work per invocation; it does not touch any mailbox's send gap.
+  const startedMs = Date.now();
+
   for (const entry of ordered) {
-    if (remaining <= 0) break;
+    if (remaining <= 0 || Date.now() - startedMs > BATCH_BUDGET_MS) break;
 
     let ctx = contexts.get(entry.campaign_id);
     if (ctx === undefined) {
@@ -344,9 +352,13 @@ async function processCampaignContact(
     campaign: campaign.name,
   });
 
+  // Seeded on the recipient + step so spintax picks one variant and keeps it:
+  // a retry or a threaded follow-up must not quietly rewrite what was sent.
+  const spinSeed = `${contact.email}#${stepNumber}`;
+
   const subject = thread?.subject
     ? ensureReplyPrefix(thread.subject)
-    : renderTemplate(step.subject_template, vars);
+    : renderTemplate(step.subject_template, vars, `${spinSeed}#subject`);
 
   const outcome = await sendEmail(supabase, {
     workspaceId: campaign.workspace_id,
@@ -357,7 +369,7 @@ async function processCampaignContact(
     toEmail: contact.email,
     toName: [contact.first_name, contact.last_name].filter(Boolean).join(" ") || null,
     subject,
-    body: renderTemplate(step.body_template, vars),
+    body: renderTemplate(step.body_template, vars, `${spinSeed}#body`),
     kind: "campaign",
     inReplyTo: thread?.messageId ?? null,
     references: thread?.messageId ? [thread.messageId] : undefined,
@@ -623,6 +635,7 @@ async function loadMailboxes(
     daily_limit: sendingAllowance(
       mailbox.daily_limit,
       warmupByMailbox.get(mailbox.id) ?? null,
+      mailbox.health_status,
     ),
   }));
 }

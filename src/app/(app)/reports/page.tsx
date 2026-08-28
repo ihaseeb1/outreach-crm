@@ -5,23 +5,17 @@ import {
   type ReportMailboxRow,
 } from "@/components/report-mailbox-table";
 import { ReportRangePicker } from "@/components/report-range-picker";
+import { VolumeChart, type VolumePoint } from "@/components/volume-chart";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
-import {
-  MAX_REPORT_MAILBOX_WINDOW,
-  REPORT_MAILBOX_WINDOWS,
-  summariseVolume,
-  type SentRow,
-} from "@/mailboxes/volume";
+import { MAX_REPORT_MAILBOX_WINDOW } from "@/mailboxes/volume";
 import {
   buildFunnel,
-  buildSeries,
   formatPercent,
   summariseByNiche,
-  totals,
   type NichePrice,
 } from "@/reports/metrics";
-import { summariseEngagement } from "@/mail/tracking-summary";
+import { loadReportData } from "@/reports/data";
 import {
   parseReportBucket,
   parseReportRange,
@@ -29,8 +23,6 @@ import {
 } from "@/reports/ranges";
 
 export const dynamic = "force-dynamic";
-
-const MAILBOX_WINDOW_DAYS = REPORT_MAILBOX_WINDOWS.map((window) => window.days);
 
 export default async function ReportsPage({
   searchParams,
@@ -51,9 +43,7 @@ export default async function ReportsPage({
 
   // The mailbox table has its own windows, up to 3 months, and they are
   // independent of the page range: picking "7 days" at the top must not empty
-  // the "3 months" column below it. So its rows are read over the widest of its
-  // own windows — or over the page range when that reaches further back, which
-  // costs nothing because the query is already running.
+  // the "3 months" column below it.
   const mailboxSince = new Date(
     Math.min(
       Date.parse(since),
@@ -62,28 +52,22 @@ export default async function ReportsPage({
   ).toISOString();
 
   const [
-    { data: sentRows },
-    { data: inboundRows },
+    report,
     { data: mailboxRows },
     { data: healthRows },
     { data: dealRows },
     contactedResult,
+    lifetime,
   ] = await Promise.all([
-    supabase
-      .from("messages")
-      .select("sent_at, mailbox_id, meta")
-      .eq("workspace_id", workspaceId)
-      .eq("direction", "outbound")
-      .eq("status", "sent")
-      .gte("sent_at", mailboxSince)
-      .limit(50_000),
-    supabase
-      .from("messages")
-      .select("received_at, is_bounce, is_auto_reply")
-      .eq("workspace_id", workspaceId)
-      .eq("direction", "inbound")
-      .gte("received_at", since)
-      .limit(20_000),
+    // Headline figures, the chart, and per-mailbox volume — all counted in the
+    // database (migration 0013) so nothing is capped at 1000 rows any more.
+    loadReportData(supabase, {
+      workspaceId,
+      since,
+      days: range.days,
+      bucket: range.bucket,
+      mailboxSince,
+    }),
     supabase
       .from("mailboxes")
       .select("id, email, health_status, sent_today, daily_limit")
@@ -104,52 +88,13 @@ export default async function ReportsPage({
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspaceId)
       .neq("pipeline_stage", "new"),
+    loadLifetimeTotals(supabase, workspaceId),
   ]);
 
-  // Trimmed back to the page range: the query above deliberately reached
-  // further so the mailbox table could have its own windows, and the headline
-  // figures must not silently inherit that wider span.
-  //
-  // Compared as parsed times, not as strings. Postgres returns
-  // `2026-08-20T09:00:00+00:00` and `toISOString()` produces
-  // `2026-08-20T00:00:00.000Z`; those two formats do not sort against each other.
-  const sinceMs = Date.parse(since);
-  const sentInRange = ((sentRows ?? []) as {
-    sent_at: string | null;
-    meta: Record<string, unknown> | null;
-  }[]).filter(
-    (row) => Boolean(row.sent_at) && Date.parse(row.sent_at as string) >= sinceMs,
-  );
-  const sent = sentInRange.map((row) => row.sent_at as string);
-
-  // Opens and clicks across the same period. Reads the tracking record already
-  // sitting on each message's meta (see mail/tracking-summary), so it needs no
-  // extra query and cannot disagree with the sent count above — both come from
-  // the one `messages` read.
-  const engagement = summariseEngagement(sentInRange.map((row) => row.meta));
-
-  const inbound = (inboundRows ?? []) as {
-    received_at: string | null;
-    is_bounce: boolean;
-    is_auto_reply: boolean;
-  }[];
-
-  const replies = inbound
-    .filter((row) => !row.is_bounce && !row.is_auto_reply)
-    .map((row) => row.received_at)
-    .filter((value): value is string => Boolean(value));
-
-  const bounces = inbound
-    .filter((row) => row.is_bounce)
-    .map((row) => row.received_at)
-    .filter((value): value is string => Boolean(value));
-
-  const series = buildSeries(
-    range.days,
-    { sent, replies, bounces },
-    range.bucket,
-  );
-  const summary = totals(series);
+  const series = report.series;
+  const summary = report.summary;
+  const engagement = report.engagement;
+  const volumes = report.volumes;
 
   const deals = (dealRows ?? []) as unknown as {
     id: string;
@@ -172,7 +117,7 @@ export default async function ReportsPage({
 
   const funnel = buildFunnel({
     contacted: contactedResult.count ?? 0,
-    replied: new Set(replies).size ? replies.length : 0,
+    replied: summary.replies,
     dealsLogged: deals.length,
     dealsWon: wonDeals.length,
   });
@@ -194,14 +139,6 @@ export default async function ReportsPage({
     if (!latestHealth.has(row.mailbox_id)) latestHealth.set(row.mailbox_id, row);
   }
 
-  // Every mailbox window in one pass over the rows already fetched, so the
-  // toggle in the table below is instant and costs no extra query.
-  const volumes = summariseVolume(
-    (sentRows ?? []) as SentRow[],
-    new Date(),
-    MAILBOX_WINDOW_DAYS,
-  );
-
   const mailboxRowsForTable: ReportMailboxRow[] = mailboxes.map((mailbox) => {
     const health = latestHealth.get(mailbox.id);
     return {
@@ -215,7 +152,13 @@ export default async function ReportsPage({
     };
   });
 
-  const peak = Math.max(1, ...series.map((point) => point.sent));
+  const volumePoints: VolumePoint[] = series.map((point) => ({
+    key: point.date,
+    label: bucketLabel(point, range.bucket),
+    sent: point.sent,
+    replies: point.replies,
+    bounces: point.bounces,
+  }));
 
   // Averaged over buckets that have actually happened. Including a month that
   // is three days old alongside eleven complete ones drags the average down and
@@ -238,8 +181,32 @@ export default async function ReportsPage({
             {range.key === "ytd" && ` — ${range.days} days so far`}.
           </p>
         </div>
-        <ReportRangePicker value={range.key} bucket={range.bucket} />
+        <div className="flex items-center gap-3">
+          <a
+            className="text-sm text-[var(--color-brand)] hover:underline"
+            href={`/api/reports/export?range=${range.key}&bucket=${range.bucket}`}
+          >
+            Export CSV
+          </a>
+          <ReportRangePicker value={range.key} bucket={range.bucket} />
+        </div>
       </div>
+
+      {/* All-time monitor. Counted in the database, so these keep climbing past
+          1000 — the running totals for the whole CRM, independent of the range
+          picker above. */}
+      <section className="card card-pad">
+        <div className="flex items-baseline justify-between">
+          <h2 className="text-sm font-semibold">All-time totals</h2>
+          <span className="hint">Live count · no limit</span>
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <Monitor label="Emails sent" value={lifetime.sent} color="var(--color-brand)" />
+          <Monitor label="Replies" value={lifetime.replies} color="var(--color-ok)" />
+          <Monitor label="Bounces" value={lifetime.bounces} color="var(--color-danger)" />
+          <Monitor label="Contacts" value={lifetime.contacts} color="var(--color-ink)" />
+        </div>
+      </section>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Stat label="Emails sent" value={summary.sent.toLocaleString()} />
@@ -271,32 +238,13 @@ export default async function ReportsPage({
             {BUCKET_NOUNS[range.bucket]} on average
           </p>
         </div>
-        <div className="flex h-32 items-end gap-0.5">
-          {series.map((point) => (
-            <div
-              key={point.date}
-              className="group relative flex-1"
-              title={`${bucketLabel(point, range.bucket)}: ${point.sent} sent, ${point.replies} replies, ${point.bounces} bounces`}
-            >
-              <div
-                className="w-full rounded-sm bg-[var(--color-brand)]"
-                style={{ height: `${(point.sent / peak) * 100}%`, minHeight: point.sent ? 2 : 0 }}
-              />
-              {point.replies > 0 && (
-                <div
-                  className="w-full rounded-sm bg-[var(--color-ok)]"
-                  style={{ height: `${(point.replies / peak) * 100}%`, minHeight: 2 }}
-                />
-              )}
-            </div>
-          ))}
-        </div>
+        <VolumeChart points={volumePoints} bucketNoun={BUCKET_NOUNS[range.bucket] ?? range.bucket} />
         <p className="hint">
-          Blue is sent, green is replies. Hover a bar for the numbers.{" "}
-          {BUCKET_NOTES[range.bucket]}
+          Each column is one {BUCKET_NOUNS[range.bucket]}. Hover for the exact
+          sent, reply and bounce numbers. {BUCKET_NOTES[range.bucket]}
           {!range.bucketIsExplicit &&
             range.bucket === "week" &&
-            " Chosen automatically for a range this long — 365 daily bars would each be a sliver."}
+            " Grouped into weeks automatically for a range this long — 365 daily bars would each be a sliver."}
         </p>
       </section>
 
@@ -422,6 +370,69 @@ export default async function ReportsPage({
           </div>
         )}
       </section>
+    </div>
+  );
+}
+
+/**
+ * The whole-CRM running totals. Each is an exact `count` — PostgREST returns
+ * the number in a header and never the rows, so these are immune to the row cap
+ * and keep climbing without limit. This is the "monitor how many it has sent"
+ * figure the range picker above deliberately does not answer.
+ */
+async function loadLifetimeTotals(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  workspaceId: string,
+): Promise<{ sent: number; replies: number; bounces: number; contacts: number }> {
+  const [sent, replies, bounces, contacts] = await Promise.all([
+    supabase
+      .from("messages")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .eq("direction", "outbound")
+      .eq("status", "sent"),
+    supabase
+      .from("messages")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .eq("direction", "inbound")
+      .eq("is_bounce", false)
+      .eq("is_auto_reply", false),
+    supabase
+      .from("messages")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId)
+      .eq("direction", "inbound")
+      .eq("is_bounce", true),
+    supabase
+      .from("contacts")
+      .select("id", { count: "exact", head: true })
+      .eq("workspace_id", workspaceId),
+  ]);
+
+  return {
+    sent: sent.count ?? 0,
+    replies: replies.count ?? 0,
+    bounces: bounces.count ?? 0,
+    contacts: contacts.count ?? 0,
+  };
+}
+
+function Monitor({
+  label,
+  value,
+  color,
+}: {
+  label: string;
+  value: number;
+  color: string;
+}) {
+  return (
+    <div>
+      <p className="hint">{label}</p>
+      <p className="mt-1 text-3xl font-semibold tabular-nums" style={{ color }}>
+        {value.toLocaleString()}
+      </p>
     </div>
   );
 }

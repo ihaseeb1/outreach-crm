@@ -91,10 +91,25 @@ export async function DELETE(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const id = new URL(request.url).searchParams.get("id");
+  const params = new URL(request.url).searchParams;
+  const supabase = await createSupabaseServerClient();
+
+  // Bulk clear: remove every completed task in the workspace in one go. Handy
+  // once a pile of done tasks has built up, so they don't have to go one by one.
+  if (params.get("clear") === "done") {
+    const { error, count } = await supabase
+      .from("tasks")
+      .delete({ count: "exact" })
+      .eq("workspace_id", session.workspace.id)
+      .eq("done", true);
+
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ ok: true, cleared: count ?? 0 });
+  }
+
+  const id = params.get("id");
   if (!id) return NextResponse.json({ error: "Missing id." }, { status: 400 });
 
-  const supabase = await createSupabaseServerClient();
   const { error } = await supabase
     .from("tasks")
     .delete()

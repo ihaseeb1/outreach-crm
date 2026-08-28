@@ -6,6 +6,17 @@ import { WarmupControls, type WarmupState } from "@/components/warmup-controls";
 import { fmtDateTime } from "@/lib/datetime";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
+import {
+  decliningMailboxes,
+  healthTrend,
+  type HealthTrend,
+  type MailboxTrendAlert,
+} from "@/health/trend";
+import {
+  emptyActivity,
+  loadWarmupActivity,
+  type WarmupActivity,
+} from "@/warmup/activity";
 import type { Mailbox, MailboxHealth, WarmupSettings } from "@/types/db";
 
 export const dynamic = "force-dynamic";
@@ -16,6 +27,12 @@ const STATUS_STYLES: Record<string, string> = {
   paused: "bg-red-50 text-[var(--color-danger)]",
 };
 
+const TREND_STYLES: Record<string, string> = {
+  ok: "bg-green-50 text-[var(--color-ok)]",
+  watch: "bg-amber-50 text-[var(--color-warn)]",
+  alert: "bg-red-50 text-[var(--color-danger)]",
+};
+
 function pct(value: number | null | undefined): string {
   if (value === null || value === undefined) return "—";
   return `${(Number(value) * 100).toFixed(1)}%`;
@@ -24,26 +41,28 @@ function pct(value: number | null | undefined): string {
 export default async function DeliverabilityPage() {
   const session = await requireSession();
   const supabase = await createSupabaseServerClient();
+  const workspaceId = session.workspace.id;
 
-  const [{ data: mailboxRows }, { data: warmupRows }, { data: healthRows }] =
+  const [{ data: mailboxRows }, { data: warmupRows }, { data: healthRows }, activity] =
     await Promise.all([
       supabase
         .from("mailboxes")
         .select(
           "id, email, from_name, is_active, health_status, paused_reason, daily_limit, sent_today, sent_today_date",
         )
-        .eq("workspace_id", session.workspace.id)
+        .eq("workspace_id", workspaceId)
         .order("created_at", { ascending: true }),
       supabase
         .from("warmup_settings")
         .select("*")
-        .eq("workspace_id", session.workspace.id),
+        .eq("workspace_id", workspaceId),
       supabase
         .from("mailbox_health")
         .select("*")
-        .eq("workspace_id", session.workspace.id)
+        .eq("workspace_id", workspaceId)
         .order("date", { ascending: false })
         .limit(200),
+      loadWarmupActivity(supabase, workspaceId),
     ]);
 
   const mailboxes = (mailboxRows ?? []) as Mailbox[];
@@ -62,16 +81,51 @@ export default async function DeliverabilityPage() {
     history.set(row.mailbox_id, list);
   }
 
+  // Per-mailbox trend (newest-first history), plus the declining ones to flag
+  // at the top of the page.
+  const trends = new Map<string, HealthTrend>();
+  const alerts: MailboxTrendAlert[] = [];
+  for (const mailbox of mailboxes) {
+    const trend = healthTrend(history.get(mailbox.id) ?? []);
+    if (!trend) continue;
+    trends.set(mailbox.id, trend);
+    alerts.push({ mailboxId: mailbox.id, email: mailbox.email, trend });
+  }
+  const declining = decliningMailboxes(alerts);
+
   const poolSize = mailboxes.filter((mailbox) => mailbox.is_active).length;
+  const totals = activity.totals;
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-semibold">Deliverability</h1>
         <p className="hint mt-1">
-          Peer warmup and daily health monitoring for every connected mailbox.
+          Warmup keeps your mailboxes trusted; health monitoring warns you before
+          one gets into trouble.
         </p>
       </div>
+
+      {declining.length > 0 && (
+        <section className="card card-pad border-[var(--color-warn)] bg-amber-50/40">
+          <h2 className="text-sm font-semibold">
+            {declining.some((alert) => alert.trend.severity === "alert")
+              ? "⚠ Mailboxes needing attention"
+              : "Mailboxes to keep an eye on"}
+          </h2>
+          <ul className="mt-2 space-y-1.5 text-sm">
+            {declining.map((alert) => (
+              <li key={alert.mailboxId} className="flex flex-wrap items-center gap-2">
+                <span className={`badge ${TREND_STYLES[alert.trend.severity]}`}>
+                  {alert.trend.latest}/100
+                </span>
+                <span className="font-medium">{alert.email}</span>
+                <span className="hint">{alert.trend.message}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {poolSize < 2 && (
         <p className="card card-pad text-sm text-[var(--color-warn)]">
@@ -84,35 +138,35 @@ export default async function DeliverabilityPage() {
         </p>
       )}
 
-      <div className="card card-pad space-y-3">
-        <h2 className="text-sm font-semibold">How this works</h2>
-        <ul className="hint list-inside list-disc space-y-1">
-          <li>
-            Your mailboxes send each other ordinary-looking mail, open it, flag it,
-            and reply to a fraction of it.
-          </li>
-          <li>
-            Anything that lands in spam is moved back to the inbox — the single
-            strongest signal you can generate for free.
-          </li>
-          <li>
-            Volume starts at 5/day and climbs by a small increment daily. It never
-            spikes: providers detect artificial warmup, and a jump is the clearest
-            tell there is.
-          </li>
-          <li>
-            Warmup counts against the same daily limit as campaigns. A mailbox
-            auto-paused for poor health stops <em>outreach</em> but keeps warming
-            up, so it can recover — you stay in control of the warmup toggle and
-            can resume sending by hand any time.
-          </li>
-          <li>Warmup mail never appears in your unified inbox.</li>
-        </ul>
+      {/* Warmup at a glance — the back-and-forth totals across every mailbox,
+          today, in plain numbers. */}
+      <section className="card card-pad space-y-3">
+        <div className="flex items-baseline justify-between">
+          <h2 className="text-sm font-semibold">Warmup today, all mailboxes</h2>
+          <span className="hint">Resets at midnight UTC</span>
+        </div>
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <Glance label="Sent" value={totals.sentToday} color="var(--color-brand)" />
+          <Glance label="Received" value={totals.receivedToday} color="var(--color-ink)" />
+          <Glance label="Replied" value={totals.repliedToday} color="var(--color-ok)" />
+          <Glance
+            label="Rescued from spam (7d)"
+            value={totals.rescued7d}
+            color="var(--color-warn)"
+          />
+        </div>
+        <p className="hint">
+          Every mailbox sends a few of these ordinary-looking emails to your other
+          mailboxes each day, opens them, and replies to some — that back-and-forth
+          is what tells inbox providers the account is a real one people use. It
+          runs every day, weekends included, and counts against the same daily
+          limit as your campaigns.
+        </p>
         <div className="flex flex-wrap gap-4">
-          <RunJobButton job="warmup" label="Run warmup now" limit={5} />
+          <RunJobButton job="warmup" label="Run warmup now" limit={40} />
           <RunJobButton job="health" label="Run health check now" limit={10} />
         </div>
-      </div>
+      </section>
 
       {mailboxes.length === 0 ? (
         <p className="card card-pad text-sm text-[var(--color-muted)]">
@@ -124,6 +178,8 @@ export default async function DeliverabilityPage() {
             const settings = warmup.get(mailbox.id);
             const latest = latestHealth.get(mailbox.id);
             const trend = (history.get(mailbox.id) ?? []).slice().reverse();
+            const trendInfo = trends.get(mailbox.id);
+            const act = activity.byMailbox.get(mailbox.id) ?? emptyActivity();
 
             const warmupState: WarmupState | null = settings
               ? {
@@ -147,9 +203,13 @@ export default async function DeliverabilityPage() {
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
-                    {latest && (
-                      <span className="text-sm font-semibold">
-                        {latest.reputation_score}/100
+                    {trendInfo && (
+                      <span className={`badge ${TREND_STYLES[trendInfo.severity]}`}>
+                        {trendInfo.delta === null
+                          ? `${trendInfo.latest}/100`
+                          : `${trendInfo.latest}/100 ${
+                              trendInfo.delta > 0 ? "▲" : trendInfo.delta < 0 ? "▼" : "→"
+                            }${trendInfo.delta !== 0 ? Math.abs(trendInfo.delta) : ""}`}
                       </span>
                     )}
                     <span className={`badge ${STATUS_STYLES[mailbox.health_status] ?? ""}`}>
@@ -162,18 +222,30 @@ export default async function DeliverabilityPage() {
                   <div className="rounded-md bg-red-50 px-3 py-2 text-xs text-[var(--color-danger)]">
                     <p>Auto-paused{mailbox.paused_reason ? `: ${mailbox.paused_reason}` : "."}</p>
                     <p className="mt-1 text-[var(--color-muted)]">
-                      Outreach is stopped. Warmup keeps running below so the
-                      mailbox can recover — you can also turn it on/off here by
-                      hand. Resume sending once it looks healthy again.
+                      Campaign sending is stopped, but warmup keeps running below so
+                      the mailbox can recover. Resume sending once it looks healthy
+                      again.
                     </p>
                     <ClearAutoPauseButton mailboxId={mailbox.id} />
                   </div>
                 )}
 
+                {/* The per-mailbox back-and-forth. */}
+                <div className="rounded-md bg-[var(--color-canvas)] px-3 py-2.5">
+                  <p className="hint mb-2">Warmup activity</p>
+                  <div className="grid grid-cols-3 gap-3 sm:grid-cols-5">
+                    <Activity label="Sent today" value={act.sentToday} sub={`${act.sent7d} in 7d`} color="var(--color-brand)" />
+                    <Activity label="Received today" value={act.receivedToday} sub={`${act.received7d} in 7d`} color="var(--color-ink)" />
+                    <Activity label="Replied today" value={act.repliedToday} sub={`${act.replied7d} in 7d`} color="var(--color-ok)" />
+                    <Activity label="In spam (7d)" value={act.inSpam7d} color="var(--color-danger)" />
+                    <Activity label="Rescued (7d)" value={act.rescued7d} color="var(--color-warn)" />
+                  </div>
+                </div>
+
                 <div className="grid gap-4 lg:grid-cols-2">
                   <div className="space-y-3">
                     <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)]">
-                      Warmup
+                      Warmup settings
                     </h3>
                     <WarmupControls mailboxId={mailbox.id} initial={warmupState} />
                   </div>
@@ -189,6 +261,20 @@ export default async function DeliverabilityPage() {
                       </p>
                     ) : (
                       <>
+                        {trendInfo && (
+                          <p
+                            className={`text-xs ${
+                              trendInfo.severity === "alert"
+                                ? "text-[var(--color-danger)]"
+                                : trendInfo.severity === "watch"
+                                  ? "text-[var(--color-warn)]"
+                                  : "text-[var(--color-muted)]"
+                            }`}
+                          >
+                            {trendInfo.message}
+                          </p>
+                        )}
+
                         <dl className="grid grid-cols-2 gap-2 text-xs">
                           <Metric label="Sent (7d)" value={String(latest.sent_7d)} />
                           <Metric label="Bounce rate" value={pct(latest.bounce_rate)} />
@@ -253,6 +339,39 @@ export default async function DeliverabilityPage() {
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+function Glance({ label, value, color }: { label: string; value: number; color: string }) {
+  return (
+    <div>
+      <p className="hint">{label}</p>
+      <p className="mt-1 text-2xl font-semibold tabular-nums" style={{ color }}>
+        {value.toLocaleString()}
+      </p>
+    </div>
+  );
+}
+
+function Activity({
+  label,
+  value,
+  sub,
+  color,
+}: {
+  label: string;
+  value: number;
+  sub?: string;
+  color: string;
+}) {
+  return (
+    <div>
+      <p className="text-lg font-semibold tabular-nums" style={{ color }}>
+        {value.toLocaleString()}
+      </p>
+      <p className="text-[11px] leading-tight text-[var(--color-muted)]">{label}</p>
+      {sub && <p className="text-[10px] text-[var(--color-muted)]">{sub}</p>}
     </div>
   );
 }

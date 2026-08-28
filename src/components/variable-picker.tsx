@@ -78,6 +78,16 @@ export function VariablePicker({
           {field.label}
         </button>
       ))}
+      {/* Spintax: each recipient gets one option at random, so no two emails are
+          identical — a small, real deliverability win. */}
+      <button
+        type="button"
+        title="Spin text — {option one|option two}. A random option is picked per recipient."
+        className="rounded border border-dashed border-[var(--color-line)] px-1.5 py-0.5 text-xs text-[var(--color-muted)] hover:bg-[var(--color-canvas)]"
+        onClick={() => insert("{Hi|Hello|Hey}")}
+      >
+        Spin text
+      </button>
     </div>
   );
 }

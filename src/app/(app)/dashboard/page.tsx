@@ -4,6 +4,11 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { fmtDateTime } from "@/lib/datetime";
 import { readHeartbeat } from "@/lib/heartbeat";
 import { requireSession } from "@/lib/workspace";
+import {
+  decliningMailboxes,
+  healthTrend,
+  type MailboxTrendAlert,
+} from "@/health/trend";
 
 export const dynamic = "force-dynamic";
 
@@ -56,6 +61,10 @@ export default async function DashboardPage() {
   // not there yet (migration 0008 unapplied) — then we simply show nothing.
   const heartbeat = await readHeartbeat(supabase);
 
+  // Which mailboxes are slipping, so it is on the landing page rather than
+  // buried in Deliverability. Reuses the same trend logic as that page.
+  const declining = await loadDecliningMailboxes(supabase, workspaceId);
+
   const stats = [
     { label: "Websites", value: websites, href: "/prospecting" },
     { label: "Contacts", value: contacts, href: "/contacts" },
@@ -69,6 +78,30 @@ export default async function DashboardPage() {
         <h1 className="text-2xl font-semibold">Dashboard</h1>
         <p className="hint mt-1">{session.workspace.name}</p>
       </div>
+
+      {declining.length > 0 && (
+        <Link
+          href="/deliverability"
+          className={`card card-pad block hover:border-[var(--color-brand)] ${
+            declining.some((alert) => alert.trend.severity === "alert")
+              ? "border-[var(--color-danger)] bg-red-50"
+              : "border-[var(--color-warn)] bg-amber-50/40"
+          }`}
+        >
+          <p className="text-sm font-semibold">
+            {declining.some((alert) => alert.trend.severity === "alert")
+              ? `⚠ ${declining.length} mailbox(es) need attention`
+              : `${declining.length} mailbox(es) to keep an eye on`}
+          </p>
+          <p className="hint mt-1">
+            {declining
+              .slice(0, 3)
+              .map((alert) => `${alert.email} (${alert.trend.latest}/100)`)
+              .join(", ")}
+            {declining.length > 3 ? " …" : ""} — open Deliverability.
+          </p>
+        </Link>
+      )}
 
       {heartbeat?.stale && (
         <div className="card card-pad border-[var(--color-danger)] bg-red-50">
@@ -160,6 +193,44 @@ export default async function DashboardPage() {
       )}
     </div>
   );
+}
+
+async function loadDecliningMailboxes(
+  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
+  workspaceId: string,
+): Promise<MailboxTrendAlert[]> {
+  const [{ data: mailboxRows }, { data: healthRows }] = await Promise.all([
+    supabase.from("mailboxes").select("id, email").eq("workspace_id", workspaceId),
+    supabase
+      .from("mailbox_health")
+      .select("mailbox_id, reputation_score, bounce_rate, date")
+      .eq("workspace_id", workspaceId)
+      .order("date", { ascending: false })
+      .limit(200),
+  ]);
+
+  // Newest-first history per mailbox.
+  const history = new Map<
+    string,
+    { date: string; reputation_score: number; bounce_rate: number }[]
+  >();
+  for (const row of (healthRows ?? []) as {
+    mailbox_id: string;
+    reputation_score: number;
+    bounce_rate: number;
+    date: string;
+  }[]) {
+    const list = history.get(row.mailbox_id) ?? [];
+    if (list.length < 5) list.push(row);
+    history.set(row.mailbox_id, list);
+  }
+
+  const alerts: MailboxTrendAlert[] = [];
+  for (const mailbox of (mailboxRows ?? []) as { id: string; email: string }[]) {
+    const trend = healthTrend(history.get(mailbox.id) ?? []);
+    if (trend) alerts.push({ mailboxId: mailbox.id, email: mailbox.email, trend });
+  }
+  return decliningMailboxes(alerts);
 }
 
 interface JobRow {

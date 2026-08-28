@@ -44,7 +44,15 @@ export function ReportMailboxTable({
   return (
     <section className="card">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--color-line)] px-5 py-3">
-        <h2 className="text-sm font-semibold">Mailboxes</h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-sm font-semibold">Mailboxes</h2>
+          <a
+            className="text-xs text-[var(--color-brand)] hover:underline"
+            href="/api/reports/export?type=mailboxes"
+          >
+            Export CSV
+          </a>
+        </div>
         <div
           className="inline-flex rounded-md border border-[var(--color-line)] bg-white p-0.5"
           role="group"

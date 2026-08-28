@@ -72,8 +72,8 @@ export async function POST(request: Request) {
     contactId: contact.id,
     toEmail: contact.email,
     toName: [contact.first_name, contact.last_name].filter(Boolean).join(" ") || null,
-    subject: renderTemplate(parsed.data.subject, vars),
-    body: renderTemplate(parsed.data.body, vars),
+    subject: renderTemplate(parsed.data.subject, vars, `${contact.email}#subject`),
+    body: renderTemplate(parsed.data.body, vars, `${contact.email}#body`),
     kind: "campaign",
     actorId: session.userId,
   });

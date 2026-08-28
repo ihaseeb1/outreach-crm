@@ -14,6 +14,8 @@ import {
   shouldRampToday,
   shouldContinueThread,
   shouldReply,
+  WARMUP_MAX_GAP_SECONDS,
+  WARMUP_MIN_GAP_SECONDS,
   type PeerCandidate,
 } from "@/warmup/plan";
 import { newWarmupToken } from "@/warmup/token";
@@ -57,7 +59,22 @@ interface WarmupRow {
   started_at: string | null;
 }
 
-const SEND_BATCH = 5;
+/**
+ * How many warmup emails one tick may send across the whole pool.
+ *
+ * This was 5, shared by every mailbox in every workspace — so with more than a
+ * couple of mailboxes, most got no warmup on most ticks. It is now high enough
+ * that every mailbox due a send gets one each tick; the real limiter is the
+ * per-run time budget (SEND_BUDGET_MS), which stops the loop before the
+ * serverless function times out however many mailboxes are waiting.
+ */
+const SEND_BATCH = 40;
+
+/** Leave the rest of the 60s function budget for engagement and replies. */
+const SEND_BUDGET_MS = 30_000;
+
+/** A warmup send over SMTP rarely takes longer than this; used as the guard. */
+const PER_SEND_RESERVE_MS = 3_000;
 
 /** Advances the ramp for every enabled mailbox, at most once a day each. */
 export async function rampWarmupVolumes(
@@ -117,9 +134,12 @@ export async function rampWarmupVolumes(
 /** Sends a small batch of peer warmup emails. */
 export async function runWarmupSends(
   supabase: SupabaseClient,
-  options: { limit?: number; workspaceId?: string } = {},
+  options: { limit?: number; workspaceId?: string; budgetMs?: number } = {},
 ): Promise<{ sent: number; skipped: string[] }> {
   const budget = options.limit ?? SEND_BATCH;
+  const budgetMs = options.budgetMs ?? SEND_BUDGET_MS;
+  const startedAt = Date.now();
+  const outOfTime = () => Date.now() - startedAt + PER_SEND_RESERVE_MS > budgetMs;
   const skipped: string[] = [];
   let sent = 0;
 
@@ -139,22 +159,30 @@ export async function runWarmupSends(
       lastReceivedAt: entry.lastReceivedAt,
     }));
 
-    for (const entry of pool) {
-      if (sent >= budget) break;
+    // Least-sent-today first, so a mailbox that is behind on its target catches
+    // up before one that is already near it — otherwise the same few mailboxes
+    // at the top of the list would soak up every tick.
+    const order = [...pool].sort((a, b) => a.sentToday - b.sentToday);
+
+    for (const entry of order) {
+      if (sent >= budget || outOfTime()) break;
 
       const { mailbox, settings, sentToday } = entry;
 
       // A manually paused mailbox (is_active false) stops everything. A
       // health-auto-paused one keeps warming up on purpose: warmup is exactly
-      // how it recovers, while outreach stays blocked elsewhere. sendEmail
-      // passes allow_paused for warmup so the reserve does not refuse it.
+      // how it recovers, while outreach stays blocked elsewhere. The warmup
+      // reserve allows a paused box through so this can send.
       if (!mailbox.is_active) continue;
       if (quotaRemaining(settings.current_daily_volume, sentToday) <= 0) continue;
+      // Paced on the warmup clock, not the outreach one: a short gap so a
+      // mailbox actually reaches its daily number, without the 2–4h wait that
+      // held warmup to a handful a day.
       if (
         !mailboxIsRested(
-          mailbox.last_send_at,
-          mailbox.min_gap_seconds,
-          mailbox.max_gap_seconds,
+          entry.lastWarmupAt,
+          WARMUP_MIN_GAP_SECONDS,
+          WARMUP_MAX_GAP_SECONDS,
         )
       ) {
         continue;
@@ -219,15 +247,7 @@ export async function runWarmupEngagement(
   let engaged = 0;
   let rescued = 0;
 
-  let query = supabase
-    .from("warmup_settings")
-    .select("mailbox_id, workspace_id")
-    .eq("enabled", true)
-    .limit(limit);
-  if (options.workspaceId) query = query.eq("workspace_id", options.workspaceId);
-
-  const { data } = await query;
-  const rows = (data ?? []) as { mailbox_id: string; workspace_id: string }[];
+  const rows = await pickEngagementTargets(supabase, limit, options.workspaceId);
 
   for (const row of rows) {
     const loaded = await loadMailboxProvider(supabase, row.mailbox_id);
@@ -294,9 +314,66 @@ export async function runWarmupEngagement(
     } finally {
       await loaded.provider.close().catch(() => undefined);
     }
+
+    // Stamp the rotation clock so the next tick moves on to a different mailbox
+    // rather than re-checking this one. Ignored if 0014 has not been applied —
+    // the column is simply absent and the rotation falls back to table order.
+    await supabase
+      .from("mailboxes")
+      .update({ last_engaged_at: new Date().toISOString() })
+      .eq("id", row.mailbox_id)
+      .then(
+        () => undefined,
+        () => undefined,
+      );
   }
 
   return { engaged, rescued };
+}
+
+/**
+ * Which mailboxes to open/flag/rescue this tick, least-recently-engaged first.
+ *
+ * The old query took whichever `limit` enabled rows came back first, in no
+ * order, so on a small pool the same mailbox was engaged every tick and the
+ * others never had their spam rescued. Ordering by `last_engaged_at` rotates
+ * through them all. If that column is missing (migration 0014 unapplied) the
+ * ordered read errors and we fall back to the original unordered one.
+ */
+async function pickEngagementTargets(
+  supabase: SupabaseClient,
+  limit: number,
+  workspaceId?: string,
+): Promise<{ mailbox_id: string; workspace_id: string }[]> {
+  let enabled = supabase
+    .from("warmup_settings")
+    .select("mailbox_id, workspace_id")
+    .eq("enabled", true);
+  if (workspaceId) enabled = enabled.eq("workspace_id", workspaceId);
+
+  const { data } = await enabled;
+  const rows = (data ?? []) as { mailbox_id: string; workspace_id: string }[];
+  if (rows.length === 0) return [];
+
+  const workspaceOf = new Map(rows.map((row) => [row.mailbox_id, row.workspace_id]));
+  const ids = rows.map((row) => row.mailbox_id);
+
+  const ordered = await supabase
+    .from("mailboxes")
+    .select("id")
+    .in("id", ids)
+    .order("last_engaged_at", { ascending: true, nullsFirst: true })
+    .limit(limit);
+
+  if (ordered.error || !ordered.data) {
+    // Column not there yet — keep the old behaviour rather than sending nothing.
+    return rows.slice(0, limit);
+  }
+
+  return (ordered.data as { id: string }[]).map((row) => ({
+    mailbox_id: row.id,
+    workspace_id: workspaceOf.get(row.id) ?? "",
+  }));
 }
 
 /**
@@ -535,6 +612,8 @@ interface PoolEntry {
   settings: WarmupRow;
   sentToday: number;
   lastReceivedAt: string | null;
+  /** Last warmup send from this mailbox — the clock warmup paces itself on. */
+  lastWarmupAt: string | null;
 }
 
 /** Warmup-enabled mailboxes, grouped by workspace, with today's counts. */
@@ -583,12 +662,19 @@ async function loadPools(
       .limit(1)
       .maybeSingle();
 
+    // last_warmup_at is added by migration 0014; before it lands the column is
+    // absent and this reads undefined, which the pacing treats as "never warmed
+    // up" — i.e. always ready — so warmup still runs, just without the new clock.
+    const lastWarmupAt =
+      (mailbox as Mailbox & { last_warmup_at?: string | null }).last_warmup_at ?? null;
+
     const list = pools.get(row.workspace_id) ?? [];
     list.push({
       mailbox,
       settings: row,
       sentToday: count ?? 0,
       lastReceivedAt: (lastReceived as { sent_at: string } | null)?.sent_at ?? null,
+      lastWarmupAt,
     });
     pools.set(row.workspace_id, list);
   }

@@ -13,7 +13,10 @@ export async function GET(request: Request) {
   if (unauthorized) return unauthorized;
 
   const supabase = createSupabaseAdminClient();
-  const result = await runWarmupBatch(supabase, { sendLimit: 5 });
+  // sendLimit is left to the engine default (40) and bounded by its own time
+  // budget, so every mailbox that is due a warmup send gets one each tick
+  // instead of five being shared across the whole pool.
+  const result = await runWarmupBatch(supabase);
 
   await recordWorkerRun(supabase, {
     job: "warmup",

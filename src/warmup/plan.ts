@@ -37,6 +37,21 @@ export function quotaRemaining(dailyVolume: number, sentToday: number): number {
   return Math.max(0, dailyVolume - sentToday);
 }
 
+/**
+ * Warmup's own pacing gap, deliberately much shorter than the outreach one.
+ *
+ * Outreach waits 2–4 hours between sends so a mailbox looks like a person
+ * typing. Warmup goes between your own mailboxes and only has to hit the daily
+ * target without arriving in one burst, so a few minutes apart is plenty — and
+ * anything longer is exactly what starved warmup before. At a 30-minute tick a
+ * mailbox is always rested by the time the next tick runs, so it can warm up
+ * every tick and actually reach its number. Warmup is paced on `last_warmup_at`
+ * (migration 0014), never on the outreach `last_send_at`, so firing this often
+ * does not push real outreach out of its window.
+ */
+export const WARMUP_MIN_GAP_SECONDS = 4 * 60;
+export const WARMUP_MAX_GAP_SECONDS = 16 * 60;
+
 export interface WarmupState {
   enabled: boolean;
   currentDailyVolume: number;
@@ -58,8 +73,17 @@ export interface WarmupState {
 export function sendingAllowance(
   dailyLimit: number,
   warmup: WarmupState | null,
+  healthStatus?: string,
 ): number {
   if (!warmup || !warmup.enabled) return dailyLimit;
+
+  // A fully healthy mailbox is allowed its whole daily limit for outreach, so it
+  // can actually reach its daily target rather than being held to the warmup
+  // ramp for the first couple of weeks. Its own send gap still paces it across
+  // the day, so this raises the ceiling without ever bursting. A mailbox in
+  // `warning` keeps the ramp cap — pushing a struggling box to full volume is
+  // exactly how it tips over — and recovers on warmup alone.
+  if (healthStatus === "healthy") return dailyLimit;
 
   const warmed = Math.max(0, warmup.currentDailyVolume);
   const stillRamping = warmed < warmup.targetDailyVolume;

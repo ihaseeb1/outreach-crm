@@ -326,33 +326,44 @@ export async function sendEmail(
   }
 }
 
+const MISSING_FN = /function|schema cache|PGRST202|does not exist/i;
+
 /**
  * Reserves a daily-limit slot. Campaigns and one-off sends call the strict
  * one-argument form (blocks a paused mailbox), which exists in every schema
- * version. Warmup asks for the `allow_paused` form so a health-paused mailbox
- * can still warm up — and if that migration has not been applied yet, it falls
- * back to the strict form rather than failing the send. This is what lets a
- * deploy land before the SQL migration without breaking sending.
+ * version.
+ *
+ * Warmup reserves through `mailbox_reserve_warmup` (migration 0014): it counts
+ * against the same shared daily cap but pings `last_warmup_at`, not
+ * `last_send_at`, so warming a mailbox aggressively never resets the outreach
+ * rest clock. If that function is not there yet it falls back to the
+ * `allow_paused` reserve, and then to the strict form — so a deploy can always
+ * land before its SQL migration without breaking sending.
  */
 async function reserveSend(
   supabase: SupabaseClient,
   mailboxId: string,
-  allowPaused: boolean,
+  isWarmup: boolean,
 ): Promise<{ data: unknown; error: { message: string } | null }> {
-  if (!allowPaused) {
+  if (!isWarmup) {
     return supabase.rpc("mailbox_reserve_send", { mailbox: mailboxId });
   }
-  const result = await supabase.rpc("mailbox_reserve_send", {
+
+  const warmup = await supabase.rpc("mailbox_reserve_warmup", { mailbox: mailboxId });
+  if (!warmup.error || !MISSING_FN.test(warmup.error.message)) {
+    return warmup;
+  }
+
+  // 0014 not applied yet: fall back to the paused-aware reserve (0007), then to
+  // the strict one. These bump last_send_at, but only until the migration lands.
+  const paused = await supabase.rpc("mailbox_reserve_send", {
     mailbox: mailboxId,
     allow_paused: true,
   });
-  if (
-    result.error &&
-    /function|schema cache|PGRST202|does not exist/i.test(result.error.message)
-  ) {
+  if (paused.error && MISSING_FN.test(paused.error.message)) {
     return supabase.rpc("mailbox_reserve_send", { mailbox: mailboxId });
   }
-  return result;
+  return paused;
 }
 
 /**
