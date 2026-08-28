@@ -5,7 +5,12 @@ import {
   type ReportMailboxRow,
 } from "@/components/report-mailbox-table";
 import { ReportRangePicker } from "@/components/report-range-picker";
-import { VolumeChart, type VolumePoint } from "@/components/volume-chart";
+import {
+  BarTrendChart,
+  VolumeChart,
+  type TrendPoint,
+  type VolumePoint,
+} from "@/components/volume-chart";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
 import { MAX_REPORT_MAILBOX_WINDOW } from "@/mailboxes/volume";
@@ -160,6 +165,14 @@ export default async function ReportsPage({
     bounces: point.bounces,
   }));
 
+  // Opens/clicks share the same buckets. The loader packs opened-emails into
+  // `sent` and clicked-emails into `replies`.
+  const engagementPoints: TrendPoint[] = report.engagementSeries.map((point) => ({
+    key: point.date,
+    label: bucketLabel(point, range.bucket),
+    values: { opened: point.sent, clicked: point.replies },
+  }));
+
   // Averaged over buckets that have actually happened. Including a month that
   // is three days old alongside eleven complete ones drags the average down and
   // makes a steady period look like a decline.
@@ -292,7 +305,19 @@ export default async function ReportsPage({
                 note={`${engagement.clickTracked.toLocaleString()} of ${engagement.tracked.toLocaleString()} tracked for clicks`}
               />
             </div>
+            {/* Per day / week / month, so "how many opened, how many clicked"
+                is answerable at a glance and follows the range picker above. */}
+            <BarTrendChart
+              points={engagementPoints}
+              bucketNoun={BUCKET_NOUNS[range.bucket] ?? range.bucket}
+              labelMetric="opened"
+              metrics={[
+                { key: "opened", label: "Opened", color: "var(--color-brand)" },
+                { key: "clicked", label: "Clicked", color: "var(--color-ok)" },
+              ]}
+            />
             <p className="hint">
+              Emails opened and clicked per {BUCKET_NOUNS[range.bucket] ?? range.bucket}.
               Opens are approximate — images blocked means no open is recorded,
               and a privacy proxy (Apple Mail, some Gmail setups) can fetch the
               pixel before anyone reads the message. Rates are out of emails sent

@@ -19,6 +19,7 @@ import {
   type SeriesPoint,
 } from "@/reports/metrics";
 import {
+  readTracking,
   summariseEngagement,
   type EngagementSummary,
 } from "@/mail/tracking-summary";
@@ -45,6 +46,9 @@ interface SeriesRow {
 
 export interface ReportData {
   series: SeriesPoint[];
+  /** Opens/clicks bucketed the same way as `series`: opens in `sent`, clicks in
+   *  `replies`. Lets the page draw an opens/clicks chart per day/week/month. */
+  engagementSeries: SeriesPoint[];
   summary: OutreachTotals;
   engagement: EngagementSummary;
   volumes: Record<string, MailboxVolume>;
@@ -92,6 +96,9 @@ async function loadFromRpc(
   const rows = (seriesResult.data ?? []) as SeriesRow[];
 
   const counts = new Map<string, { sent: number; replies: number; bounces: number }>();
+  // Opens go in `sent`, clicks in `replies`, so the same densify/bucket code
+  // draws the engagement chart with no second implementation.
+  const engCounts = new Map<string, { sent: number; replies: number; bounces: number }>();
   let opens = 0;
   let clicks = 0;
   let openedEmails = 0;
@@ -106,6 +113,11 @@ async function loadFromRpc(
       replies: Number(row.replies),
       bounces: Number(row.bounces),
     });
+    engCounts.set(row.day, {
+      sent: Number(row.opened_emails),
+      replies: Number(row.clicked_emails),
+      bounces: 0,
+    });
     sentTotal += Number(row.sent);
     opens += Number(row.opens);
     clicks += Number(row.clicks);
@@ -117,6 +129,10 @@ async function loadFromRpc(
 
   const daily = densifyDaily(options.days, counts, now);
   const series = bucketSeries(daily, options.bucket);
+  const engagementSeries = bucketSeries(
+    densifyDaily(options.days, engCounts, now),
+    options.bucket,
+  );
 
   const rate = (numerator: number, denominator: number) =>
     denominator <= 0 ? 0 : numerator / denominator;
@@ -135,6 +151,7 @@ async function loadFromRpc(
 
   return {
     series,
+    engagementSeries,
     summary: totals(series),
     engagement,
     volumes: volumesFromRpc(volumeResult.data as MailboxVolumeRow[] | null),
@@ -245,8 +262,26 @@ async function loadFromRows(
   );
   const series = bucketSeries(daily, options.bucket);
 
+  // Opens/clicks per day from the tracking record on each sent message.
+  const engCounts = new Map<string, { sent: number; replies: number; bounces: number }>();
+  for (const row of sentInRange) {
+    if (!row.sent_at) continue;
+    const summary = readTracking(row.meta);
+    if (!summary || !summary.tracked) continue;
+    const day = (row.sent_at as string).slice(0, 10);
+    const found = engCounts.get(day) ?? { sent: 0, replies: 0, bounces: 0 };
+    if (summary.opens > 0) found.sent += 1;
+    if (summary.clicks > 0) found.replies += 1;
+    engCounts.set(day, found);
+  }
+  const engagementSeries = bucketSeries(
+    densifyDaily(options.days, engCounts, now),
+    options.bucket,
+  );
+
   return {
     series,
+    engagementSeries,
     summary: totals(series),
     engagement: summariseEngagement(sentInRange.map((row) => row.meta)),
     volumes: summariseVolume(

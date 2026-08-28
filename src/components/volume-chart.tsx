@@ -29,6 +29,21 @@ const COLORS = {
   bounces: "var(--color-danger)",
 } as const;
 
+/** One coloured metric drawn as a bar in each bucket. */
+export interface ChartMetric {
+  key: string;
+  label: string;
+  color: string;
+}
+
+export interface TrendPoint {
+  key: string;
+  label: string;
+  values: Record<string, number>;
+}
+
+/** Volume chart: sent / replies / bounces per bucket. Thin wrapper over the
+ *  generic BarTrendChart so both charts on Reports look and behave the same. */
 export function VolumeChart({
   points,
   bucketNoun,
@@ -36,30 +51,92 @@ export function VolumeChart({
   points: VolumePoint[];
   bucketNoun: string;
 }) {
-  const [active, setActive] = useState<number | null>(null);
+  return (
+    <BarTrendChart
+      bucketNoun={bucketNoun}
+      metrics={[
+        { key: "sent", label: "Sent", color: COLORS.sent },
+        { key: "replies", label: "Replies", color: COLORS.replies },
+        { key: "bounces", label: "Bounces", color: COLORS.bounces },
+      ]}
+      labelMetric="sent"
+      points={points.map((point) => ({
+        key: point.key,
+        label: point.label,
+        values: { sent: point.sent, replies: point.replies, bounces: point.bounces },
+      }))}
+    />
+  );
+}
 
-  // Scaled to the busiest single value across all three metrics so the bars
-  // stay honest against each other. Bounces stay short because bounces should
-  // be short — that is information, not a rendering bug.
+/**
+ * A grouped bar chart for any set of per-bucket metrics: sent/replies/bounces,
+ * or opens/clicks. Every bucket shows one coloured bar per metric, the numbers
+ * are printed above the bars on short ranges, and a readout line above the
+ * chart (plus a native tooltip on each bar) carries the exact numbers on hover
+ * — the readout is above the scroll area so it is never clipped.
+ */
+export function BarTrendChart({
+  points,
+  metrics,
+  bucketNoun,
+  labelMetric,
+}: {
+  points: TrendPoint[];
+  metrics: ChartMetric[];
+  bucketNoun: string;
+  /** Which metric's number to print above each bar; defaults to the first. */
+  labelMetric?: string;
+}) {
+  const [active, setActive] = useState<number | null>(null);
+  const labelKey = labelMetric ?? metrics[0]?.key ?? "";
+
+  // Scaled to the busiest single value across every metric so the bars stay
+  // honest against each other.
   const peak = Math.max(
     1,
-    ...points.map((point) => Math.max(point.sent, point.replies, point.bounces)),
+    ...points.map((point) =>
+      Math.max(...metrics.map((metric) => point.values[metric.key] ?? 0)),
+    ),
   );
 
   // Labels above every bar get cramped past a couple of dozen columns; past
-  // that the hover tooltip carries the exact numbers instead.
+  // that the readout line and the native tooltip carry the exact numbers.
   const showBarLabels = points.length <= 24;
   const height = (value: number) =>
     value <= 0 ? 0 : Math.max(4, Math.round((value / peak) * 176));
 
+  // The bucket to read out above the chart: whichever is hovered, otherwise the
+  // most recent one, so a number is always on screen without hovering.
+  const shown = active !== null ? points[active] : points[points.length - 1];
+  const titleFor = (point: TrendPoint) =>
+    `${point.label}: ${metrics
+      .map((metric) => `${point.values[metric.key] ?? 0} ${metric.label.toLowerCase()}`)
+      .join(", ")}`;
+
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-4 text-xs">
-        <Legend color={COLORS.sent} label="Sent" />
-        <Legend color={COLORS.replies} label="Replies" />
-        <Legend color={COLORS.bounces} label="Bounces" />
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+        {metrics.map((metric) => (
+          <Legend key={metric.key} color={metric.color} label={metric.label} />
+        ))}
         <span className="hint ml-auto">Peak {peak.toLocaleString()} / {bucketNoun}</span>
       </div>
+
+      {/* Live readout — rendered ABOVE the scrolling bars so it is never clipped,
+          which is what hid the hover numbers before. Updates as you move across
+          the bars; shows the latest bucket when nothing is hovered. */}
+      {shown && (
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 rounded-md bg-[var(--color-canvas)] px-3 py-2 text-sm">
+          <span className="font-medium">{shown.label}</span>
+          {metrics.map((metric) => (
+            <span key={metric.key} style={{ color: metric.color }}>
+              {(shown.values[metric.key] ?? 0).toLocaleString()} {metric.label.toLowerCase()}
+            </span>
+          ))}
+          {active === null && <span className="hint">— hover a bar for any {bucketNoun}</span>}
+        </div>
+      )}
 
       <div className="relative">
         {/* Two faint gridlines — peak and half — so a bar's height reads as a
@@ -68,38 +145,31 @@ export function VolumeChart({
         <div className="pointer-events-none absolute inset-x-0 top-1/2 border-t border-dashed border-[var(--color-line)]" />
 
         <div className="flex h-56 items-end gap-1 overflow-x-auto pb-1">
-          {points.map((point, index) => {
-            const isActive = active === index;
-            return (
-              <div
-                key={point.key}
-                className="group relative flex h-full min-w-[14px] flex-1 flex-col justify-end"
-                onMouseEnter={() => setActive(index)}
-                onMouseLeave={() => setActive((current) => (current === index ? null : current))}
-              >
-                {showBarLabels && point.sent > 0 && (
-                  <span className="mb-0.5 text-center text-[10px] font-medium text-[var(--color-ink)]">
-                    {point.sent}
-                  </span>
-                )}
+          {points.map((point, index) => (
+            <div
+              key={point.key}
+              // Native tooltip too, so the numbers show on hover even where the
+              // scroll area would clip a custom popover.
+              title={titleFor(point)}
+              className={`group flex h-full min-w-[14px] flex-1 flex-col justify-end rounded-sm ${
+                active === index ? "bg-[var(--color-canvas)]" : ""
+              }`}
+              onMouseEnter={() => setActive(index)}
+              onMouseLeave={() => setActive((current) => (current === index ? null : current))}
+            >
+              {showBarLabels && (point.values[labelKey] ?? 0) > 0 && (
+                <span className="mb-0.5 text-center text-[10px] font-medium text-[var(--color-ink)]">
+                  {point.values[labelKey]}
+                </span>
+              )}
 
-                <div className="flex items-end justify-center gap-[2px]">
-                  <Bar color={COLORS.sent} px={height(point.sent)} />
-                  <Bar color={COLORS.replies} px={height(point.replies)} />
-                  <Bar color={COLORS.bounces} px={height(point.bounces)} />
-                </div>
-
-                {isActive && (
-                  <div className="absolute bottom-full left-1/2 z-10 mb-1 -translate-x-1/2 whitespace-nowrap rounded-md border border-[var(--color-line)] bg-white px-2 py-1 text-[11px] shadow-lg">
-                    <p className="font-medium">{point.label}</p>
-                    <p style={{ color: COLORS.sent }}>{point.sent.toLocaleString()} sent</p>
-                    <p style={{ color: COLORS.replies }}>{point.replies.toLocaleString()} replies</p>
-                    <p style={{ color: COLORS.bounces }}>{point.bounces.toLocaleString()} bounces</p>
-                  </div>
-                )}
+              <div className="flex items-end justify-center gap-[2px]">
+                {metrics.map((metric) => (
+                  <Bar key={metric.key} color={metric.color} px={height(point.values[metric.key] ?? 0)} />
+                ))}
               </div>
-            );
-          })}
+            </div>
+          ))}
         </div>
       </div>
     </div>
