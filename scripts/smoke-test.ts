@@ -35,6 +35,21 @@ import {
 } from "../src/lib/import-parse";
 import { summariseEngagement } from "../src/mail/tracking-summary";
 import { TODAY as TODAY_KEY, countsFor as countsForKey } from "../src/mailboxes/volume";
+import {
+  buildPool,
+  isWarmupByPool,
+  messageIsWarmup,
+  recipientsOf,
+  parseRetention,
+  resolveRetention,
+  retentionCutoff,
+  isPastRetention,
+  shouldDeleteMessage,
+  batchIsSane,
+  isPastGrace,
+  readDeletionSettings,
+  MAX_DELETE_BATCH,
+} from "../src/warmup/deletion";
 
 import {
   isEligible,
@@ -190,6 +205,7 @@ import {
   parseReportRange,
   resolveReportRange,
 } from "../src/reports/ranges";
+import { runPurgeScenarios } from "./purge-scenarios";
 
 // Set before any test runs; env values are read lazily inside the functions.
 process.env.APP_ENCRYPTION_KEY ??= "0".repeat(64);
@@ -242,6 +258,18 @@ function test(name: string, fn: () => void) {
     failed += 1;
     console.error(`FAIL  ${name}`);
     console.error(`      ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function atest(name: string, fn: () => Promise<void>) {
+  try {
+    await fn();
+    passed += 1;
+    console.log(`  ok  ${name}`);
+  } catch (error) {
+    failed += 1;
+    console.error(`FAIL  ${name}`);
+    console.error(`      ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
   }
 }
 
@@ -3761,5 +3789,191 @@ test("parseBacklink prefers a dofollow match when both exist", () => {
   assert.equal(v.anchorFound, "second");
 });
 
-console.log(`\n${passed} passed, ${failed} failed\n`);
-if (failed > 0) process.exit(1);
+console.log("\nwarmup deletion — pool membership (the safety rule)");
+
+const POOL = buildPool([
+  "alice@mine.com",
+  "Bob@Mine.com", // case-insensitive
+  " carol@mine.com ", // trimmed
+]);
+
+test("warmup only when BOTH sender and recipient are in the pool", () => {
+  assert.equal(
+    isWarmupByPool({ fromEmail: "alice@mine.com", recipients: ["bob@mine.com"] }, POOL),
+    true,
+  );
+});
+
+test("case and whitespace do not matter", () => {
+  assert.equal(
+    isWarmupByPool({ fromEmail: "ALICE@MINE.COM", recipients: [" Bob@Mine.com "] }, POOL),
+    true,
+  );
+});
+
+test("an external recipient makes it NOT warmup", () => {
+  assert.equal(
+    isWarmupByPool(
+      { fromEmail: "alice@mine.com", recipients: ["editor@publisher.com"] },
+      POOL,
+    ),
+    false,
+  );
+});
+
+test("an external sender makes it NOT warmup (a real reply)", () => {
+  assert.equal(
+    isWarmupByPool(
+      { fromEmail: "editor@publisher.com", recipients: ["alice@mine.com"] },
+      POOL,
+    ),
+    false,
+  );
+});
+
+test("if ANY of several recipients is external, it is NOT warmup", () => {
+  assert.equal(
+    isWarmupByPool(
+      {
+        fromEmail: "alice@mine.com",
+        recipients: ["bob@mine.com", "outsider@publisher.com"],
+      },
+      POOL,
+    ),
+    false,
+  );
+});
+
+test("no recipients is never warmup", () => {
+  assert.equal(isWarmupByPool({ fromEmail: "alice@mine.com", recipients: [] }, POOL), false);
+});
+
+test("empty pool means nothing is ever warmup", () => {
+  assert.equal(
+    isWarmupByPool({ fromEmail: "alice@mine.com", recipients: ["bob@mine.com"] }, buildPool([])),
+    false,
+  );
+});
+
+test("recipientsOf pulls to_email plus cc/bcc from meta", () => {
+  const row = {
+    from_email: "alice@mine.com",
+    to_email: "bob@mine.com",
+    meta: { cc: "carol@mine.com", bcc: ["dave@mine.com"] },
+  };
+  const recips = recipientsOf(row);
+  assert.deepEqual(recips.sort(), ["bob@mine.com", "carol@mine.com", "dave@mine.com"].sort());
+});
+
+test("a cc to an external address blocks the whole message", () => {
+  const row = {
+    from_email: "alice@mine.com",
+    to_email: "bob@mine.com",
+    meta: { cc: "spy@publisher.com" },
+  };
+  assert.equal(messageIsWarmup(row, POOL), false);
+});
+
+console.log("\nwarmup deletion — retention");
+
+test("parseRetention normalises and defaults to 7d", () => {
+  assert.equal(parseRetention("today"), "today");
+  assert.equal(parseRetention("7 days"), "7d");
+  assert.equal(parseRetention("2 weeks"), "14d");
+  assert.equal(parseRetention("nonsense"), "7d");
+  assert.equal(parseRetention(undefined), "7d");
+});
+
+test("resolveRetention prefers the per-mailbox override", () => {
+  assert.equal(resolveRetention("14d", "today"), "14d");
+  assert.equal(resolveRetention(null, "today"), "today");
+  assert.equal(resolveRetention(undefined, undefined), "7d");
+});
+
+test("'today' cutoff is the start of the current UTC day", () => {
+  const now = new Date("2026-08-30T15:00:00Z");
+  assert.equal(retentionCutoff("today", now).toISOString(), "2026-08-30T00:00:00.000Z");
+  // Sent earlier today: NOT expired yet.
+  assert.equal(isPastRetention("2026-08-30T09:00:00Z", "today", now), false);
+  // Sent yesterday: expired.
+  assert.equal(isPastRetention("2026-08-29T23:59:00Z", "today", now), true);
+});
+
+test("7d / 14d cutoffs measure back from now", () => {
+  const now = new Date("2026-08-30T12:00:00Z");
+  assert.equal(isPastRetention("2026-08-22T12:00:00Z", "7d", now), true);
+  assert.equal(isPastRetention("2026-08-25T12:00:00Z", "7d", now), false);
+  assert.equal(isPastRetention("2026-08-15T00:00:00Z", "14d", now), true);
+});
+
+test("a missing or unparseable timestamp never expires", () => {
+  assert.equal(isPastRetention(null, "today"), false);
+  assert.equal(isPastRetention("not-a-date", "7d"), false);
+});
+
+console.log("\nwarmup deletion — the delete decision");
+
+test("deletes only warmup that is past retention", () => {
+  const now = new Date("2026-08-30T12:00:00Z");
+  const warmupOld = {
+    from_email: "alice@mine.com",
+    to_email: "bob@mine.com",
+    sent_at: "2026-08-01T12:00:00Z",
+  };
+  assert.equal(shouldDeleteMessage(warmupOld, POOL, "7d", now).delete, true);
+});
+
+test("never deletes an outreach email, however old", () => {
+  const now = new Date("2026-08-30T12:00:00Z");
+  const outreach = {
+    from_email: "alice@mine.com",
+    to_email: "editor@publisher.com",
+    sent_at: "2020-01-01T12:00:00Z",
+  };
+  const decision = shouldDeleteMessage(outreach, POOL, "today", now);
+  assert.equal(decision.delete, false);
+  assert.equal(decision.reason, "external_counterparty");
+});
+
+test("holds warmup that is still within retention", () => {
+  const now = new Date("2026-08-30T12:00:00Z");
+  const recent = {
+    from_email: "alice@mine.com",
+    to_email: "bob@mine.com",
+    sent_at: "2026-08-29T12:00:00Z",
+  };
+  const decision = shouldDeleteMessage(recent, POOL, "7d", now);
+  assert.equal(decision.delete, false);
+  assert.equal(decision.reason, "within_retention");
+});
+
+console.log("\nwarmup deletion — batch + grace + settings");
+
+test("batchIsSane guards the abort threshold", () => {
+  assert.equal(batchIsSane(0), true);
+  assert.equal(batchIsSane(MAX_DELETE_BATCH), true);
+  assert.equal(batchIsSane(MAX_DELETE_BATCH + 1), false);
+  assert.equal(batchIsSane(-1), false);
+});
+
+test("hard-delete grace measures from deleted_at", () => {
+  const now = new Date("2026-08-30T12:00:00Z");
+  assert.equal(isPastGrace("2026-08-20T12:00:00Z", 7, now), true);
+  assert.equal(isPastGrace("2026-08-28T12:00:00Z", 7, now), false);
+  assert.equal(isPastGrace(null, 7, now), false);
+});
+
+test("deletion is disabled unless the workspace opts in", () => {
+  assert.equal(readDeletionSettings(null).autoDeleteEnabled, false);
+  assert.equal(readDeletionSettings({}).autoDeleteEnabled, false);
+  const on = readDeletionSettings({ warmup: { auto_delete_enabled: true, delete_after: "14d" } });
+  assert.equal(on.autoDeleteEnabled, true);
+  assert.equal(on.deleteAfter, "14d");
+});
+
+void (async () => {
+  await runPurgeScenarios(atest);
+
+  console.log(`\n${passed} passed, ${failed} failed\n`);
+  if (failed > 0) process.exit(1);
+})();

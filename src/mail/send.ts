@@ -280,6 +280,23 @@ export async function sendEmail(
       .update({ last_error: null })
       .eq("id", input.mailboxId);
 
+    // Tag warmup at insertion (spec: every warmup send is flagged on the way in).
+    // Done as a best-effort follow-up rather than a column on the insert above so
+    // that a deploy landing before migration 0015 cannot break sending — the
+    // column is simply absent and this no-ops. Warmup goes peer-to-peer between
+    // your own mailboxes, so `kind` is faithful here; the deletion job re-checks
+    // pool membership regardless, and the backfill catches anything missed.
+    if (kind === "warmup") {
+      await supabase
+        .from("messages")
+        .update({ is_warmup: true })
+        .eq("id", rowId)
+        .then(
+          () => undefined,
+          () => undefined,
+        );
+    }
+
     await logActivity(supabase, {
       workspaceId: input.workspaceId,
       actorId: input.actorId ?? null,

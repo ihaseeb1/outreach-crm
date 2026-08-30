@@ -79,6 +79,7 @@ jobs:
           hit validate &
           hit scrape &
           hit backlinks &
+          hit warmup-purge &
           wait
 
           failed=""

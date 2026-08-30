@@ -162,6 +162,10 @@ export interface Mailbox {
   last_send_at: Timestamp | null;
   last_error: string | null;
   meta: Record<string, unknown>;
+  /** Warmup pacing/rotation clocks (migrations 0014, 0015). */
+  last_warmup_at?: Timestamp | null;
+  last_engaged_at?: Timestamp | null;
+  last_purged_at?: Timestamp | null;
   created_at: Timestamp;
   updated_at: Timestamp;
   /** Only ever present on the server. */
@@ -259,10 +263,15 @@ export interface Message {
   status: "queued" | "sent" | "failed" | "received" | "bounced";
   is_bounce: boolean;
   is_auto_reply: boolean;
+  /** Warmup flag (migration 0015). Set from `kind` at insert and by the
+   * pool-membership backfill; the deletion job re-checks the pool anyway. */
+  is_warmup: boolean;
   error: string | null;
   meta: Record<string, unknown>;
   sent_at: Timestamp | null;
   received_at: Timestamp | null;
+  /** Soft delete (migration 0015); a later pass hard-deletes past the grace. */
+  deleted_at?: Timestamp | null;
   created_at: Timestamp;
 }
 
@@ -277,6 +286,9 @@ export interface WarmupSettings {
   reply_rate: number;
   last_ramped_on: string | null;
   started_at: Timestamp | null;
+  /** Per-mailbox retention override (migration 0015); null = inherit workspace
+   * default. Values match RetentionRule in src/warmup/deletion.ts. */
+  delete_after?: "today" | "7d" | "14d" | null;
   created_at: Timestamp;
   updated_at: Timestamp;
 }

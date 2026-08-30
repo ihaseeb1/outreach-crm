@@ -15,6 +15,7 @@ import {
   type MailboxCredentials,
   type MailboxProvider,
   type OutboundMessage,
+  type PurgeMessageRef,
   type SendResult,
   type VerifyResult,
 } from "@/mail/providers/types";
@@ -344,18 +345,39 @@ export class SmtpProvider implements MailboxProvider {
   }
 
   async findSpamFolder(): Promise<string | null> {
+    return this.findSpecialFolder("\\Junk", /^(junk|spam|bulk mail|junk e-?mail)$/i);
+  }
+
+  async findTrashFolder(): Promise<string | null> {
+    return this.findSpecialFolder(
+      "\\Trash",
+      /^(trash|deleted( items| messages)?|bin|rubbish)$/i,
+    );
+  }
+
+  async findSentFolder(): Promise<string | null> {
+    return this.findSpecialFolder("\\Sent", /^(sent|sent (mail|items|messages))$/i);
+  }
+
+  /**
+   * Resolves a special-use folder by its SPECIAL-USE flag first, then by a
+   * name pattern for servers that do not advertise it. Gmail's folders are
+   * under "[Gmail]/…" and localised, so matching on the special-use flag is
+   * what makes this work across languages rather than hardcoding a path.
+   */
+  private async findSpecialFolder(
+    specialUse: string,
+    namePattern: RegExp,
+  ): Promise<string | null> {
     try {
       return await this.withImap(async (client) => {
         const folders = await client.list();
         const bySpecialUse = folders.find(
-          (folder) => folder.specialUse === "\\Junk",
+          (folder) => folder.specialUse === specialUse,
         );
         if (bySpecialUse) return bySpecialUse.path;
 
-        // Not every server advertises SPECIAL-USE; fall back to the usual names.
-        const byName = folders.find((folder) =>
-          /^(junk|spam|bulk mail|junk e-?mail)$/i.test(folder.name),
-        );
+        const byName = folders.find((folder) => namePattern.test(folder.name));
         return byName?.path ?? null;
       });
     } catch {
@@ -389,6 +411,43 @@ export class SmtpProvider implements MailboxProvider {
       });
     } catch {
       // A missing folder is normal (not every account has a Junk folder).
+      return [];
+    }
+  }
+
+  async findByHeaderForPurge(
+    folder: string,
+    header: string,
+  ): Promise<PurgeMessageRef[]> {
+    try {
+      return await this.withFolder(folder, async (client) => {
+        const uids = await client.search({ header: { [header]: "" } }, { uid: true });
+        if (!uids || uids.length === 0) return [];
+
+        const refs: PurgeMessageRef[] = [];
+        // OLDEST 200 (search returns UIDs ascending). The purge wants the
+        // messages past retention, which are the oldest, and it moves them out
+        // of the folder — so on the next scan the next-oldest surface and a
+        // backlog of any size drains oldest-first. Scanning newest-first would
+        // strand old expired mail behind a wall of still-recent warmup.
+        for await (const item of client.fetch(
+          uids.slice(0, 200),
+          { uid: true, envelope: true, internalDate: true },
+          { uid: true },
+        )) {
+          const envelope = item.envelope;
+          refs.push({
+            uid: item.uid,
+            messageId: envelope?.messageId ?? null,
+            subject: envelope?.subject ?? null,
+            fromEmail: envelope?.from?.[0]?.address?.toLowerCase() ?? null,
+            toEmail: envelope?.to?.[0]?.address?.toLowerCase() ?? null,
+            date: asIsoDate(envelope?.date ?? item.internalDate),
+          });
+        }
+        return refs;
+      });
+    } catch {
       return [];
     }
   }

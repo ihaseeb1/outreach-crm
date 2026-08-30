@@ -147,6 +147,20 @@ export interface FolderMessageRef {
   subject: string | null;
 }
 
+/**
+ * A folder message with the fields the warmup purge needs to make its safety
+ * decision: who it is from and to (to re-check both are in the pool) and when it
+ * arrived/was sent (to apply the retention cutoff). Deliberately richer than
+ * FolderMessageRef so the purge never moves a message to Trash on the header
+ * alone — it re-derives the pool-membership verdict from the envelope first.
+ */
+export interface PurgeMessageRef extends FolderMessageRef {
+  fromEmail: string | null;
+  toEmail: string | null;
+  /** ISO date the message was sent/received (envelope date or internal date). */
+  date: string | null;
+}
+
 export interface MailboxProvider {
   readonly kind: string;
   /** Checks the credentials work for both sending and receiving. */
@@ -179,8 +193,18 @@ export interface MailboxProvider {
   // --- Folder operations, used by warmup engagement -------------------
   /** The provider's spam folder (\Junk special-use), if it has one. */
   findSpamFolder(): Promise<string | null>;
+  /** The provider's Trash folder (\Trash special-use), if it has one. Warmup
+   * mail is MOVED here, never permanently deleted, so it stays recoverable
+   * (Gmail keeps Trash for ~30 days) and can be reviewed. */
+  findTrashFolder(): Promise<string | null>;
+  /** The provider's Sent folder (\Sent special-use), if it has one — where the
+   * sender's own copy of a warmup email lives. */
+  findSentFolder(): Promise<string | null>;
   /** Messages in `folder` that carry the given header. */
   findByHeader(folder: string, header: string): Promise<FolderMessageRef[]>;
+  /** Like findByHeader, but with sender/recipient/date for the purge's
+   * pool-membership re-check and retention cutoff. */
+  findByHeaderForPurge(folder: string, header: string): Promise<PurgeMessageRef[]>;
   addFlags(folder: string, uids: number[], flags: string[]): Promise<void>;
   /**
    * Flags one message by its RFC 5322 Message-ID, wherever it happens to live.
