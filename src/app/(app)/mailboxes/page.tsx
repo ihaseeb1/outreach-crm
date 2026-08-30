@@ -11,6 +11,8 @@ import {
   VolumeWindowToggle,
 } from "@/components/mailbox-volume";
 import { RunJobButton } from "@/components/run-job-button";
+import { WarmupCleanup } from "@/components/warmup-cleanup";
+import { readDeletionSettings } from "@/warmup/deletion";
 import { env } from "@/lib/env";
 import { isOAuthConfigured } from "@/mail/providers/oauth";
 import { parseSocialKeys } from "@/mail/signature";
@@ -88,6 +90,53 @@ export default async function MailboxesPage({
     }[]).map((row) => [row.mailbox_id, row]),
   );
 
+  // Warmup cleanup panel: current setting, how many warmups are live vs already
+  // cleaned, and a short history. Counts tolerate migration 0015 being absent
+  // (they come back null → shown as 0) so the page never breaks on them.
+  const deletion = readDeletionSettings(session.workspace.settings);
+  const canManageDeletion =
+    session.appRole === "super_admin" || session.appRole === "admin";
+
+  const liveWarmup = await supabase
+    .from("messages")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", session.workspace.id)
+    .eq("is_warmup", true)
+    .is("deleted_at", null);
+
+  const cleanedWarmup = await supabase
+    .from("messages")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", session.workspace.id)
+    .eq("is_warmup", true)
+    .not("deleted_at", "is", null);
+
+  const { data: cleanupLog } = await supabase
+    .from("activity_log")
+    .select("action, meta, created_at")
+    .eq("workspace_id", session.workspace.id)
+    .in("action", [
+      "warmup.soft_deleted",
+      "warmup.hard_deleted",
+      "warmup.mailbox_trashed",
+      "warmup.deletion_enabled",
+      "warmup.deletion_disabled",
+      "warmup.purge_aborted",
+      "warmup.purge_anomaly",
+    ])
+    .order("created_at", { ascending: false })
+    .limit(8);
+
+  const cleanupRecent = ((cleanupLog ?? []) as {
+    action: string;
+    meta: Record<string, unknown> | null;
+    created_at: string;
+  }[]).map((row) => ({
+    action: row.action,
+    count: typeof row.meta?.count === "number" ? (row.meta.count as number) : null,
+    at: row.created_at,
+  }));
+
   // Checked here rather than on click, so an unconfigured provider shows as
   // unavailable instead of throwing a raw JSON error at the user.
   const googleReady = isOAuthConfigured("google");
@@ -117,6 +166,15 @@ export default async function MailboxesPage({
           {oauthError}
         </p>
       )}
+
+      <WarmupCleanup
+        canManage={canManageDeletion}
+        enabled={deletion.autoDeleteEnabled}
+        retention={deletion.deleteAfter}
+        live={liveWarmup.count ?? 0}
+        softDeleted={cleanedWarmup.count ?? 0}
+        recent={cleanupRecent}
+      />
 
       <div className="card card-pad space-y-3">
         <h2 className="text-sm font-semibold">Connect with OAuth</h2>
