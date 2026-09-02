@@ -107,7 +107,10 @@ export async function runSearch(
       const primary = providers[primaryIdx]!;
       const fallbacks = providers.filter((_, i) => i !== primaryIdx);
 
-      if (delay > 0) await sleep(delay * (index % concurrency));
+      // Space queries out so DDG's rate-limiter doesn't 202 us. Each task
+      // waits before its fetch; with concurrency 1 that gives a real gap
+      // between every query, scaled down as concurrency rises.
+      if (delay > 0 && index > 0) await sleep(Math.round(delay / concurrency));
       const hits = dedupeByUrl(await searchOne(query, primary, fallbacks, geo, limit));
 
       done += 1;

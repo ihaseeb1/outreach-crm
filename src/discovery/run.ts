@@ -113,6 +113,40 @@ export async function runDiscoveryBatch(
   return result;
 }
 
+/**
+ * Executes ONE run by id, inline and synchronously — the real-time path used
+ * when the operator clicks "Start run". Claims it pending -> running so it
+ * can't collide with a cron tick, runs the searches, and returns the count.
+ * Safe to keep the query list small (the API caps it) so it fits a request.
+ */
+export async function runDiscoveryRunById(
+  supabase: SupabaseClient,
+  runId: string,
+): Promise<number> {
+  const { data: claimed } = await supabase
+    .from("discovery_runs")
+    .update({ status: "running" })
+    .eq("id", runId)
+    .eq("status", "pending")
+    .select("*")
+    .maybeSingle();
+  if (!claimed) return 0;
+
+  try {
+    return await executeRun(supabase, claimed as DiscoveryRun);
+  } catch (err) {
+    await supabase
+      .from("discovery_runs")
+      .update({
+        status: "failed",
+        error: err instanceof Error ? err.message : String(err),
+        completed_at: new Date().toISOString(),
+      })
+      .eq("id", runId);
+    return 0;
+  }
+}
+
 async function executeRun(supabase: SupabaseClient, run: DiscoveryRun): Promise<number> {
   const cap = env.maxSearchQueriesPerRun();
   const queries = (run.queries?.length ? run.queries : expandFootprints(run.niche)).slice(0, cap);
@@ -137,6 +171,10 @@ async function executeRun(supabase: SupabaseClient, run: DiscoveryRun): Promise<
   const queryResults = await runSearch(queries, {
     geo,
     providers,
+    // DDG's HTML endpoints rate-limit rapid requests (202), so keep it to one
+    // query at a time, well spaced. This is the free-tier throttle by design.
+    concurrency: 1,
+    perQueryDelayMs: 2500,
     onProgress: async (done) => {
       // Stream progress: the run page reads processed_queries live.
       await supabase

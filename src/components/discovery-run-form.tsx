@@ -141,7 +141,7 @@ export function DiscoveryRunForm() {
           type="submit"
           disabled={busy || !niche.trim() || queries.length === 0}
         >
-          {busy ? "Starting…" : "Start discovery run"}
+          {busy ? "Searching… (up to a minute)" : "Start discovery run"}
         </button>
         <span className="hint">
           Runs process in the background — keep the local worker running for speed.

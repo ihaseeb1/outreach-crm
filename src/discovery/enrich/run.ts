@@ -25,7 +25,7 @@ export interface EnrichBatchResult {
 }
 
 /** Map the verifier's rich verdict onto the author email status. */
-function toAuthorEmailStatus(status: ValidationStatus): AuthorEmailStatus {
+export function toAuthorEmailStatus(status: ValidationStatus): AuthorEmailStatus {
   switch (status) {
     case "invalid_syntax":
       return "invalid_syntax";
@@ -48,6 +48,70 @@ function confidenceFor(onDomain: boolean, email: string, verified: boolean): num
   let base = onDomain ? (isRoleAccount(email) ? 0.6 : 0.85) : 0.35;
   if (verified) base = Math.min(1, base + 0.1);
   return Math.round(base * 100) / 100;
+}
+
+export interface DomainContact {
+  email: string | null;
+  emailStatus: AuthorEmailStatus;
+  phone: string | null;
+  phoneRegion: string | null;
+  confidence: number | null;
+  social: Record<string, string>;
+  emailsFound: number;
+}
+
+/** Junk addresses that leak from JSON-escaped HTML (e.g. "/name@x"). */
+function isEscapeJunk(email: string): boolean {
+  return /^u00[0-9a-f]{2}/i.test(email);
+}
+
+/**
+ * Self-scrapes ONE domain for its best contact email + phone and verifies them
+ * — the real-time path used when the operator pastes a list of sites. Reuses
+ * scrapeContacts + the in-house verifier + phone normalization. Never throws.
+ */
+export async function enrichContactForDomain(
+  supabase: SupabaseClient,
+  domain: string,
+  options: { respectRobots?: boolean; regionHint?: string | null } = {},
+): Promise<DomainContact> {
+  const empty: DomainContact = {
+    email: null,
+    emailStatus: "unknown",
+    phone: null,
+    phoneRegion: null,
+    confidence: null,
+    social: {},
+    emailsFound: 0,
+  };
+
+  try {
+    const scraped = await scrapeContacts(supabase, domain, {
+      respectRobots: options.respectRobots ?? true,
+    });
+    const emails = scraped.emails.filter((e) => !isEscapeJunk(e));
+    const out: DomainContact = { ...empty, social: scraped.social, emailsFound: emails.length };
+
+    const pick = pickBestEmail(emails, domain);
+    if (pick) {
+      const verdict = await verifyEmail(pick.email, { mode: "quick" });
+      out.email = pick.email;
+      out.emailStatus = toAuthorEmailStatus(verdict.status);
+      out.confidence = confidenceFor(pick.onDomain, pick.email, out.emailStatus === "verified");
+    }
+
+    const phoneRaw = scraped.phones[0];
+    if (phoneRaw) {
+      const normalized = normalizePhone(phoneRaw, options.regionHint ?? null);
+      if (normalized) {
+        out.phone = normalized.e164;
+        out.phoneRegion = normalized.region;
+      }
+    }
+    return out;
+  } catch {
+    return empty;
+  }
 }
 
 export async function runEnrichBatch(

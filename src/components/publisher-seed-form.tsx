@@ -28,7 +28,12 @@ export function PublisherSeedForm() {
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error ?? "Failed to seed.");
-      setMessage(`Queued ${payload.seeded} publisher(s) for author crawl.`);
+      const parts = [
+        `Scraped ${payload.scraped} site(s): ${payload.withEmail} with an email`,
+        `${payload.verified} verified`,
+      ];
+      if (payload.queued > 0) parts.push(`${payload.queued} queued for the worker`);
+      setMessage(`${parts.join(", ")}.`);
       setDomains("");
       router.refresh();
     } catch (err) {
@@ -42,7 +47,7 @@ export function PublisherSeedForm() {
     <form onSubmit={onSubmit} className="card card-pad space-y-3">
       <div>
         <label className="label" htmlFor="domains">
-          Crawl publishers for recent authors
+          Find contacts for a list of sites
         </label>
         <textarea
           id="domains"
@@ -52,13 +57,13 @@ export function PublisherSeedForm() {
           onChange={(e) => setDomains(e.target.value)}
         />
         <p className="hint mt-1">
-          One domain or URL per line. We&apos;ll find posts from the last 30 days,
-          detect the guest ones, and resolve each author&apos;s own site. Or use{" "}
-          <b>Find authors</b> on a discovery run&apos;s results.
+          One domain or URL per line. We crawl each site right now for its best
+          contact email (verified) and phone — the first 8 come back live; more
+          are queued for the background worker.
         </p>
       </div>
       <button className="btn-primary" type="submit" disabled={busy || !domains.trim()}>
-        {busy ? "Queuing…" : "Queue author crawl"}
+        {busy ? "Scraping… (up to a minute)" : "Find contacts"}
       </button>
       {message && <p className="text-sm text-[var(--color-ok)]">{message}</p>}
       {error && <p className="text-sm text-[var(--color-danger)]">{error}</p>}

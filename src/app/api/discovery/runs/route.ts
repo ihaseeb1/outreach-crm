@@ -7,9 +7,19 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getSession } from "@/lib/workspace";
 import { expandFootprints } from "@/discovery/footprints";
 import { WORLDWIDE, isCountryCode } from "@/discovery/geo";
+import { runDiscoveryRunById } from "@/discovery/run";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 export const dynamic = "force-dynamic";
+
+/**
+ * How many queries to run inline (synchronously) so results come back within a
+ * single request. DDG throttles, so each query is spaced ~2.5s; ~16 queries
+ * fits comfortably under the 60s budget. Anything beyond this the background
+ * worker/cron picks up.
+ */
+const INLINE_QUERY_CAP = 16;
 
 const createSchema = z.object({
   niche: z.string().min(1).max(200),
@@ -38,8 +48,9 @@ export async function POST(request: Request) {
     : WORLDWIDE;
 
   // An operator can hand an edited query list straight through; otherwise
-  // expand footprints × niche synonyms. Either way, enforce the cost guard.
-  const cap = env.maxSearchQueriesPerRun();
+  // expand footprints × niche synonyms. Either way, enforce the cost guard,
+  // then cap to what fits one inline request so results come back live.
+  const cap = Math.min(env.maxSearchQueriesPerRun(), INLINE_QUERY_CAP);
   const queries = (
     parsed.data.queries && parsed.data.queries.length > 0
       ? dedupe(parsed.data.queries)
@@ -83,7 +94,17 @@ export async function POST(request: Request) {
     meta: { niche, geo, queries: queries.length },
   });
 
-  return NextResponse.json({ ok: true, runId: data.id, queries: queries.length });
+  // Execute the run inline so results are there when the page loads. If the
+  // request times out mid-run, the run stays "running" and the worker/cron
+  // finishes it — nothing is lost.
+  let found = 0;
+  try {
+    found = await runDiscoveryRunById(supabase, data.id as string);
+  } catch {
+    // Leave it for the background worker; the run page will keep updating.
+  }
+
+  return NextResponse.json({ ok: true, runId: data.id, queries: queries.length, found });
 }
 
 function dedupe(values: string[]): string[] {
