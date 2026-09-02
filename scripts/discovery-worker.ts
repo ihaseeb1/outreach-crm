@@ -22,6 +22,15 @@ import { createClient } from "@supabase/supabase-js";
 
 import { runDiscoveryWorkerTick, tickIsIdle } from "../src/discovery/worker";
 
+// Load .env.local if present, so `npm run worker` picks up the Supabase keys
+// without any extra flags. Best-effort: no-ops when the file or the Node API
+// (loadEnvFile, Node 20.12+) is absent, since Vercel/CI set env another way.
+try {
+  (process as { loadEnvFile?: (path?: string) => void }).loadEnvFile?.(".env.local");
+} catch {
+  // No .env.local — rely on the ambient environment.
+}
+
 const BATCH_SIZE = Number(process.env.WORKER_BATCH_SIZE ?? 3);
 const IDLE_DELAY_MS = Number(process.env.WORKER_IDLE_DELAY_MS ?? 15_000);
 const BUSY_DELAY_MS = Number(process.env.WORKER_BUSY_DELAY_MS ?? 1_000);
