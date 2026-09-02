@@ -73,4 +73,30 @@ export const env = {
     ),
   scraperCrawlDelayMs: () => optionalInt("SCRAPER_CRAWL_DELAY_MS", 1500),
   scraperMaxPagesPerSite: () => optionalInt("SCRAPER_MAX_PAGES_PER_SITE", 5),
+
+  // ----- Discovery & Prospecting (migration 0016). All optional: the base
+  // build needs none of these — DuckDuckGo works with no key or host. -----
+
+  /** Enabled search engines, in round-robin order. csv, e.g. "duckduckgo,searxng". */
+  searchEngines: () =>
+    optional("SEARCH_ENGINES", "duckduckgo")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  /** Base URL of a self-hosted SearXNG instance, e.g. http://localhost:8080. */
+  searxngUrl: () => optional("SEARXNG_URL", "").replace(/\/$/, ""),
+  /** Optional free-tier Google Custom Search key + engine id. */
+  googleCseKey: () => optional("GOOGLE_CSE_KEY", ""),
+  googleCseCx: () => optional("GOOGLE_CSE_CX", ""),
+  /** "Active author" recency window, in days. */
+  activeAuthorWindowDays: () => optionalInt("ACTIVE_AUTHOR_WINDOW_DAYS", 30),
+  /** Cost guard: hard cap on search queries per discovery run. */
+  maxSearchQueriesPerRun: () => optionalInt("MAX_SEARCH_QUERIES_PER_RUN", 300),
+  /** Crawler UA — falls back to the scraper UA so there is one identity. */
+  crawlerUserAgent: () =>
+    process.env.CRAWLER_USER_AGENT ||
+    process.env.SCRAPER_USER_AGENT ||
+    "OutreachCRM/1.0 (+https://example.com/bot; contact@example.com)",
+  /** Politeness floor between fetches to the same host, in ms. */
+  perHostDelayMs: () => optionalInt("PER_HOST_DELAY_MS", 4000),
 } as const;

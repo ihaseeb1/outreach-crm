@@ -73,6 +73,39 @@ import {
   retryDelayMs,
 } from "../src/scraper/safety";
 import { normalizeLinkUrl, parseBacklink, sameTarget } from "../src/deals/backlink";
+import {
+  expandFootprints,
+  expandNiche,
+  interpolate,
+  FOOTPRINT_TEMPLATES,
+  KEYWORD_TOKEN,
+} from "../src/discovery/footprints";
+import {
+  getGeoParams,
+  geoOptions,
+  isCountryCode,
+  WORLDWIDE,
+} from "../src/discovery/geo";
+import { isNoiseDomain, isNoiseUrl } from "../src/discovery/platformNoise";
+import { scoreOpportunity } from "../src/discovery/score/opportunity";
+import {
+  emptySuppression,
+  isDomainSuppressed,
+  isEmailSuppressed,
+  type SuppressionSets,
+} from "../src/discovery/suppression";
+import { parseSitemap, recentFromSitemap } from "../src/discovery/crawl/sitemap";
+import { parseFeed, recentFromFeed } from "../src/discovery/crawl/rss";
+import { detectGuestPost } from "../src/discovery/crawl/guestDetect";
+import {
+  destinationFromResolved,
+  pickDestinationLink,
+} from "../src/discovery/crawl/bioLink";
+import { freshnessScore, inferTopic } from "../src/discovery/score/freshness";
+import { pickBestEmail } from "../src/discovery/enrich/pickEmail";
+import { normalizePhone } from "../src/discovery/enrich/phone";
+import { authorEligibility, phoneComplianceFlags } from "../src/discovery/compliance";
+import { toCsv } from "../src/lib/csv";
 import { canStartAnother } from "../src/mail/poll";
 import {
   decideInbound,
@@ -3969,6 +4002,362 @@ test("deletion is disabled unless the workspace opts in", () => {
   const on = readDeletionSettings({ warmup: { auto_delete_enabled: true, delete_after: "14d" } });
   assert.equal(on.autoDeleteEnabled, true);
   assert.equal(on.deleteAfter, "14d");
+});
+
+console.log("\ndiscovery — footprint expansion");
+
+test("interpolate replaces every keyword token", () => {
+  assert.equal(interpolate(`${KEYWORD_TOKEN} "write for us"`, "tech"), 'tech "write for us"');
+  assert.equal(interpolate("no token here", "tech"), "no token here");
+});
+
+test("expandNiche folds in synonyms and dedupes", () => {
+  const expanded = expandNiche("tech");
+  assert.ok(expanded.includes("tech"));
+  assert.ok(expanded.includes("technology"));
+  assert.ok(expanded.includes("software"));
+  // First element is the niche itself.
+  assert.equal(expanded[0], "tech");
+  // No duplicates.
+  assert.equal(new Set(expanded.map((s) => s.toLowerCase())).size, expanded.length);
+});
+
+test("expandNiche without synonyms returns just the niche", () => {
+  assert.deepEqual(expandNiche("tech", false), ["tech"]);
+  assert.deepEqual(expandNiche("  ", true), []);
+});
+
+test("expandFootprints('tech') returns interpolated, deduped queries", () => {
+  const queries = expandFootprints("tech");
+  assert.ok(queries.length > 0);
+  // Every query is interpolated — no leftover placeholder.
+  assert.ok(queries.every((q) => !q.includes(KEYWORD_TOKEN)));
+  // Covers the niche and at least one synonym across the templates.
+  assert.ok(queries.some((q) => q.startsWith("tech ")));
+  assert.ok(queries.some((q) => q.startsWith("technology ")));
+  assert.ok(queries.some((q) => q.includes('"write for us"')));
+  // Deduped.
+  assert.equal(new Set(queries.map((q) => q.toLowerCase())).size, queries.length);
+  // Count matches templates × keywords (minus dedupe).
+  assert.ok(queries.length <= FOOTPRINT_TEMPLATES.length * expandNiche("tech").length);
+});
+
+test("expandFootprints honours a custom template list and synonym toggle", () => {
+  const queries = expandFootprints("tech", {
+    templates: [`${KEYWORD_TOKEN} inurl:write-for-us`],
+    includeSynonyms: false,
+  });
+  assert.deepEqual(queries, ["tech inurl:write-for-us"]);
+});
+
+test("expandFootprints ignores templates missing the token", () => {
+  const queries = expandFootprints("tech", {
+    templates: ["bad template", `${KEYWORD_TOKEN} "write for us"`],
+    includeSynonyms: false,
+  });
+  assert.deepEqual(queries, ['tech "write for us"']);
+});
+
+console.log("\ndiscovery — geo params");
+
+test("WORLDWIDE omits gl so results are unbiased", () => {
+  const params = getGeoParams(WORLDWIDE);
+  assert.equal(params.gl, undefined);
+  assert.deepEqual(params, {});
+});
+
+test("null / empty / unknown geo degrades to worldwide", () => {
+  assert.deepEqual(getGeoParams(null), {});
+  assert.deepEqual(getGeoParams(""), {});
+  assert.deepEqual(getGeoParams("ZZ"), {});
+});
+
+test("a country code yields gl, hl and google_domain", () => {
+  const gb = getGeoParams("GB");
+  assert.equal(gb.gl, "gb");
+  assert.equal(gb.hl, "en");
+  assert.equal(gb.google_domain, "google.co.uk");
+  // Case-insensitive input.
+  assert.deepEqual(getGeoParams("gb"), gb);
+});
+
+test("a valid country without an override defaults to en / google.com", () => {
+  const fj = getGeoParams("FJ");
+  assert.equal(fj.gl, "fj");
+  assert.equal(fj.hl, "en");
+  assert.equal(fj.google_domain, "google.com");
+});
+
+test("isCountryCode + geoOptions expose the picker list", () => {
+  assert.equal(isCountryCode("US"), true);
+  assert.equal(isCountryCode("zz"), false);
+  const options = geoOptions();
+  assert.equal(options[0]?.code, WORLDWIDE);
+  assert.ok(options.length > 200);
+});
+
+console.log("\ndiscovery — platform noise filter");
+
+test("known platforms and their subdomains are noise", () => {
+  assert.equal(isNoiseDomain("medium.com"), true);
+  assert.equal(isNoiseDomain("foo.medium.com"), true);
+  assert.equal(isNoiseDomain("news.google.com"), true);
+  assert.equal(isNoiseDomain("linkedin.com"), true);
+  assert.equal(isNoiseDomain("www.reddit.com"), true);
+  assert.equal(isNoiseUrl("https://www.youtube.com/watch?v=x"), true);
+});
+
+test("a real publisher domain is not noise", () => {
+  assert.equal(isNoiseDomain("techcrunch-lookalike-blog.com"), false);
+  assert.equal(isNoiseUrl("https://someblog.io/write-for-us"), false);
+  // Empty / malformed is treated as noise (dropped).
+  assert.equal(isNoiseDomain(""), true);
+});
+
+console.log("\ndiscovery — opportunity score");
+
+test("more positive signals raise the score, clamped to 0–100", () => {
+  const bare = scoreOpportunity({ bestPosition: 20 });
+  const strong = scoreOpportunity({
+    hasWriteForUsPage: true,
+    bestPosition: 1,
+    postCadenceDays: 2,
+    hasContactInfo: true,
+    authorBioDofollow: true,
+  });
+  assert.ok(strong > bare);
+  assert.ok(strong <= 100 && strong >= 0);
+  assert.ok(bare >= 0);
+  // A write-for-us page alone is worth its weight.
+  assert.equal(scoreOpportunity({ hasWriteForUsPage: true }), 30);
+});
+
+test("SERP position 1 scores higher than a low rank", () => {
+  assert.ok(scoreOpportunity({ bestPosition: 1 }) > scoreOpportunity({ bestPosition: 10 }));
+});
+
+test("a link-farm penalty lowers the score", () => {
+  const clean = scoreOpportunity({ hasWriteForUsPage: true, authorBioDofollow: true });
+  const farm = scoreOpportunity({
+    hasWriteForUsPage: true,
+    authorBioDofollow: true,
+    outboundLinksPerPost: 200,
+  });
+  assert.ok(farm < clean);
+});
+
+test("unknown signals contribute nothing (score climbs as data arrives)", () => {
+  assert.equal(scoreOpportunity({}), 0);
+  assert.equal(scoreOpportunity({ postCadenceDays: null, bestPosition: null }), 0);
+});
+
+console.log("\ndiscovery — suppression + dedupe predicates");
+
+test("domain suppression matches exact and subdomains", () => {
+  const sets: SuppressionSets = emptySuppression();
+  sets.domains.add("competitor.com");
+  assert.equal(isDomainSuppressed("competitor.com", sets), true);
+  assert.equal(isDomainSuppressed("www.competitor.com", sets), true);
+  assert.equal(isDomainSuppressed("blog.competitor.com", sets), true);
+  assert.equal(isDomainSuppressed("notcompetitor.com", sets), false);
+});
+
+test("email suppression matches address and suppressed domain", () => {
+  const sets: SuppressionSets = emptySuppression();
+  sets.emails.add("editor@site.com");
+  sets.domains.add("owned.com");
+  assert.equal(isEmailSuppressed("editor@site.com", sets), true);
+  assert.equal(isEmailSuppressed("EDITOR@SITE.COM", sets), true);
+  assert.equal(isEmailSuppressed("anyone@owned.com", sets), true);
+  assert.equal(isEmailSuppressed("hello@elsewhere.com", sets), false);
+});
+
+console.log("\ndiscovery — sitemap + rss parsing");
+
+test("parseSitemap reads a urlset and a sitemapindex", () => {
+  const urlset = parseSitemap(
+    `<?xml version="1.0"?><urlset><url><loc>https://a.com/p1</loc><lastmod>2026-08-30</lastmod></url><url><loc>https://a.com/p2</loc></url></urlset>`,
+  );
+  assert.equal(urlset.urls.length, 2);
+  assert.equal(urlset.urls[0]?.loc, "https://a.com/p1");
+  assert.equal(urlset.urls[0]?.lastmod, "2026-08-30");
+
+  const index = parseSitemap(
+    `<sitemapindex><sitemap><loc>https://a.com/post-sitemap.xml</loc></sitemap></sitemapindex>`,
+  );
+  assert.deepEqual(index.sitemaps, ["https://a.com/post-sitemap.xml"]);
+  // Malformed never throws.
+  assert.deepEqual(parseSitemap("<<<not xml").urls, []);
+});
+
+test("recentFromSitemap keeps only in-window, newest first", () => {
+  const now = new Date("2026-09-02T00:00:00Z");
+  const recent = recentFromSitemap(
+    [
+      { loc: "old", lastmod: "2026-06-01" },
+      { loc: "new", lastmod: "2026-09-01" },
+      { loc: "mid", lastmod: "2026-08-20" },
+      { loc: "nodate", lastmod: null },
+    ],
+    30,
+    now,
+  );
+  assert.deepEqual(recent.map((r) => r.loc), ["new", "mid"]);
+});
+
+test("parseFeed reads RSS and Atom", () => {
+  const rss = parseFeed(
+    `<rss><channel><item><title>Post A</title><link>https://a.com/a</link><pubDate>Mon, 01 Sep 2026 10:00:00 GMT</pubDate></item></channel></rss>`,
+  );
+  assert.equal(rss.length, 1);
+  assert.equal(rss[0]?.url, "https://a.com/a");
+  assert.equal(rss[0]?.title, "Post A");
+
+  const atom = parseFeed(
+    `<feed><entry><title>Post B</title><link href="https://a.com/b" rel="alternate"/><updated>2026-09-01T10:00:00Z</updated></entry></feed>`,
+  );
+  assert.equal(atom[0]?.url, "https://a.com/b");
+});
+
+test("recentFromFeed filters by window", () => {
+  const now = new Date("2026-09-02T00:00:00Z");
+  const items = recentFromFeed(
+    [
+      { url: "new", publishedAt: "2026-09-01T00:00:00Z", title: null },
+      { url: "old", publishedAt: "2026-01-01T00:00:00Z", title: null },
+    ],
+    30,
+    now,
+  );
+  assert.deepEqual(items.map((i) => i.url), ["new"]);
+});
+
+console.log("\ndiscovery — guest detection + bio link");
+
+test("a guest post with a bio + external link scores high", () => {
+  const html = `<html><body>
+    <article><h1>Great SEO Tips</h1>
+    <p>This is a guest post by Jane Smith.</p>
+    <div class="author-bio">Jane runs
+      <a href="https://janes-agency.com">Jane's Agency</a>.
+    </div></article></body></html>`;
+  const d = detectGuestPost(html, "https://publisher.com/great-seo-tips");
+  assert.ok(d.score >= 45);
+  assert.equal(d.authorName, "Jane Smith");
+  assert.ok(d.bioLinks.includes("https://janes-agency.com/"));
+});
+
+test("an ordinary post without guest signals scores low", () => {
+  const html = `<html><body><article><h1>Our news</h1><p>Company update.</p></article></body></html>`;
+  const d = detectGuestPost(html, "https://publisher.com/news");
+  assert.ok(d.score < 45);
+});
+
+test("bio link resolves to a destination domain, not the source", () => {
+  assert.equal(
+    pickDestinationLink(["https://janes-agency.com/about"], "publisher.com"),
+    "https://janes-agency.com/about",
+  );
+  // Skips the publisher's own domain.
+  assert.equal(pickDestinationLink(["https://publisher.com/x"], "publisher.com"), null);
+  assert.equal(destinationFromResolved("https://janes-agency.com/about", "publisher.com"), "janes-agency.com");
+  assert.equal(destinationFromResolved("https://www.publisher.com/y", "publisher.com"), null);
+});
+
+console.log("\ndiscovery — freshness score");
+
+test("freshness is recency-weighted within the window", () => {
+  const now = new Date("2026-09-02T00:00:00Z");
+  const twoDays = freshnessScore("2026-08-31T00:00:00Z", 30, now);
+  const twentyFive = freshnessScore("2026-08-08T00:00:00Z", 30, now);
+  assert.ok(twoDays > twentyFive);
+  assert.equal(freshnessScore(null, 30, now), 0);
+  assert.equal(freshnessScore("2026-01-01T00:00:00Z", 30, now), 0); // out of window
+});
+
+test("inferTopic strips a trailing site-name suffix", () => {
+  assert.equal(inferTopic("Great SEO Tips | Publisher Blog"), "Great SEO Tips");
+  assert.equal(inferTopic("Great SEO Tips - Publisher"), "Great SEO Tips");
+  assert.equal(inferTopic(null), null);
+});
+
+console.log("\ndiscovery — contact enrichment");
+
+test("pickBestEmail prefers an on-domain named person", () => {
+  const pick = pickBestEmail(
+    ["info@dest.com", "jane@dest.com", "hello@other.com"],
+    "dest.com",
+  );
+  assert.equal(pick?.email, "jane@dest.com");
+  assert.equal(pick?.onDomain, true);
+});
+
+test("pickBestEmail falls back to off-domain when nothing on-domain", () => {
+  const pick = pickBestEmail(["hello@other.com"], "dest.com");
+  assert.equal(pick?.email, "hello@other.com");
+  assert.equal(pick?.onDomain, false);
+});
+
+test("pickBestEmail prefers a role inbox over noreply, on-domain", () => {
+  const pick = pickBestEmail(["noreply@dest.com", "editor@dest.com"], "dest.com");
+  assert.equal(pick?.email, "editor@dest.com");
+});
+
+test("pickBestEmail returns null for no candidates", () => {
+  assert.equal(pickBestEmail([], "dest.com"), null);
+});
+
+test("normalizePhone yields E.164 + region, rejects junk", () => {
+  const us = normalizePhone("+1 415 555 2671");
+  assert.equal(us?.e164, "+14155552671");
+  assert.equal(us?.region, "US");
+  // National format with a region hint.
+  const gb = normalizePhone("020 7946 0958", "GB");
+  assert.equal(gb?.region, "GB");
+  assert.ok(gb?.e164.startsWith("+44"));
+  // Not a phone number.
+  assert.equal(normalizePhone("12"), null);
+  assert.equal(normalizePhone(""), null);
+});
+
+console.log("\ndiscovery — campaign compliance");
+
+test("only verified, non-suppressed, non-role authors are eligible", () => {
+  const base = { email: "jane@dest.com" as string | null, emailStatus: "verified" as const, suppressed: false };
+  assert.equal(authorEligibility(base).eligible, true);
+  assert.equal(authorEligibility({ ...base, emailStatus: "unverified" }).eligible, false);
+  assert.equal(authorEligibility({ ...base, suppressed: true }).eligible, false);
+  assert.equal(authorEligibility({ ...base, email: null }).eligible, false);
+  // Role address blocked unless opted in.
+  const role = { email: "info@dest.com", emailStatus: "verified" as const, suppressed: false };
+  assert.equal(authorEligibility(role).eligible, false);
+  assert.equal(authorEligibility(role, { allowRole: true }).eligible, true);
+});
+
+test("phone region flags are advisory and region-specific", () => {
+  assert.ok(phoneComplianceFlags("GB").some((f) => f.includes("TPS")));
+  assert.ok(phoneComplianceFlags("US").some((f) => f.includes("DNC")));
+  assert.ok(phoneComplianceFlags("DE").some((f) => f.includes("PECR")));
+  assert.deepEqual(phoneComplianceFlags(null), []);
+  assert.deepEqual(phoneComplianceFlags("ZZ"), []);
+});
+
+console.log("\ndiscovery — csv export");
+
+test("toCsv quotes fields with commas, quotes and newlines", () => {
+  const csv = toCsv(
+    ["Domain", "Note"],
+    [
+      ["a.com", "plain"],
+      ["b.com", 'has "quote", and comma'],
+      ["c.com", null],
+    ],
+  );
+  const lines = csv.split("\r\n");
+  assert.equal(lines[0], "Domain,Note");
+  assert.equal(lines[1], "a.com,plain");
+  assert.equal(lines[2], 'b.com,"has ""quote"", and comma"');
+  assert.equal(lines[3], "c.com,");
 });
 
 void (async () => {

@@ -433,3 +433,122 @@ export interface ActivityLogEntry {
   meta: Record<string, unknown>;
   created_at: Timestamp;
 }
+
+// =====================================================================
+// Discovery & Prospecting (migration 0016) — all additive.
+// =====================================================================
+
+/** Where a discovered site or active author sits in the outreach lifecycle. */
+export type RelationshipStage =
+  | "new"
+  | "contacted"
+  | "replied"
+  | "published"
+  | "won";
+
+export type DiscoveryRunStatus = "pending" | "running" | "completed" | "failed";
+
+export interface DiscoveryRun {
+  id: Uuid;
+  workspace_id: Uuid;
+  created_by: Uuid | null;
+  niche: string;
+  queries: string[];
+  /** ISO-3166 alpha-2 code, or "WORLDWIDE". */
+  geo: string;
+  engines: string[];
+  status: DiscoveryRunStatus;
+  total_queries: number;
+  processed_queries: number;
+  found_count: number;
+  error: string | null;
+  settings: Record<string, unknown>;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+  completed_at: Timestamp | null;
+}
+
+export interface DiscoveredSite {
+  id: Uuid;
+  workspace_id: Uuid;
+  run_id: Uuid;
+  root_domain: string;
+  guest_post_url: string | null;
+  matched_footprint: string | null;
+  best_position: number | null;
+  title: string | null;
+  description: string | null;
+  opportunity_score: number | null;
+  post_cadence_days: number | null;
+  has_contact_info: boolean;
+  status: RelationshipStage;
+  pushed_website_id: Uuid | null;
+  pushed_at: Timestamp | null;
+  /** Author-crawl seed fields (migration 0017). */
+  author_crawl?: boolean;
+  authors_crawled_at?: Timestamp | null;
+  authors_found?: number;
+  meta: Record<string, unknown>;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export type AuthorEmailStatus =
+  | "unknown"
+  | "verified"
+  | "invalid_syntax"
+  | "no_mx"
+  | "disposable"
+  | "role_account"
+  | "unverified";
+
+export interface ActiveAuthor {
+  id: Uuid;
+  workspace_id: Uuid;
+  source_domain: string;
+  source_post_url: string;
+  author_name: string | null;
+  destination_domain: string;
+  published_at: Timestamp | null;
+  detection_score: number | null;
+  freshness_score: number | null;
+  latest_post_title: string | null;
+  latest_post_topic: string | null;
+  email: string | null;
+  email_status: AuthorEmailStatus;
+  phone: string | null;
+  phone_region: string | null;
+  contact_confidence: number | null;
+  status: RelationshipStage;
+  /** Enrichment claim stamp (migration 0018). */
+  enriched_at?: Timestamp | null;
+  meta: Record<string, unknown>;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
+export interface CrawlCacheRow {
+  url: string;
+  status_int: number | null;
+  body: string | null;
+  fetched_at: Timestamp;
+  ttl_seconds: number;
+}
+
+export type SuppressionListKind = "domain" | "email";
+export type SuppressionListReason =
+  | "competitor"
+  | "owned"
+  | "unsubscribed"
+  | "bounced"
+  | "manual";
+
+export interface SuppressionListEntry {
+  id: Uuid;
+  workspace_id: Uuid;
+  value: string;
+  kind: SuppressionListKind;
+  reason: SuppressionListReason;
+  meta: Record<string, unknown>;
+  created_at: Timestamp;
+}

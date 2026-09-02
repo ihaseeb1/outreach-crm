@@ -7,6 +7,8 @@ import { requireSession } from "@/lib/workspace";
 const NAV: NavItem[] = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/reports", label: "Reports" },
+  { href: "/discovery", label: "Discovery" },
+  { href: "/publishers", label: "Publishers" },
   { href: "/prospecting", label: "Prospecting" },
   { href: "/contacts", label: "Contacts" },
   { href: "/pipeline", label: "Pipeline" },

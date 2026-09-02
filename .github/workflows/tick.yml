@@ -80,6 +80,9 @@ jobs:
           hit scrape &
           hit backlinks &
           hit warmup-purge &
+          hit discovery &
+          hit publishers &
+          hit enrich &
           wait
 
           failed=""

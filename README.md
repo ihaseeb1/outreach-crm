@@ -164,6 +164,53 @@ npm run scrape-worker
 
 To keep it running after you log out, use a systemd unit or `pm2 start "npm run scrape-worker" --name scraper`.
 
+## Discovery & Prospecting (zero-cost)
+
+Two features find link-building targets without any paid API or paid hosting:
+
+1. **SERP guest-post discovery** (`/discovery`) — a niche + region is expanded
+   into guest-post footprints (`"write for us"`, `inurl:write-for-us`, …) across
+   the niche and its synonyms, searched, reduced to root domains, filtered of
+   platform noise and anything blacklisted or already seen, and scored 0–100 by
+   free signals. Selected sites go straight into Prospecting.
+2. **Active-publisher targeting** (`/publishers`) — crawls publishers for posts
+   from the last 30 days, detects the guest ones, resolves each author's own
+   ("money") site from their bio link, and self-scrapes + verifies a contact
+   email and phone. Verified, non-suppressed authors become contacts with
+   personalization tokens pre-filled.
+
+**Search engines (keyless, pluggable)** — set `SEARCH_ENGINES` (csv):
+
+- `duckduckgo` — default, no key, no host.
+- `searxng` — self-host SearXNG via Docker and set `SEARXNG_URL` for wider
+  Google/Bing coverage.
+- `google_cse` — official free tier (100/day); set `GOOGLE_CSE_KEY` +
+  `GOOGLE_CSE_CX`.
+
+The router round-robins across the enabled engines and falls back on failure.
+Enrichment is self-scrape only; email verification reuses the in-house engine
+(syntax + MX + disposable + role, no port 25); phones normalize to E.164 with
+`libphonenumber-js`. No paid DR/traffic — scores come from free signals.
+
+**Migrations:** apply `0016_discovery.sql`, `0017_publisher_crawl.sql`,
+`0018_author_enrichment.sql` in Supabase. Every page and cron degrades
+gracefully until they are applied.
+
+**The local worker (the free-tier trade-off).** Discovery, crawling and
+enrichment are too slow for a serverless function's 60s budget, and free search
+engines rate-limit keyless access — so throughput is throttled and coverage is
+lower than a paid API. Run the heavy work on your own always-on machine, where
+it has no timeout and costs nothing:
+
+```bash
+npm run worker
+```
+
+It polls the same Supabase database, claims a small batch each tick, and idles
+when there's nothing to do (`pm2 start "npm run worker" --name discovery` to keep
+it up). The GitHub Actions tick also drives `discovery`, `publishers` and
+`enrich` each cycle, so runs still progress when the worker is off — just slower.
+
 ## Deploy
 
 1. Push to GitHub, import the repo in Vercel.

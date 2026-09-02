@@ -1,7 +1,49 @@
-# Handover — 17, 20, 21, 27, 28 August 2026
+# Handover — 17, 20, 21, 27, 28 August + 2 September 2026
 
 Read this first, then `DEPLOY_STATUS.md` for hosting and `BUILD_LOG.md` for the
 original seven build phases.
+
+---
+
+## Discovery & Prospecting (zero-cost stack), 2 September
+
+Typecheck clean, smoke **415/0**, build clean. **Strictly additive** — no
+existing table, policy, route, or job was changed. **Needs migrations
+`0016_discovery.sql`, `0017_publisher_crawl.sql`, `0018_author_enrichment.sql`**
+applied in Supabase (ref `rqztbqxzhykybnejjuba`). Every new page and cron probes
+for the tables and no-ops until they exist, so a deploy before applying them
+breaks nothing.
+
+Two new features, both on a $0 stack (no paid API, no paid hosting):
+
+- **SERP guest-post discovery** (`/discovery`). A niche + region → guest-post
+  footprints × niche synonyms → keyless multi-engine search (DuckDuckGo default;
+  optional SearXNG / Google CSE via `SEARCH_ENGINES`) → root domains, noise +
+  blacklist + prior-run filtered → opportunity-scored. Bulk **Send to
+  Prospecting** creates the same `websites` rows the scrape cron already
+  consumes (provenance in `websites.meta.discovery`). Query list is editable
+  pre-run; a discovery blacklist (`suppression_list`, separate from
+  `suppressions`) filters results.
+- **Active-publisher targeting** (`/publishers`). Crawls publishers (seeded from
+  discovery results via "Find authors", or pasted domains) for last-30-day posts,
+  detects guest posts, resolves the author's destination site from their bio
+  link, self-scrapes + verifies a contact email (reuses
+  `src/validation/verify-engine.ts`, quick mode) and normalizes a phone to E.164.
+  **Add to contacts** promotes only verified, non-suppressed, non-role authors
+  (compliance-gated, region flags attached), deduped by `contacts` unique.
+
+**Architecture:** reuses the existing job pattern (no pg-boss) and
+`src/scraper/` (robots + SSRF + extract). New heavy work runs in a local worker
+`npm run worker` (`scripts/discovery-worker.ts`) **and** three cron routes
+`/api/cron/{discovery,publishers,enrich}` wired into `.github/workflows/tick.yml`.
+All new code is under `src/discovery/`. New deps (all MIT): duck-duck-scrape,
+p-limit, fast-xml-parser, libphonenumber-js.
+
+**Verify live (a clean build proves nothing here):** apply the 3 migrations →
+`npm run worker` (or fire the crons) → on `/discovery` start a run (e.g. "tech",
+Worldwide) → watch it populate → select sites → Find authors → `/publishers`
+shows authors, enrich fills email/phone → Add verified to contacts. See the
+`SEARCH_ENGINES` / worker trade-off note in `README.md`.
 
 ---
 

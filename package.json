@@ -10,16 +10,22 @@
     "typecheck": "tsc --noEmit",
     "smoke": "tsx scripts/smoke-test.ts",
     "signature-icons": "tsx scripts/build-signature-icons.ts",
-    "scrape-worker": "tsx scripts/scrape-worker.ts"
+    "scrape-worker": "tsx scripts/scrape-worker.ts",
+    "worker": "tsx scripts/discovery-worker.ts",
+    "discovery-worker": "tsx scripts/discovery-worker.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.5.2",
     "@supabase/supabase-js": "^2.47.10",
     "cheerio": "^1.0.0",
+    "duck-duck-scrape": "^2.2.7",
+    "fast-xml-parser": "^5.11.1",
     "imapflow": "^1.7.1",
+    "libphonenumber-js": "^1.13.12",
     "mailparser": "^3.9.15",
     "next": "^15.1.6",
     "nodemailer": "^9.0.5",
+    "p-limit": "^7.3.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "validator": "^13.12.0",
