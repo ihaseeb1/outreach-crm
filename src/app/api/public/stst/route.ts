@@ -42,11 +42,20 @@ export async function GET(request: Request) {
     const html = await res.text();
     const $ = cheerio.load(html);
     const results: string[] = [];
-    $("li.b_algo h2 a, h2 a").each((_, el) => {
-      const dec = decodeBing($(el).attr("href") ?? "");
+    const algoCount = $("li.b_algo").length;
+    $("li.b_algo h2 a").each((_, el) => {
+      const raw = $(el).attr("href") ?? "";
+      const dec = decodeBing(raw);
       if (dec && !results.includes(dec)) results.push(dec);
     });
-    out.bing = { status: res.status, bytes: html.length, count: results.length, ms: Date.now() - started, sample: results.slice(0, 8) };
+    out.bing = {
+      status: res.status,
+      bytes: html.length,
+      algoCount,
+      count: results.length,
+      ms: Date.now() - started,
+      sample: results.slice(0, 8),
+    };
   } catch (e) {
     out.bing = { error: e instanceof Error ? e.message : String(e) };
   }
