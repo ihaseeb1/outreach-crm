@@ -32,32 +32,33 @@ export async function GET(request: Request) {
   const q = url.searchParams.get("q") ?? 'tech "write for us"';
   const mkt = url.searchParams.get("mkt") ?? "en-AU";
 
-  const started = Date.now();
-  const out: Record<string, unknown> = { q };
-  try {
-    const res = await fetch(`https://www.bing.com/search?q=${encodeURIComponent(q)}&count=20&mkt=${mkt}`, {
-      headers: { "user-agent": UA, "accept-language": "en-US,en;q=0.9" },
-      signal: AbortSignal.timeout(15000),
-    });
-    const html = await res.text();
-    const $ = cheerio.load(html);
-    const results: string[] = [];
-    const algoCount = $("li.b_algo").length;
-    $("li.b_algo h2 a").each((_, el) => {
-      const raw = $(el).attr("href") ?? "";
-      const dec = decodeBing(raw);
-      if (dec && !results.includes(dec)) results.push(dec);
-    });
-    out.bing = {
-      status: res.status,
-      bytes: html.length,
-      algoCount,
-      count: results.length,
-      ms: Date.now() - started,
-      sample: results.slice(0, 8),
-    };
-  } catch (e) {
-    out.bing = { error: e instanceof Error ? e.message : String(e) };
+  const variants = [
+    q,
+    'intitle:"write for us" technology',
+    '"write for us" + technology blog',
+    'technology "guest post guidelines"',
+    'technology inurl:write-for-us',
+  ];
+
+  const out: Record<string, unknown> = { mkt };
+  for (const variant of variants) {
+    try {
+      const res = await fetch(
+        `https://www.bing.com/search?q=${encodeURIComponent(variant)}&count=20&mkt=${mkt}`,
+        { headers: { "user-agent": UA, "accept-language": "en-US,en;q=0.9" }, signal: AbortSignal.timeout(15000) },
+      );
+      const html = await res.text();
+      const $ = cheerio.load(html);
+      const results: string[] = [];
+      $("li.b_algo h2 a").each((_, el) => {
+        const dec = decodeBing($(el).attr("href") ?? "");
+        if (dec && !results.includes(dec)) results.push(dec);
+      });
+      out[variant] = { status: res.status, algo: $("li.b_algo").length, sample: results.slice(0, 6) };
+    } catch (e) {
+      out[variant] = { error: e instanceof Error ? e.message : String(e) };
+    }
+    await new Promise((r) => setTimeout(r, 400));
   }
   return NextResponse.json(out);
 }
