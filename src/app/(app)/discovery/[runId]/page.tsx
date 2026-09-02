@@ -96,11 +96,37 @@ export default async function DiscoveryRunPage({
         </div>
         {inFlight && (
           <p className="hint mt-2">
-            Running — keep the local worker (<code>npm run worker</code>) going, or
-            wait for the next background tick. This page updates itself.
+            Queued for the local worker. Keyless search only works from a
+            residential IP, so start <code>npm run worker</code> on your machine
+            and this run will process (or configure Google CSE for cloud search).
+            This page updates itself.
           </p>
         )}
       </div>
+
+      {!inFlight && run.status === "completed" && rows.length === 0 && (
+        <div className="card card-pad space-y-2 border-[var(--color-warn)]">
+          <p className="font-medium">No sites found for this run.</p>
+          <p className="hint">
+            On the free tier, keyless search engines (DuckDuckGo, Bing) block or
+            degrade requests from cloud servers, so a run started on the live
+            site often returns nothing. To get real results, pick one:
+          </p>
+          <ul className="hint ml-4 list-disc space-y-1">
+            <li>
+              <b>Google Custom Search (free, 100/day):</b> add
+              <code> GOOGLE_CSE_KEY</code>, <code>GOOGLE_CSE_CX</code> and
+              <code> SEARCH_ENGINES=google_cse</code> in your Vercel env, then
+              re-run. This works from the cloud and honours search operators.
+            </li>
+            <li>
+              <b>Local worker:</b> run <code>npm run worker</code> on your own
+              machine (DuckDuckGo works from a residential IP). New runs then
+              process there automatically.
+            </li>
+          </ul>
+        </div>
+      )}
 
       <DiscoveryResultsTable rows={rows} runId={run.id} />
     </div>

@@ -8,6 +8,7 @@ import { getSession } from "@/lib/workspace";
 import { expandFootprints } from "@/discovery/footprints";
 import { WORLDWIDE, isCountryCode } from "@/discovery/geo";
 import { runDiscoveryRunById } from "@/discovery/run";
+import { cloudSearchViable } from "@/discovery/search";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -94,17 +95,28 @@ export async function POST(request: Request) {
     meta: { niche, geo, queries: queries.length },
   });
 
-  // Execute the run inline so results are there when the page loads. If the
-  // request times out mid-run, the run stays "running" and the worker/cron
-  // finishes it — nothing is lost.
+  // Execute inline so results are there on page load — but only when a
+  // cloud-capable engine (Google CSE / SearXNG) is configured. With only
+  // keyless engines (DuckDuckGo/Bing), search is blocked from Vercel's IP, so
+  // we leave the run pending for the local worker rather than "completing" it
+  // with zero results.
   let found = 0;
-  try {
-    found = await runDiscoveryRunById(supabase, data.id as string);
-  } catch {
-    // Leave it for the background worker; the run page will keep updating.
+  const deferred = !cloudSearchViable();
+  if (!deferred) {
+    try {
+      found = await runDiscoveryRunById(supabase, data.id as string);
+    } catch {
+      // Left running; the worker/cron finishes it. The page keeps updating.
+    }
   }
 
-  return NextResponse.json({ ok: true, runId: data.id, queries: queries.length, found });
+  return NextResponse.json({
+    ok: true,
+    runId: data.id,
+    queries: queries.length,
+    found,
+    deferred,
+  });
 }
 
 function dedupe(values: string[]): string[] {

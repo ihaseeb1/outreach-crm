@@ -31,6 +31,11 @@ try {
   // No .env.local — rely on the ambient environment.
 }
 
+// Mark this as the local worker: it runs from a residential IP where keyless
+// engines (DuckDuckGo) work, so it may process DDG-only discovery runs that the
+// cloud defers.
+process.env.DISCOVERY_LOCAL = "1";
+
 const BATCH_SIZE = Number(process.env.WORKER_BATCH_SIZE ?? 3);
 const IDLE_DELAY_MS = Number(process.env.WORKER_IDLE_DELAY_MS ?? 15_000);
 const BUSY_DELAY_MS = Number(process.env.WORKER_BUSY_DELAY_MS ?? 1_000);

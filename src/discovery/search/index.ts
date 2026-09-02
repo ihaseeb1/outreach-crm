@@ -39,6 +39,17 @@ export function getProviders(): SearchProvider[] {
   return providers;
 }
 
+/**
+ * True when at least one enabled engine works from a cloud/datacenter IP.
+ * DuckDuckGo and Bing's HTML endpoints block or degrade datacenter requests, so
+ * only an API engine (Google CSE) or a reachable SearXNG counts. The Vercel-side
+ * runners use this to decide whether to run inline or defer to the local worker.
+ */
+export function cloudSearchViable(providers?: SearchProvider[]): boolean {
+  const list = providers ?? getProviders();
+  return list.some((p) => p.name === "google_cse" || p.name === "searxng");
+}
+
 export interface RunSearchOptions {
   geo?: GeoParams;
   /** Max results kept per query (across engines). */

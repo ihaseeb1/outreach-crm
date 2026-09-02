@@ -5,7 +5,7 @@ import { domainFromUrl } from "@/lib/email";
 import { logActivity } from "@/lib/activity";
 import { getGeoParams } from "@/discovery/geo";
 import { expandFootprints } from "@/discovery/footprints";
-import { getProviders, runSearch } from "@/discovery/search";
+import { cloudSearchViable, getProviders, runSearch } from "@/discovery/search";
 import type { SearchHit } from "@/discovery/search/provider";
 import { isNoiseDomain } from "@/discovery/platformNoise";
 import { scoreOpportunity } from "@/discovery/score/opportunity";
@@ -71,6 +71,12 @@ export async function runDiscoveryBatch(
 ): Promise<DiscoveryBatchResult> {
   const limit = options.limit ?? 1;
   const result: DiscoveryBatchResult = { runsProcessed: 0, sitesFound: 0 };
+
+  // If only keyless engines are enabled and we're not the local worker (i.e.
+  // this is running on Vercel, where DDG/Bing are blocked), leave pending runs
+  // for the local worker to process from a residential IP. Prevents the cloud
+  // from "completing" every run with zero results.
+  if (!cloudSearchViable() && !env.discoveryLocal()) return result;
 
   let pendingQuery = supabase
     .from("discovery_runs")

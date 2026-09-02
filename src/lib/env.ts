@@ -99,4 +99,11 @@ export const env = {
     "OutreachCRM/1.0 (+https://example.com/bot; contact@example.com)",
   /** Politeness floor between fetches to the same host, in ms. */
   perHostDelayMs: () => optionalInt("PER_HOST_DELAY_MS", 4000),
+  /**
+   * Set by the local worker (scripts/discovery-worker.ts). Keyless engines
+   * (DuckDuckGo/Bing) work from a residential IP but are blocked from cloud
+   * datacenters, so the Vercel-side runners defer DDG-only runs to the local
+   * worker, which sets this flag.
+   */
+  discoveryLocal: () => process.env.DISCOVERY_LOCAL === "1",
 } as const;
