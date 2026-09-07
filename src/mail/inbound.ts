@@ -442,6 +442,23 @@ async function processInbound(
     paused_reason: "Contact replied",
   });
 
+  // A reply also retires the address from the cold-sending pool for good: it is
+  // added to the global suppression list so no *future* campaign re-emails
+  // someone who already answered. Pausing the current sequence only stopped this
+  // campaign; enrolling the same person in a new one would otherwise cold-mail
+  // them again. suppressEmail refuses your own mailboxes and is idempotent, so a
+  // warmup reply or a second reply is a harmless no-op. Best-effort and last, so
+  // that storing the reply and pausing the sequence above can never be affected
+  // by it — and if migration 0020 (the 'replied' reason) is not yet applied the
+  // insert simply no-ops until it is.
+  await suppressEmail(supabase, {
+    workspaceId,
+    email: fromEmail,
+    reason: "replied",
+    source: `imap:${mailbox.email}`,
+    meta: { subject: message.subject, auto: true },
+  });
+
   if (contactId) {
     await supabase
       .from("contacts")

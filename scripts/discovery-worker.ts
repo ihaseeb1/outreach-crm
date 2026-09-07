@@ -75,7 +75,7 @@ async function main() {
       if (!tickIsIdle(result)) {
         console.log(
           `Tick: ${result.discovery} discovery, ${result.publishers} publisher, ` +
-            `${result.enrich} enrich.`,
+            `${result.enrich} enrich, ${result.leads} leads.`,
         );
       }
       await sleep(tickIsIdle(result) ? IDLE_DELAY_MS : BUSY_DELAY_MS);

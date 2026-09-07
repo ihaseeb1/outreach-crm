@@ -64,19 +64,64 @@ export class DuckDuckGoProvider implements SearchProvider {
   async search(query: string, geo: GeoParams, limit: number): Promise<SearchHit[]> {
     const region = ddgRegion(geo);
     for (const endpoint of ENDPOINTS) {
-      const hits = await this.fetchEndpoint(endpoint, query, region, limit);
+      const hits = await this.fetchPaged(endpoint, query, region, limit);
       if (hits.length > 0) return hits;
     }
     return [];
+  }
+
+  /**
+   * Walk successive result pages (DDG's `s` offset) on one endpoint until we
+   * have `limit` unique URLs, a page adds nothing new, or the page cap is hit.
+   * This is what lifts a query from ~20 results to the hundreds a big discovery
+   * run needs — one page was the old ceiling. Pages are spaced to stay under
+   * DDG's rate-limiter; a 202 (empty) simply ends the walk.
+   */
+  private async fetchPaged(
+    endpoint: Endpoint,
+    query: string,
+    region: string | undefined,
+    limit: number,
+  ): Promise<SearchHit[]> {
+    const MAX_PAGES = 12;
+    const all = new Map<string, SearchHit>();
+    let offset = 0;
+
+    for (let page = 0; page < MAX_PAGES && all.size < limit; page += 1) {
+      const pageHits = await this.fetchEndpoint(endpoint, query, region, offset);
+      if (pageHits.length === 0) break;
+
+      let added = 0;
+      for (const hit of pageHits) {
+        if (!all.has(hit.url)) {
+          all.set(hit.url, hit);
+          added += 1;
+        }
+      }
+      // Offset advances by what the page actually returned; if nothing new came
+      // back the endpoint is not paginating (or is out of results) — stop.
+      if (added === 0) break;
+      offset += pageHits.length;
+
+      if (page < MAX_PAGES - 1 && all.size < limit) await sleep(1200);
+    }
+
+    // Re-number by discovery order so best_position still reflects rank.
+    return [...all.values()]
+      .slice(0, limit)
+      .map((hit, i) => ({ ...hit, position: i + 1 }));
   }
 
   private async fetchEndpoint(
     endpoint: Endpoint,
     query: string,
     region: string | undefined,
-    limit: number,
+    offset: number,
   ): Promise<SearchHit[]> {
-    const body = `q=${encodeURIComponent(query)}${region ? `&kl=${region}` : ""}`;
+    const body =
+      `q=${encodeURIComponent(query)}` +
+      (region ? `&kl=${region}` : "") +
+      (offset > 0 ? `&s=${offset}&dc=${offset + 1}` : "");
 
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
@@ -106,7 +151,7 @@ export class DuckDuckGoProvider implements SearchProvider {
         if (!res.ok) return [];
 
         const html = await res.text();
-        return this.parse(html, endpoint, this.name, limit);
+        return this.parse(html, endpoint, this.name);
       } catch {
         if (attempt < 2) {
           await sleep(1000);
@@ -118,14 +163,14 @@ export class DuckDuckGoProvider implements SearchProvider {
     return [];
   }
 
-  private parse(html: string, endpoint: Endpoint, engine: string, limit: number): SearchHit[] {
+  /** One result page, fully parsed (a page holds ~25–50 results). */
+  private parse(html: string, endpoint: Endpoint, engine: string): SearchHit[] {
     const $ = cheerio.load(html);
     const hits: SearchHit[] = [];
     const seen = new Set<string>();
     let position = 0;
 
     $(endpoint.linkSel).each((_, el) => {
-      if (hits.length >= limit) return;
       const anchor = $(el);
       const url = resolveHref(anchor.attr("href"));
       if (!url || seen.has(url)) return;

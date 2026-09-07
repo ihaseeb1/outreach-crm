@@ -127,7 +127,11 @@ export type SuppressionReason =
   | "hard_bounce"
   | "complaint"
   | "manual"
-  | "opted_out";
+  | "opted_out"
+  // Auto-added when a contact replies: they leave the cold-sending pool so no
+  // future campaign re-emails them. Distinct from opt-out — a reply is a live
+  // conversation, not a request to never hear from you. (migration 0020)
+  | "replied";
 
 export interface Suppression {
   id: Uuid;
@@ -461,6 +465,30 @@ export interface DiscoveryRun {
   total_queries: number;
   processed_queries: number;
   found_count: number;
+  error: string | null;
+  settings: Record<string, unknown>;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+  completed_at: Timestamp | null;
+}
+
+/** Client-acquisition lead sourcing (migration 0021). */
+export interface LeadRun {
+  id: Uuid;
+  workspace_id: Uuid;
+  created_by: Uuid | null;
+  industry: string;
+  location: string | null;
+  /** ISO-3166 alpha-2 code, or "WORLDWIDE". */
+  geo: string;
+  queries: string[];
+  engines: string[];
+  status: DiscoveryRunStatus;
+  total_queries: number;
+  processed_queries: number;
+  /** Business domains queued into the prospecting `websites` table. */
+  found_count: number;
+  scrape_job_id: Uuid | null;
   error: string | null;
   settings: Record<string, unknown>;
   created_at: Timestamp;

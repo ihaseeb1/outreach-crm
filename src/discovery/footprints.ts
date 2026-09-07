@@ -37,6 +37,22 @@ export const FOOTPRINT_TEMPLATES: string[] = [
   `${KEYWORD_TOKEN} inurl:guest-post`,
   `${KEYWORD_TOKEN} inurl:guest-contributor`,
   `${KEYWORD_TOKEN} intitle:"write for us"`,
+  // Wider net — more distinct footprint phrasings surface more distinct
+  // publishers, which is what lifts a run's yield into the hundreds.
+  `${KEYWORD_TOKEN} "submit a post"`,
+  `${KEYWORD_TOKEN} "contributing writer"`,
+  `${KEYWORD_TOKEN} "guest blogging"`,
+  `${KEYWORD_TOKEN} "add guest post"`,
+  `${KEYWORD_TOKEN} "guest column"`,
+  `${KEYWORD_TOKEN} "articles wanted"`,
+  `${KEYWORD_TOKEN} "become an author"`,
+  `${KEYWORD_TOKEN} "submit your article"`,
+  `${KEYWORD_TOKEN} "write for me"`,
+  `${KEYWORD_TOKEN} inurl:write-for-us`.replace("write-for-us", "contribute"),
+  `${KEYWORD_TOKEN} inurl:submit-post`,
+  `${KEYWORD_TOKEN} intitle:"guest post"`,
+  `${KEYWORD_TOKEN} "guest posts wanted"`,
+  `${KEYWORD_TOKEN} "now accepting guest posts"`,
 ];
 
 /**

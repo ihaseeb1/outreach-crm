@@ -83,6 +83,7 @@ jobs:
           hit discovery &
           hit publishers &
           hit enrich &
+          hit leads &
           wait
 
           failed=""

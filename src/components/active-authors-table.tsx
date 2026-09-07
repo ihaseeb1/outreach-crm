@@ -56,9 +56,13 @@ export function ActiveAuthorsTable({ rows }: { rows: AuthorRow[] }) {
       .sort((a, b) => (b.freshness_score ?? 0) - (a.freshness_score ?? 0));
   }, [rows, emailFilter, stageFilter]);
 
-  // Only verified-email authors are eligible for a campaign.
-  const eligibleIds = filtered.filter((r) => r.email_status === "verified").map((r) => r.id);
-  const allSelected = eligibleIds.length > 0 && eligibleIds.every((id) => selected.has(id));
+  // Only verified-email authors are eligible for a campaign; any row may be
+  // selected for deletion, so select-all covers every filtered row.
+  const verifiedSelectedCount = filtered.filter(
+    (r) => r.email_status === "verified" && selected.has(r.id),
+  ).length;
+  const allIds = filtered.map((r) => r.id);
+  const allSelected = allIds.length > 0 && allIds.every((id) => selected.has(id));
 
   function toggle(id: string) {
     setSelected((prev) => {
@@ -86,6 +90,31 @@ export function ActiveAuthorsTable({ rows }: { rows: AuthorRow[] }) {
           payload.skipped ? `, ${payload.skipped} skipped` : ""
         }.`,
       );
+      setSelected(new Set());
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteAuthors(body: { ids?: string[]; all?: boolean }) {
+    const count = body.all ? rows.length : (body.ids?.length ?? 0);
+    const what = body.all ? "all publisher history" : `${count} author(s)`;
+    if (!window.confirm(`Delete ${what}? Contacts already added are kept.`)) return;
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const response = await fetch("/api/publishers", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "Failed.");
+      setMessage(`Deleted ${payload.deleted} author(s).`);
       setSelected(new Set());
       router.refresh();
     } catch (err) {
@@ -146,13 +175,31 @@ export function ActiveAuthorsTable({ rows }: { rows: AuthorRow[] }) {
           Export CSV
         </button>
         <button
-          className="btn-primary"
+          className="btn-ghost text-[var(--color-danger)]"
           type="button"
           disabled={busy || selected.size === 0}
+          onClick={() => deleteAuthors({ ids: [...selected] })}
+          title="Remove the selected authors from the publisher history"
+        >
+          {`Delete ${selected.size || ""}`.trim()}
+        </button>
+        <button
+          className="btn-ghost text-[var(--color-danger)]"
+          type="button"
+          disabled={busy || rows.length === 0}
+          onClick={() => deleteAuthors({ all: true })}
+          title="Clear the entire active-publisher history"
+        >
+          Clear all history
+        </button>
+        <button
+          className="btn-primary"
+          type="button"
+          disabled={busy || verifiedSelectedCount === 0}
           onClick={addToCampaign}
           title="Adds verified authors to your contacts, ready to enroll in a campaign"
         >
-          {busy ? "Adding…" : `Add ${selected.size || ""} to contacts`}
+          {busy ? "Adding…" : `Add ${verifiedSelectedCount || ""} to contacts`.trim()}
         </button>
       </div>
 
@@ -167,7 +214,7 @@ export function ActiveAuthorsTable({ rows }: { rows: AuthorRow[] }) {
                 <input
                   type="checkbox"
                   checked={allSelected}
-                  onChange={() => setSelected(allSelected ? new Set() : new Set(eligibleIds))}
+                  onChange={() => setSelected(allSelected ? new Set() : new Set(allIds))}
                 />
               </th>
               <th>Author</th>
@@ -191,17 +238,16 @@ export function ActiveAuthorsTable({ rows }: { rows: AuthorRow[] }) {
             {filtered.map((row) => (
               <tr key={row.id}>
                 <td>
-                  {row.email_status === "verified" ? (
-                    <input
-                      type="checkbox"
-                      checked={selected.has(row.id)}
-                      onChange={() => toggle(row.id)}
-                    />
-                  ) : (
-                    <span className="hint" title="Only verified emails can be added">
-                      –
-                    </span>
-                  )}
+                  <input
+                    type="checkbox"
+                    checked={selected.has(row.id)}
+                    onChange={() => toggle(row.id)}
+                    title={
+                      row.email_status === "verified"
+                        ? "Select to add to contacts or delete"
+                        : "Not verified — select to delete (can't be added to contacts)"
+                    }
+                  />
                 </td>
                 <td>
                   <div className="font-medium">{row.author_name ?? "Unknown"}</div>

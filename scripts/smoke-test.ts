@@ -74,6 +74,12 @@ import {
 } from "../src/scraper/safety";
 import { normalizeLinkUrl, parseBacklink, sameTarget } from "../src/deals/backlink";
 import {
+  buildVerdicts,
+  parseDomainList,
+  type AvailabilityHit,
+} from "../src/lib/availability";
+import { expandLeadQueries } from "../src/leads/footprints";
+import {
   expandFootprints,
   expandNiche,
   interpolate,
@@ -4358,6 +4364,71 @@ test("toCsv quotes fields with commas, quotes and newlines", () => {
   assert.equal(lines[1], "a.com,plain");
   assert.equal(lines[2], 'b.com,"has ""quote"", and comma"');
   assert.equal(lines[3], "c.com,");
+});
+
+console.log("\navailability — domain dedup checker");
+
+test("parseDomainList normalizes urls, strips www, dedupes", () => {
+  const list = parseDomainList(
+    "example.com, https://www.Example.com/blog\nhttp://Second.co.uk\n  third.org  \nnotadomain",
+  );
+  assert.deepEqual(list, ["example.com", "second.co.uk", "third.org"]);
+});
+
+test("parseDomainList drops blanks and bare tokens without a dot", () => {
+  assert.deepEqual(parseDomainList(""), []);
+  assert.deepEqual(parseDomainList("localhost\nhello world"), []);
+});
+
+test("buildVerdicts marks unmatched domains available, preserves order", () => {
+  const hits = new Map<string, AvailabilityHit[]>([
+    ["taken.com", [{ source: "website", detail: "prospecting · pending" }]],
+  ]);
+  const out = buildVerdicts(["fresh.com", "taken.com"], hits);
+  assert.equal(out[0]!.domain, "fresh.com");
+  assert.equal(out[0]!.available, true);
+  assert.equal(out[1]!.available, false);
+});
+
+test("buildVerdicts orders hits strongest-signal first", () => {
+  const hits = new Map<string, AvailabilityHit[]>([
+    [
+      "x.com",
+      [
+        { source: "website", detail: "prospecting · pending" },
+        { source: "deal", detail: "deal · won" },
+      ],
+    ],
+  ]);
+  const [verdict] = buildVerdicts(["x.com"], hits);
+  assert.equal(verdict!.hits[0]!.source, "deal");
+  assert.equal(verdict!.hits[1]!.source, "website");
+});
+
+console.log("\nlead sourcing — query generation");
+
+test("expandLeadQueries interpolates industry × location, deduped", () => {
+  const qs = expandLeadQueries("dentists", "Texas");
+  assert.ok(qs.includes("dentists in Texas"));
+  assert.ok(qs.includes("dentists Texas contact"));
+  // Order-stable and unique.
+  assert.equal(qs.length, new Set(qs).size);
+});
+
+test("expandLeadQueries uses location-free templates when no location", () => {
+  const qs = expandLeadQueries("plumbers", "");
+  assert.ok(qs.includes("plumbers"));
+  assert.ok(qs.every((q) => !q.includes("  ") && q.trim() === q));
+});
+
+test("expandLeadQueries folds in extra industries", () => {
+  const qs = expandLeadQueries("dentist", "Ohio", { extraIndustries: ["dental clinic"] });
+  assert.ok(qs.some((q) => q.includes("dental clinic")));
+  assert.ok(qs.some((q) => q.includes("dentist")));
+});
+
+test("expandLeadQueries returns nothing for an empty industry", () => {
+  assert.deepEqual(expandLeadQueries("", "Texas"), []);
 });
 
 void (async () => {

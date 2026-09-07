@@ -5,37 +5,28 @@ import { env } from "@/lib/env";
 import { logActivity } from "@/lib/activity";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getSession } from "@/lib/workspace";
-import { expandFootprints } from "@/discovery/footprints";
+import { expandLeadQueries } from "@/leads/footprints";
 import { WORLDWIDE, isCountryCode } from "@/discovery/geo";
-import { runDiscoveryRunById } from "@/discovery/run";
+import { runLeadRunById } from "@/leads/run";
 import { cloudSearchViable } from "@/discovery/search";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
-/**
- * How many queries to run inline (synchronously) so results come back within a
- * single request. DDG throttles, so each query is spaced ~2.5s; ~16 queries
- * fits comfortably under the 60s budget. Anything beyond this the background
- * worker/cron picks up.
- */
+/** Queries to run inline (cloud engines only) so results come back live. */
 const INLINE_QUERY_CAP = 16;
 
 const createSchema = z.object({
-  niche: z.string().min(1).max(200),
+  industry: z.string().min(1).max(200),
+  location: z.string().max(200).optional(),
   geo: z.string().max(20).default(WORLDWIDE),
-  includeSynonyms: z.boolean().default(true),
-  /** Skip the "seen in a prior run" filter so a niche re-surfaces in full. */
-  includePriorRuns: z.boolean().default(false),
-  /** Optional custom footprint templates (Phase 6 editor). */
-  templates: z.array(z.string().min(1).max(300)).max(100).optional(),
-  /** Optional edited/expanded query list — overrides footprint expansion. */
+  extraIndustries: z.array(z.string().min(1).max(200)).max(50).optional(),
+  /** Optional edited query list — overrides expansion. */
   queries: z.array(z.string().min(1).max(300)).max(2000).optional(),
-  extraNiches: z.array(z.string().min(1).max(200)).max(50).optional(),
 });
 
-/** Creates a discovery run (status pending); the worker/cron executes it. */
+/** Creates a lead-sourcing run (status pending); the worker/cron executes it. */
 export async function POST(request: Request) {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -45,21 +36,14 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
-  const { niche, includeSynonyms, includePriorRuns, templates, extraNiches } = parsed.data;
-  const geo = parsed.data.geo === WORLDWIDE || isCountryCode(parsed.data.geo)
-    ? parsed.data.geo.toUpperCase()
-    : WORLDWIDE;
+  const { industry, location, extraIndustries } = parsed.data;
+  const geo =
+    parsed.data.geo === WORLDWIDE || isCountryCode(parsed.data.geo)
+      ? parsed.data.geo.toUpperCase()
+      : WORLDWIDE;
 
-  // An operator can hand an edited query list straight through; otherwise
-  // expand footprints × niche synonyms.
-  //
-  // The cap depends on WHERE this run will execute. A cloud-viable engine
-  // (Google CSE / SearXNG) runs inline in this request, so it must fit the 60s
-  // budget — clamp to INLINE_QUERY_CAP. A keyless run (DuckDuckGo default) is
-  // deferred to the background worker, which has no such budget: store the FULL
-  // expanded list (up to the cost guard) so the worker can sweep every footprint
-  // × synonym and gather hundreds of domains rather than one page's worth of 16
-  // queries. This is the change that lets a keyless run actually scale.
+  // Keyless runs defer to the worker (no time budget) so store the full query
+  // list; cloud-viable runs execute inline in this request so clamp to fit 60s.
   const runsInline = cloudSearchViable();
   const cap = runsInline
     ? Math.min(env.maxSearchQueriesPerRun(), INLINE_QUERY_CAP)
@@ -67,7 +51,7 @@ export async function POST(request: Request) {
   const queries = (
     parsed.data.queries && parsed.data.queries.length > 0
       ? dedupe(parsed.data.queries)
-      : expandFootprints(niche, { includeSynonyms, templates, extraNiches })
+      : expandLeadQueries(industry, location, { extraIndustries })
   ).slice(0, cap);
 
   if (queries.length === 0) {
@@ -76,28 +60,23 @@ export async function POST(request: Request) {
 
   const supabase = await createSupabaseServerClient();
   const { data, error } = await supabase
-    .from("discovery_runs")
+    .from("lead_runs")
     .insert({
       workspace_id: session.workspace.id,
       created_by: session.userId,
-      niche,
+      industry,
+      location: location ?? null,
       geo,
       queries,
       status: "pending",
       total_queries: queries.length,
-      settings: {
-        includeSynonyms,
-        includePriorRuns,
-        custom_templates: Boolean(templates?.length),
-      },
     })
     .select("id")
     .single();
 
   if (error || !data) {
-    // Most likely migration 0016 not applied yet — say so plainly.
     return NextResponse.json(
-      { error: error?.message ?? "Could not create run (is migration 0016 applied?)." },
+      { error: error?.message ?? "Could not create run (is migration 0021 applied?)." },
       { status: 500 },
     );
   }
@@ -105,48 +84,31 @@ export async function POST(request: Request) {
   await logActivity(supabase, {
     workspaceId: session.workspace.id,
     actorId: session.userId,
-    action: "discovery.run_created",
-    entityType: "discovery_run",
+    action: "leads.run_created",
+    entityType: "lead_run",
     entityId: data.id,
-    meta: { niche, geo, queries: queries.length },
+    meta: { industry, location: location ?? null, geo, queries: queries.length },
   });
 
-  // Execute inline so results are there on page load — but only when a
-  // cloud-capable engine (Google CSE / SearXNG) is configured. With only
-  // keyless engines (DuckDuckGo/Bing), search is blocked from Vercel's IP, so
-  // we leave the run pending for the local worker rather than "completing" it
-  // with zero results.
   let found = 0;
   const deferred = !runsInline;
   if (!deferred) {
     try {
-      found = await runDiscoveryRunById(supabase, data.id as string);
+      found = await runLeadRunById(supabase, data.id as string);
     } catch {
-      // Left running; the worker/cron finishes it. The page keeps updating.
+      // Left running; the worker/cron finishes it.
     }
   }
 
-  return NextResponse.json({
-    ok: true,
-    runId: data.id,
-    queries: queries.length,
-    found,
-    deferred,
-  });
+  return NextResponse.json({ ok: true, runId: data.id, queries: queries.length, found, deferred });
 }
 
 const deleteSchema = z.object({
-  /** Specific run ids to delete, or set `all` to clear the whole history. */
   ids: z.array(z.string().uuid()).max(1000).optional(),
   all: z.boolean().optional(),
 });
 
-/**
- * Deletes discovery runs (and, by FK cascade, their discovered_sites). Clears
- * old history so the runs list stays readable. Workspace-scoped. A run that is
- * currently `running` is left alone so a delete can't yank work out from under
- * the worker mid-sweep.
- */
+/** Deletes lead runs (history). Queued websites/contacts are kept. */
 export async function DELETE(request: Request) {
   const session = await getSession();
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -157,15 +119,12 @@ export async function DELETE(request: Request) {
   }
   const { ids, all } = parsed.data;
   if (!all && !ids?.length) {
-    return NextResponse.json(
-      { error: "Pass run ids, or all: true to clear history." },
-      { status: 400 },
-    );
+    return NextResponse.json({ error: "Pass run ids, or all: true to clear history." }, { status: 400 });
   }
 
   const supabase = await createSupabaseServerClient();
   let query = supabase
-    .from("discovery_runs")
+    .from("lead_runs")
     .delete()
     .eq("workspace_id", session.workspace.id)
     .neq("status", "running");
@@ -179,8 +138,8 @@ export async function DELETE(request: Request) {
     await logActivity(supabase, {
       workspaceId: session.workspace.id,
       actorId: session.userId,
-      action: "discovery.runs_deleted",
-      entityType: "discovery_run",
+      action: "leads.runs_deleted",
+      entityType: "lead_run",
       meta: { count: deleted, all: Boolean(all) },
     });
   }

@@ -165,10 +165,19 @@ async function executeRun(supabase: SupabaseClient, run: DiscoveryRun): Promise<
     .update({ total_queries: queries.length, engines: engineNames, processed_queries: 0 })
     .eq("id", run.id);
 
-  // Guards: competitor/owned suppression + domains seen in prior runs.
+  // Guards: competitor/owned suppression + domains seen in prior runs. The
+  // prior-run dedupe can be turned off per run (settings.includePriorRuns) so a
+  // niche can be re-surfaced in full instead of being starved down to whatever
+  // is new since last time — a common cause of a repeat run finding almost
+  // nothing.
+  const includePriorRuns = Boolean(
+    (run.settings as { includePriorRuns?: boolean } | null)?.includePriorRuns,
+  );
   const [suppression, knownDomains] = await Promise.all([
     loadSuppressionSets(supabase, run.workspace_id),
-    loadKnownDomains(supabase, run.workspace_id, { excludeRunId: run.id }),
+    includePriorRuns
+      ? Promise.resolve(new Set<string>())
+      : loadKnownDomains(supabase, run.workspace_id, { excludeRunId: run.id }),
   ]);
 
   // Aggregate best hit per root domain across all queries.
@@ -177,6 +186,9 @@ async function executeRun(supabase: SupabaseClient, run: DiscoveryRun): Promise<
   const queryResults = await runSearch(queries, {
     geo,
     providers,
+    // Pull deeper per query (paginated) so a run gathers hundreds of domains,
+    // not one page's worth.
+    perQueryLimit: env.resultsPerQuery(),
     // DDG's HTML endpoints rate-limit rapid requests (202), so keep it to one
     // query at a time, well spaced. This is the free-tier throttle by design.
     concurrency: 1,

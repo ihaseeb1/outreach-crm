@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { runDiscoveryBatch } from "@/discovery/run";
 import { runPublisherCrawlBatch } from "@/discovery/crawl/run";
 import { runEnrichBatch } from "@/discovery/enrich/run";
+import { runLeadBatch } from "@/leads/run";
 
 /**
  * The local discovery worker's one tick.
@@ -21,6 +22,7 @@ export interface WorkerTickResult {
   discovery: number;
   publishers: number;
   enrich: number;
+  leads: number;
 }
 
 export interface WorkerTickOptions {
@@ -49,14 +51,21 @@ export async function runDiscoveryWorkerTick(
     limit: (options.limit ?? 2) * 2,
     workspaceId: options.workspaceId,
   });
+  // Lead sourcing (client acquisition) runs on the same keyless search stack, so
+  // it belongs on the same local worker as discovery.
+  const leads = await runLeadBatch(supabase, {
+    limit: 1,
+    workspaceId: options.workspaceId,
+  });
 
   return {
     discovery: discovery.runsProcessed,
     publishers: publishers.sitesProcessed,
     enrich: enrich.processed,
+    leads: leads.runsProcessed,
   };
 }
 
 export function tickIsIdle(result: WorkerTickResult): boolean {
-  return result.discovery + result.publishers + result.enrich === 0;
+  return result.discovery + result.publishers + result.enrich + result.leads === 0;
 }

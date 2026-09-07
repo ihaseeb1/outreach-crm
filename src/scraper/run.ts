@@ -251,6 +251,10 @@ async function persistContacts(
     contacts.map((c) => c.email),
   );
 
+  // A lead-sourced website (from client-acquisition lead sourcing) stamps a tag
+  // onto its contacts so they can be filtered and enrolled as a segment.
+  const leadTag = (site.meta as { lead?: { tag?: string } } | null)?.lead?.tag;
+
   const now = new Date().toISOString();
   const rows = contacts.map((contact) => ({
     workspace_id: site.workspace_id,
@@ -263,6 +267,7 @@ async function persistContacts(
     source_url: contact.sourceUrl,
     scraped_at: now,
     validation_status: suppressed.has(contact.email) ? "suppressed" : "unknown",
+    ...(leadTag ? { tags: [leadTag] } : {}),
   }));
 
   const { data, error } = await supabase

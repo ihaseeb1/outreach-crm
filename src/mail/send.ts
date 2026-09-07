@@ -121,7 +121,12 @@ export async function sendEmail(
     return {
       ok: false,
       code: "daily_limit_reached",
-      reason: "Mailbox is inactive, paused, or has hit its daily limit.",
+      // Also covers "still within the mailbox's send gap": the reservation now
+      // enforces the inter-send gap atomically (migration 0019), so a second
+      // send racing inside the gap loses here. Treated as transient by the
+      // caller — the contact stays due and goes out on a later tick.
+      reason:
+        "Mailbox is inactive, paused, at its daily limit, or still resting between sends.",
     };
   }
 

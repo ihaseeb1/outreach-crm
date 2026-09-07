@@ -18,6 +18,7 @@ export function DiscoveryRunForm() {
   const [niche, setNiche] = useState("");
   const [geo, setGeo] = useState("WORLDWIDE");
   const [includeSynonyms, setIncludeSynonyms] = useState(true);
+  const [includePriorRuns, setIncludePriorRuns] = useState(false);
   const [edited, setEdited] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -44,7 +45,7 @@ export function DiscoveryRunForm() {
       const response = await fetch("/api/discovery/runs", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ niche, geo, includeSynonyms, queries }),
+        body: JSON.stringify({ niche, geo, includeSynonyms, includePriorRuns, queries }),
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error ?? "Failed to start run.");
@@ -109,6 +110,18 @@ export function DiscoveryRunForm() {
           }}
         />
         Expand niche into synonyms
+      </label>
+
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={includePriorRuns}
+          onChange={(e) => setIncludePriorRuns(e.target.checked)}
+        />
+        Include sites found in previous runs
+        <span className="hint">
+          (off by default — on re-surfaces a niche in full instead of only what&apos;s new)
+        </span>
       </label>
 
       {niche.trim() && (

@@ -92,6 +92,13 @@ export const env = {
   activeAuthorWindowDays: () => optionalInt("ACTIVE_AUTHOR_WINDOW_DAYS", 30),
   /** Cost guard: hard cap on search queries per discovery run. */
   maxSearchQueriesPerRun: () => optionalInt("MAX_SEARCH_QUERIES_PER_RUN", 300),
+  /**
+   * How many results to pull per query (across pages). Each keyless page holds
+   * ~25–50, so 40 pulls one or two pages; raise it (worker path) to fetch deeper
+   * for a bigger haul per run. This is what turns a run from ~17 sites into the
+   * hundreds when paired with the full footprint × synonym query list.
+   */
+  resultsPerQuery: () => optionalInt("DISCOVERY_RESULTS_PER_QUERY", 40),
   /** Crawler UA — falls back to the scraper UA so there is one identity. */
   crawlerUserAgent: () =>
     process.env.CRAWLER_USER_AGENT ||
