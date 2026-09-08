@@ -23,6 +23,7 @@
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
+import { recordWorkerRun } from "../src/lib/heartbeat";
 import { runCampaignBatch } from "../src/campaigns/run";
 import { syncSuppressedCampaignContacts } from "../src/campaigns/enroll";
 import { runInboundPoll } from "../src/mail/poll";
@@ -44,27 +45,61 @@ try {
   // No .env.local — rely on the ambient environment.
 }
 
-/** Runs one job, isolating its failure so the rest of the pass still runs. */
-async function step<T>(name: string, fn: () => Promise<T>): Promise<void> {
+/** Pull the common batch-result counters, whatever a given job happens to name them. */
+function counters(result: unknown): { processed: number; skipped: number; failed: number; notes: unknown[] } {
+  const r = (result ?? {}) as Record<string, unknown>;
+  const num = (...vals: unknown[]) => {
+    for (const v of vals) if (typeof v === "number") return v;
+    return 0;
+  };
+  return {
+    processed: num(r.sent, r.processed, r.checked, r.verified, r.purged, r.enriched, r.crawled),
+    skipped: num(r.skipped),
+    failed: num(r.failed),
+    notes: Array.isArray(r.notes) ? r.notes : [],
+  };
+}
+
+/**
+ * Runs one job, isolating its failure so the rest of the pass still runs, and
+ * records the worker-run heartbeat the dashboard reads. `job` matches the job
+ * name the old /api/cron/<job> route recorded, so the freshness banner (and any
+ * other telemetry keyed on worker_runs) stays accurate now that the engine runs
+ * here instead of on Vercel. Passing `job: null` skips the heartbeat for helper
+ * steps that were never their own cron job (e.g. the suppression sync that the
+ * campaigns route folds into its send).
+ */
+async function step<T>(
+  supabase: SupabaseClient,
+  job: string | null,
+  fn: () => Promise<T>,
+): Promise<void> {
+  const startedIso = new Date().toISOString();
   const startedAt = Date.now();
   try {
     const result = await fn();
-    console.log(`[ok] ${name} (${Date.now() - startedAt}ms):`, JSON.stringify(result));
+    console.log(`[ok] ${job ?? "helper"} (${Date.now() - startedAt}ms):`, JSON.stringify(result));
+    if (job) {
+      await recordWorkerRun(supabase, { job, ok: true, startedAt: startedIso, ...counters(result) });
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(`[fail] ${name} (${Date.now() - startedAt}ms): ${message}`);
+    console.error(`[fail] ${job ?? "helper"} (${Date.now() - startedAt}ms): ${message}`);
+    if (job) {
+      await recordWorkerRun(supabase, { job, ok: false, error: message, startedAt: startedIso });
+    }
   }
 }
 
 async function runFastLane(supabase: SupabaseClient): Promise<void> {
   // The live outreach loop. No 60s function budget here, so inbound can cover
   // every mailbox in one pass instead of a few at a time.
-  await step("suppressionSync", () =>
+  await step(supabase, null, () =>
     syncSuppressedCampaignContacts(supabase, { limit: 200 }),
   );
-  await step("campaigns", () => runCampaignBatch(supabase, { limit: 60 }));
-  await step("warmup", () => runWarmupBatch(supabase));
-  await step("inbound", () =>
+  await step(supabase, "campaigns", () => runCampaignBatch(supabase, { limit: 60 }));
+  await step(supabase, "warmup", () => runWarmupBatch(supabase));
+  await step(supabase, "inbound", () =>
     runInboundPoll(supabase, {
       limit: 50,
       concurrency: 6,
@@ -72,22 +107,22 @@ async function runFastLane(supabase: SupabaseClient): Promise<void> {
       includeInactive: true,
     }),
   );
-  await step("health", () => runHealthChecks(supabase, { limit: 10 }));
+  await step(supabase, "health", () => runHealthChecks(supabase, { limit: 10 }));
 }
 
 async function runSlowLane(supabase: SupabaseClient): Promise<void> {
   // Heavier, non-time-critical jobs. Best-effort: any whose migration is not yet
   // applied throws and is logged by step(), exactly as the API routes tolerate.
-  await step("validate", () => runValidationBatch(supabase, { limit: 200 }));
-  await step("scrape", () => runScrapeBatch(supabase, { limit: 25 }));
-  await step("backlinks", () => verifyDueBacklinks(supabase, { limit: 20 }));
-  await step("warmup-purge", () =>
+  await step(supabase, "validate", () => runValidationBatch(supabase, { limit: 200 }));
+  await step(supabase, "scrape", () => runScrapeBatch(supabase, { limit: 25 }));
+  await step(supabase, "backlinks", () => verifyDueBacklinks(supabase, { limit: 20 }));
+  await step(supabase, "warmup-purge", () =>
     runWarmupPurge(supabase, { dryRun: false, mailboxLimit: 3 }),
   );
-  await step("discovery", () => runDiscoveryBatch(supabase, { limit: 2 }));
-  await step("publishers", () => runPublisherCrawlBatch(supabase, { limit: 3 }));
-  await step("enrich", () => runEnrichBatch(supabase, { limit: 10 }));
-  await step("leads", () => runLeadBatch(supabase, { limit: 2 }));
+  await step(supabase, "discovery", () => runDiscoveryBatch(supabase, { limit: 2 }));
+  await step(supabase, "publishers", () => runPublisherCrawlBatch(supabase, { limit: 3 }));
+  await step(supabase, "enrich", () => runEnrichBatch(supabase, { limit: 10 }));
+  await step(supabase, "leads", () => runLeadBatch(supabase, { limit: 2 }));
 }
 
 async function main(): Promise<void> {

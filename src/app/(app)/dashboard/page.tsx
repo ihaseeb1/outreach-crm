@@ -112,10 +112,11 @@ export default async function DashboardPage() {
             {heartbeat.lastRunAt
               ? `Last successful campaign tick was ${fmtDateTime(
                   heartbeat.lastRunAt,
-                )} (${heartbeat.ageMinutes} min ago). Ticks normally run every 30 minutes.`
+                )} (${heartbeat.ageMinutes} min ago). The engine normally ticks every few minutes.`
               : "No campaign tick has been recorded yet."}{" "}
-            Check the GitHub Actions “Cron tick” workflow (and its Actions-minutes
-            budget), then run it manually if needed.
+            Check the GitHub Actions “Engine (fast lane)” workflow (that it is
+            enabled and its runs are green), then run it manually via “Run
+            workflow” if needed.
           </p>
         </div>
       )}
