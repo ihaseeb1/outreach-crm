@@ -107,7 +107,11 @@ async function runFastLane(supabase: SupabaseClient): Promise<void> {
       includeInactive: true,
     }),
   );
-  await step(supabase, "health", () => runHealthChecks(supabase, { limit: 10 }));
+  // Cover every mailbox each pass, not just the first 10. There is no function
+  // timeout on the runner and the check is cheap (DNS is cached per domain, and
+  // a box already checked today is skipped), so a large limit just means the
+  // whole fleet is re-evaluated — and can recover — on every tick.
+  await step(supabase, "health", () => runHealthChecks(supabase, { limit: 200 }));
 }
 
 async function runSlowLane(supabase: SupabaseClient): Promise<void> {

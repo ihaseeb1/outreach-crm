@@ -40,29 +40,45 @@ export async function runHealthChecks(
 
   const today = new Date().toISOString().slice(0, 10);
 
+  // Which mailboxes already have today's check? Fetch that FIRST, so the mailbox
+  // query below can exclude them and hand each tick the ones still outstanding.
+  //
+  // The old order was the reverse — fetch `limit` mailboxes (unordered), then
+  // drop the ones done today in JS. With more mailboxes than `limit` that
+  // permanently starved the tail: the query kept returning the same head of the
+  // (unordered) list, every one of them already done, so the batch did nothing
+  // and the mailboxes past the limit were NEVER re-checked. Their status and
+  // score froze wherever they last landed, which meant an auto-paused box out
+  // there could never recover — recovery only happens when a fresh check
+  // recomputes a healthy score, and no check ever ran on it. Ordering the query
+  // and excluding today's-done in the DB makes successive small batches rotate
+  // through every mailbox within the day.
+  let doneQuery = supabase
+    .from("mailbox_health")
+    .select("mailbox_id")
+    .eq("date", today);
+  if (options.workspaceId) doneQuery = doneQuery.eq("workspace_id", options.workspaceId);
+  const { data: doneRows } = await doneQuery;
+  const alreadyDone = new Set(
+    ((doneRows ?? []) as { mailbox_id: string }[]).map((row) => row.mailbox_id),
+  );
+
   let query = supabase
     .from("mailboxes")
     .select("*")
     .not("encrypted_credentials", "is", null)
+    .order("created_at", { ascending: true })
     .limit(limit);
   if (options.workspaceId) query = query.eq("workspace_id", options.workspaceId);
   if (options.mailboxId) query = query.eq("id", options.mailboxId);
+  else if (alreadyDone.size > 0) {
+    // Leave the explicitly-named box alone (we always re-check that one); for a
+    // sweep, ask only for mailboxes without today's row so each tick advances.
+    query = query.not("id", "in", `(${[...alreadyDone].join(",")})`);
+  }
 
   const { data } = await query;
   const mailboxes = (data ?? []) as Mailbox[];
-
-  // Skip mailboxes already checked today unless one was named explicitly.
-  const { data: doneRows } = await supabase
-    .from("mailbox_health")
-    .select("mailbox_id")
-    .eq("date", today)
-    .in(
-      "mailbox_id",
-      mailboxes.map((mailbox) => mailbox.id),
-    );
-  const alreadyDone = new Set(
-    ((doneRows ?? []) as { mailbox_id: string }[]).map((row) => row.mailbox_id),
-  );
 
   for (const mailbox of mailboxes) {
     if (!options.mailboxId && alreadyDone.has(mailbox.id)) continue;
