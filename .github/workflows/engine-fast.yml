@@ -1,0 +1,50 @@
+name: Engine (fast lane)
+
+# The live outreach loop, run DIRECTLY on the runner instead of pinging Vercel.
+#
+# A GitHub Actions runner is a full Linux VM with no CPU meter and no 60s
+# function budget, so scripts/ci-tick.ts executes the exact job functions here
+# (campaign sends, follow-ups, warmup, inbox polling, health) rather than
+# calling crm.orankly.com/api/cron/*. This is what moves the background compute
+# off Vercel's Fluid Active CPU cap so the CRM can run 24/7 without pausing.
+#
+# Every job is a bounded, idempotent batch and every row is claimed under a
+# short lease (campaign_contact_claim / mailbox_reserve_send), so a run that is
+# delayed, skipped, or overlaps the Vercel bridge never double-sends — that is
+# why this can run alongside tick.yml during the cutover.
+#
+# Cadence: every 5 minutes (GitHub's floor). Public repo → unlimited minutes.
+# Kill switch: set the repository variable CRON_PAUSED=1 (no redeploy needed);
+# ci-tick then makes every pass a no-op. Warmup and sending are never singled
+# out for pausing — the whole lane stops or runs together.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+# A pass must never overlap itself; the batches claim rows with short locks and
+# stacking runs would just contend for the same work.
+concurrency:
+  group: engine-fast
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Run the fast lane
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          APP_ENCRYPTION_KEY: ${{ secrets.APP_ENCRYPTION_KEY }}
+          NEXT_PUBLIC_APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
+          CRON_PAUSED: ${{ vars.CRON_PAUSED }}
+        run: npx tsx scripts/ci-tick.ts fast

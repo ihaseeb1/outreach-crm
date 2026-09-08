@@ -1,0 +1,46 @@
+name: Engine (slow lane)
+
+# The heavy, non-outreach jobs, run directly on the runner: list validation,
+# website scraping, backlink re-checks, warmup purge, and the
+# discovery/publishers/enrich/leads pipeline. These are exactly the jobs whose
+# every-30-min cadence drove Vercel's CPU climb; here they cost nothing (public
+# repo, unlimited minutes) and run off their own schedule from the fast lane.
+#
+# Every job is idempotent and bounded, so a slower or skipped run only slows
+# throughput — it loses no work. Discovery uses the Google CSE key when present
+# (keyless DuckDuckGo is blocked from datacenter IPs, so a runner needs the key
+# to search).
+#
+# Cadence: every 30 minutes. Kill switch: repository variable CRON_PAUSED=1.
+
+on:
+  schedule:
+    - cron: "13,43 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: engine-slow
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Run the slow lane
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          APP_ENCRYPTION_KEY: ${{ secrets.APP_ENCRYPTION_KEY }}
+          NEXT_PUBLIC_APP_URL: ${{ secrets.NEXT_PUBLIC_APP_URL }}
+          GOOGLE_CSE_KEY: ${{ secrets.GOOGLE_CSE_KEY }}
+          GOOGLE_CSE_CX: ${{ secrets.GOOGLE_CSE_CX }}
+          SEARCH_ENGINES: ${{ vars.SEARCH_ENGINES }}
+          CRON_PAUSED: ${{ vars.CRON_PAUSED }}
+        run: npx tsx scripts/ci-tick.ts slow
