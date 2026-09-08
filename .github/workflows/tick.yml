@@ -71,19 +71,17 @@ jobs:
             echo "$code" > "status-$name"
           }
 
-          # Sending first so it is never blocked behind mail polling.
+          # The live outreach loop ONLY. Warmup and sending must never wait, so
+          # nothing heavier shares their every-30-min cadence. The crawl and
+          # maintenance jobs (validate, scrape, backlinks, warmup-purge,
+          # discovery, publishers, enrich, leads) moved to tick-slow.yml at a 4h
+          # cadence — that is what caused the CPU climb from Sep 2 onward, and
+          # re-pacing it pulls the team back under the free cap without slowing a
+          # single send. Temporary: all of this moves to the always-on VM worker.
           hit campaigns &
           hit warmup &
           hit inbound &
           hit health &
-          hit validate &
-          hit scrape &
-          hit backlinks &
-          hit warmup-purge &
-          hit discovery &
-          hit publishers &
-          hit enrich &
-          hit leads &
           wait
 
           failed=""

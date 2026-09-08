@@ -1,0 +1,82 @@
+name: Cron tick (slow lane)
+
+# The heavy, non-outreach jobs, split out of tick.yml so they no longer share
+# the live send/warmup cadence.
+#
+# These are the crawl and maintenance jobs — list validation, website scraping,
+# backlink re-checks, warmup deletion, and the discovery/publishers/enrich/leads
+# pipeline. They are what drove Fluid Active CPU from ~5m/day to ~14m/day across
+# early September and pushed the free team toward its cap. None of them needs a
+# half-hourly cadence: a discovery run or a scrape queue is happy to advance
+# every few hours, and every job here is idempotent and bounded, so a slower
+# cadence only slows throughput — it loses no work.
+#
+# Every 4 hours = 6 runs a day per job instead of 48, roughly an 8x cut in the
+# invocations that caused the climb, while warmup and sending keep running at
+# full rate in tick.yml. This is a bridge: all of this work moves to the
+# always-on Oracle VM worker, after which these Vercel endpoints are retired.
+
+on:
+  schedule:
+    - cron: "17 */4 * * *"
+  # So it can be fired by hand from the Actions tab without waiting.
+  workflow_dispatch:
+
+# Never overlap: a long crawl run must not have a second run pile up behind it.
+concurrency:
+  group: cron-tick-slow
+  cancel-in-progress: false
+
+jobs:
+  tick-slow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Run the slow-lane jobs in parallel
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          BASE: https://crm.orankly.com
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "CRON_SECRET repository secret is not set — add it under" \
+                 "Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+          hit() {
+            name="$1"
+            body=$(mktemp)
+            code=$(curl -sS -o "$body" -w "%{http_code}" \
+              --max-time 90 \
+              -X POST "$BASE/api/cron/$name" \
+              -H "Authorization: Bearer $CRON_SECRET") || code="000"
+            echo "=== $name -> HTTP $code"
+            head -c 800 "$body"
+            echo
+            # Recorded per job rather than failing the whole run, so one flaky
+            # endpoint does not hide the others' results.
+            echo "$code" > "status-$name"
+          }
+
+          hit validate &
+          hit scrape &
+          hit backlinks &
+          hit warmup-purge &
+          hit discovery &
+          hit publishers &
+          hit enrich &
+          hit leads &
+          wait
+
+          failed=""
+          for f in status-*; do
+            job="${f#status-}"
+            code=$(cat "$f")
+            [ "$code" = "200" ] || failed="$failed $job($code)"
+          done
+
+          if [ -n "$failed" ]; then
+            echo "Failed jobs:$failed"
+            exit 1
+          fi
+          echo "All jobs returned 200."
