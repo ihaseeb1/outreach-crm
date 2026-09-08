@@ -8,12 +8,13 @@ export const dynamic = "force-dynamic";
  *
  * Vercel stores APP_ENCRYPTION_KEY as a write-only "Secret", so it can no longer
  * be read from the dashboard — but it is still injected into this running
- * deployment. This route lets the owner read their own key back out once, to
- * copy it into the GitHub Actions engine, then it is deleted immediately. It is
- * guarded by a random token and returns nothing without it.
+ * deployment. This route reads the owner's own key back out once, to copy it
+ * into the GitHub Actions engine, then it is deleted immediately.
  *
- * Lives under /api/public so the auth middleware lets it through (it has no
- * session); the random token is the only guard. DELETE THIS FILE right after use.
+ * Under /api/public so the auth middleware lets it through (no session); the
+ * random token is the only guard. NOT under a folder starting with "_", because
+ * the App Router treats "_folder" as a private folder and excludes it from
+ * routing (a bare /api/_recover would 404 forever). DELETE right after use.
  */
 export async function GET(request: Request) {
   const token = new URL(request.url).searchParams.get("t") ?? "";
