@@ -12,7 +12,8 @@ export const dynamic = "force-dynamic";
  * copy it into the GitHub Actions engine, then it is deleted immediately. It is
  * guarded by a random token and returns nothing without it.
  *
- * DELETE THIS FILE right after use.
+ * Lives under /api/public so the auth middleware lets it through (it has no
+ * session); the random token is the only guard. DELETE THIS FILE right after use.
  */
 export async function GET(request: Request) {
   const token = new URL(request.url).searchParams.get("t") ?? "";
