@@ -184,9 +184,12 @@ export async function captureDealFromReply(
     };
   }
 
-  // No deal yet — draft one, negotiating, so it lands in the pipeline for
-  // review. `domain` is not-null on the table, so a deal cannot be drafted
-  // without one (a reply almost always yields one from the sender address).
+  // No deal yet — open one as "agreed" (per the workspace's rule that an
+  // auto-captured deal lands agreed; the user re-stages it by hand if it is
+  // not). A reply has already paused the sequence and suppressed the address in
+  // the inbound handler, so agreeing here starts no new sending. `domain` is
+  // not-null on the table, so a deal cannot be drafted without one (a reply
+  // almost always yields one from the sender address).
   if (!domain) return { captured: false, outcome: "no-anchor" };
 
   const conversationId = contactId
@@ -198,7 +201,7 @@ export async function captureDealFromReply(
     contact_id: contactId,
     conversation_id: conversationId,
     domain,
-    status: "negotiating",
+    status: "agreed",
     currency: plan.currency ?? "USD",
     notes: note,
     ...plan.fields,
@@ -274,24 +277,38 @@ async function findExistingDeal(
   const columns =
     "id, contact_id, notes, link_type, placement_type, tat_days, da, dr, monthly_traffic, spam_score, word_count, content_by, max_links, payment_terms, payment_method, deal_prices(niche)";
 
-  const run = async (select: string): Promise<Record<string, unknown> | null> => {
+  const run = async (
+    select: string,
+    by: { contact_id: string } | { domain: string },
+  ): Promise<Record<string, unknown> | null> => {
     let query = supabase
       .from("deals")
       .select(select)
       .eq("workspace_id", workspaceId)
       .order("updated_at", { ascending: false })
       .limit(1);
-    query = contactId
-      ? query.eq("contact_id", contactId)
-      : query.eq("domain", domain ?? "");
+    query =
+      "contact_id" in by
+        ? query.eq("contact_id", by.contact_id)
+        : query.eq("domain", by.domain);
     const { data } = await query.maybeSingle();
     return (data as Record<string, unknown> | null) ?? null;
   };
 
-  // Try with `meta` (0022 applied); fall back without it so a pre-migration
-  // instance still finds and enriches the deal.
-  let row = await run(`${columns}, meta`);
-  if (row === null) row = await run(columns);
+  // Look up the deal to enrich: first by contact, then — so a second deal is
+  // never opened for a publisher who already has one — by domain. A domain
+  // match may belong to a different contact record for the same site, which is
+  // still the same publisher; contact_id is only ever backfilled onto a deal
+  // that has none, so another contact's deal is never hijacked. The `meta`
+  // variant is tried first (0022 applied) and falls back without it so a
+  // pre-migration instance still finds the deal.
+  const find = async (
+    by: { contact_id: string } | { domain: string },
+  ): Promise<Record<string, unknown> | null> =>
+    (await run(`${columns}, meta`, by)) ?? (await run(columns, by));
+
+  let row = contactId ? await find({ contact_id: contactId }) : null;
+  if (!row && domain) row = await find({ domain });
   if (!row) return null;
 
   const niches = ((row.deal_prices ?? []) as { niche: string }[]).map(

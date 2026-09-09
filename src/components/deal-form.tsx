@@ -689,6 +689,12 @@ export function DealForm({
             className="input"
             required
             placeholder="publisher.com"
+            // Off, or the browser drops its own list of every domain ever typed
+            // into this field over the input, covering the form. 1Password /
+            // LastPass are told to keep out too, for the same reason.
+            autoComplete="off"
+            data-1p-ignore
+            data-lpignore="true"
             value={domain}
             onChange={(e) => setDomain(e.target.value)}
           />
