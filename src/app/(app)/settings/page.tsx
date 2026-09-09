@@ -5,6 +5,7 @@ import { logActivity } from "@/lib/activity";
 import { env } from "@/lib/env";
 import { readReplyTemplates } from "@/mail/reply-templates";
 import { resolveRespectRobots } from "@/scraper/safety";
+import { autoCaptureEnabled } from "@/deals/auto-capture";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
 import {
@@ -27,6 +28,9 @@ async function saveSettings(formData: FormData) {
   const tracking = String(formData.get("tracking") ?? "");
   // An unchecked checkbox submits nothing, so absence = "do not respect".
   const respectRobots = formData.get("respect_robots") === "on";
+  // Auto-capture is on by default; store the explicit choice either way so an
+  // off is remembered rather than reverting to the default on next read.
+  const dealCapture = formData.get("deal_capture") === "on";
 
   // Merged, not replaced: `settings` is a shared jsonb column and writing a
   // fresh object here would silently drop anything else stored in it.
@@ -34,6 +38,7 @@ async function saveSettings(formData: FormData) {
     ...(session.workspace.settings ?? {}),
     ...(isTrackingMode(tracking) ? { tracking } : {}),
     respect_robots: respectRobots,
+    deal_capture: dealCapture,
   };
 
   await supabase
@@ -67,6 +72,7 @@ export default async function SettingsPage() {
   const tracking = resolveTrackingMode(session.workspace.settings);
   const replyTemplates = readReplyTemplates(session.workspace.settings);
   const respectRobots = resolveRespectRobots(session.workspace.settings);
+  const dealCapture = autoCaptureEnabled(session.workspace.settings);
 
   return (
     <div className="space-y-6">
@@ -162,6 +168,31 @@ export default async function SettingsPage() {
                 crawl. Crawl-delay and the politeness floor are always honoured,
                 and private or internal addresses are always refused, whatever
                 this says.
+              </span>
+            </span>
+          </label>
+        </div>
+
+        <div className="border-t border-[var(--color-line)] pt-4">
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              name="deal_capture"
+              defaultChecked={dealCapture}
+              className="mt-1"
+            />
+            <span>
+              <span className="label">Auto-capture rate cards from replies</span>
+              <span className="hint mt-1 block">
+                On by default. When a publisher replies, their reply is read for
+                prices per niche, turnaround, DA/DR, traffic, spam score, word
+                count, max links, who writes the content, link type, placement,
+                and payment method &amp; terms &mdash; and those are filed on the
+                publisher&rsquo;s deal automatically. It only ever fills{" "}
+                <em>blank</em> fields and adds niches you don&rsquo;t already
+                have, never overwriting what you typed or changing a deal&rsquo;s
+                status, and it writes the line each value came from into the
+                deal&rsquo;s notes so you can check it against the email.
               </span>
             </span>
           </label>

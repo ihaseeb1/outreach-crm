@@ -130,6 +130,12 @@ import {
   stripQuotedReply,
 } from "../src/deals/parse-quote";
 import {
+  autoCaptureEnabled,
+  buildCaptureNote,
+  mergeNote,
+  planCapture,
+} from "../src/deals/auto-capture";
+import {
   isWithinSendWindow,
   mailboxIsRested,
   nextSendAt,
@@ -2529,6 +2535,95 @@ test("empty input is safe", () => {
   const quote = parseQuote("");
   assert.equal(countFound(quote), 0);
   assert.deepEqual(quote.prices, []);
+});
+
+// ---------------------------------------------------------------------------
+// Auto-capturing a reply onto a deal (fill-blanks-only merge)
+// ---------------------------------------------------------------------------
+
+console.log("\nauto-capture from replies");
+
+test("a fresh deal takes every parsed field and price", () => {
+  const quote = parseQuote(TYPICAL_REPLY);
+  const plan = planCapture(quote, {}); // no existing deal
+
+  assert.equal(plan.isEmpty, false);
+  assert.equal(plan.fields.tat_days, 5);
+  assert.equal(plan.fields.da, 45);
+  assert.equal(plan.fields.dr, 52);
+  assert.equal(plan.fields.payment_method, "PayPal");
+  assert.equal(plan.fields.max_links, 2);
+  assert.equal(plan.currency, "USD");
+  const niches = plan.newPrices.map((p) => p.niche).sort();
+  assert.deepEqual(niches, ["Business", "CBD", "Casino", "General", "Health"]);
+});
+
+test("a value already on the deal is never overwritten", () => {
+  const quote = parseQuote(TYPICAL_REPLY);
+  // The deal already has TAT and payment method set by a person.
+  const plan = planCapture(quote, {
+    tat_days: 2,
+    payment_method: "Wise",
+    existingNiches: ["General", "Casino"],
+  });
+
+  // Held fields are absent from the update, blank ones are filled.
+  assert.equal(plan.fields.tat_days, undefined);
+  assert.equal(plan.fields.payment_method, undefined);
+  assert.equal(plan.fields.da, 45);
+  assert.ok(!plan.filledKeys.includes("tat_days"));
+  // Only niches not already priced are added.
+  const niches = plan.newPrices.map((p) => p.niche).sort();
+  assert.deepEqual(niches, ["Business", "CBD", "Health"]);
+});
+
+test("a reply with nothing recognisable plans no change", () => {
+  const quote = parseQuote("Thanks, I'll think about it and revert next week.");
+  const plan = planCapture(quote, {});
+  assert.equal(plan.isEmpty, true);
+  assert.equal(plan.filledKeys.length, 0);
+  assert.equal(plan.newPrices.length, 0);
+});
+
+test("a reply that only repeats known facts plans no change", () => {
+  const quote = parseQuote("General - $150\nDA: 45");
+  const plan = planCapture(quote, {
+    da: 45,
+    existingNiches: ["General"],
+  });
+  assert.equal(plan.isEmpty, true);
+});
+
+test("the capture note carries the evidence line for each value", () => {
+  const quote = parseQuote(TYPICAL_REPLY);
+  const plan = planCapture(quote, {});
+  const note = buildCaptureNote(plan, quote, new Date("2026-09-10T00:00:00Z"));
+
+  assert.ok(note.includes("Auto-captured from reply (2026-09-10)"));
+  assert.ok(note.includes("Prices:"));
+  assert.ok(note.includes("Casino"));
+  assert.ok(note.includes("end auto-capture"));
+});
+
+test("re-capturing replaces the block, never stacking duplicates", () => {
+  const quote = parseQuote(TYPICAL_REPLY);
+  const plan = planCapture(quote, {});
+  const first = mergeNote("My own note about this publisher.", buildCaptureNote(plan, quote));
+  const second = mergeNote(first, buildCaptureNote(plan, quote));
+
+  // The user's note survives, and there is exactly one auto block.
+  assert.ok(second.startsWith("My own note about this publisher."));
+  assert.equal(second.match(/Auto-captured from reply/g)?.length, 1);
+  assert.equal(second.match(/end auto-capture/g)?.length, 1);
+});
+
+test("auto-capture is on by default and off only when set off", () => {
+  assert.equal(autoCaptureEnabled(undefined), true);
+  assert.equal(autoCaptureEnabled({}), true);
+  assert.equal(autoCaptureEnabled({ deal_capture: true }), true);
+  assert.equal(autoCaptureEnabled({ deal_capture: false }), false);
+  assert.equal(autoCaptureEnabled({ deal_capture: "off" }), false);
+  assert.equal(autoCaptureEnabled({ deal_capture: { enabled: false } }), false);
 });
 
 console.log("\nsignature and social icons");

@@ -475,6 +475,23 @@ async function processInbound(
     meta: { from: fromEmail, subject: message.subject },
   });
 
+  // Read the rate card out of the reply and file it on the publisher's deal —
+  // the same parse the deal form runs when you click "Use this", now automatic.
+  // Strictly best-effort: a failure writing a deal must never undo storing the
+  // reply or pausing the sequence above, so any error is swallowed here.
+  try {
+    const { captureDealFromReply } = await import("@/deals/capture-reply");
+    await captureDealFromReply(supabase, {
+      workspaceId,
+      contactId,
+      fromEmail,
+      replyText: message.text,
+      subject: message.subject,
+    });
+  } catch {
+    // Intentionally ignored — the reply is already safely stored.
+  }
+
   return { kind: "reply" };
 }
 

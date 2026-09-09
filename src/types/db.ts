@@ -369,6 +369,8 @@ export interface Deal {
   link_is_dofollow?: boolean | null;
   link_checked_at?: Timestamp | null;
   link_detail?: string | null;
+  /** Auto-capture provenance (migration 0022): where a reply-filled value came from. */
+  meta?: Record<string, unknown> | null;
   created_by: Uuid | null;
   created_at: Timestamp;
   updated_at: Timestamp;
