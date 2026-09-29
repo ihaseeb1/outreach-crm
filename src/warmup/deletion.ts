@@ -237,17 +237,20 @@ export function batchIsSane(count: number, max = MAX_DELETE_BATCH): boolean {
 }
 
 /**
- * The abort tripwire.
+ * The quarantine tripwire.
  *
  * A large *legitimate* backlog is not dangerous — every row was individually
  * confirmed warmup by the pool rule — so the purge drains it in bounded batches
- * rather than deleting it all at once, and never gets stuck. What IS dangerous
- * is the `is_warmup` flag disagreeing with the live pool at scale: that means
- * the flag has been set on things that are not warmup, and the whole run should
- * stop rather than trust it. More than this many flag-vs-pool disagreements in
- * one pass aborts the pass without deleting anything.
+ * rather than deleting it all at once, and never gets stuck. What needs a
+ * human eye is the `is_warmup` flag disagreeing with the live pool at scale:
+ * that means the flag has been set on things that are not warmup (usually
+ * leftovers from a mailbox that was disconnected after the warmup ran). More
+ * than this many flag-vs-pool disagreements in one pass quarantines those rows
+ * — they are excluded from every deletion pass and logged for review — while
+ * the run proceeds with the pool-safe set. The deletion passes re-assert pool
+ * membership at the query level, so a quarantined row can never be touched.
  */
-export const ANOMALY_ABORT_THRESHOLD = 10;
+export const ANOMALY_QUARANTINE_THRESHOLD = 10;
 
 /**
  * How long a soft-deleted row waits before it is hard-deleted from the database.

@@ -4,7 +4,7 @@ import { logActivity } from "@/lib/activity";
 import { WARMUP_HEADER } from "@/mail/inbound-classify";
 import { loadMailboxProvider } from "@/mail/providers";
 import {
-  ANOMALY_ABORT_THRESHOLD,
+  ANOMALY_QUARANTINE_THRESHOLD,
   HARD_DELETE_GRACE_DAYS,
   isPastRetention,
   readDeletionSettings,
@@ -26,9 +26,11 @@ import { loadWorkspacePools, type WorkspacePool } from "@/warmup/pool";
  * to_email in the pool. The pool is loaded FRESH from the connected-mailbox
  * records every run, so accounts you add or connect later are included
  * automatically, and an address that is not one of your own can never satisfy
- * the filter. On top of that, a pre-flight anomaly check refuses to run at all
- * if the is_warmup flag disagrees with the live pool on more than a handful of
- * rows.
+ * the filter. On top of that, a pre-flight anomaly check quarantines flagged
+ * rows that disagree with the live pool — they are excluded from every deletion
+ * pass and logged for review — instead of aborting the whole workspace run, so
+ * a few stale or mis-tagged rows can never block cleanup of the genuine
+ * warmup set.
  *
  * Volume is unbounded: there is no cap on how many warmups get deleted. Each
  * run drains as much as fits in its time budget, in timeout-safe pages, and the
@@ -117,10 +119,12 @@ export async function runWarmupPurge(
     if (config.autoDeleteEnabled) result.enabledWorkspaces += 1;
     if (write) result.dryRun = false;
 
-    // Pre-flight: does the flag agree with the live pool? If it is wrong on more
-    // than a handful of rows, refuse to delete anything for this workspace.
-    const anomalyOk = await anomalyCheck(supabase, workspaceId, pool, result);
-    if (!anomalyOk) continue;
+    // Pre-flight: quarantine flagged rows that disagree with the live pool so
+    // they are excluded from deletion and surfaced for review. The deletion
+    // passes below re-assert pool membership at the query level, so quarantined
+    // rows can never be touched even if this check hiccups.
+    const preflightOk = await quarantineAnomalies(supabase, workspaceId, pool, result);
+    if (!preflightOk) continue;
 
     // Reserve time for the IMAP pass so the DB passes never eat the whole budget.
     const dbDeadline = write ? deadlineAt - 15_000 : deadlineAt;
@@ -147,17 +151,27 @@ export async function runWarmupPurge(
 }
 
 // ---------------------------------------------------------------------
-// Pre-flight anomaly check — the abort tripwire
+// Pre-flight anomaly quarantine — the old abort tripwire, defused
 // ---------------------------------------------------------------------
 
 /**
  * Counts flagged rows vs flagged rows that also pass the live pool test. Their
  * difference is the number of is_warmup rows whose sender or recipient is NOT
- * one of your own mailboxes — which should be zero. More than a small tolerance
- * means the flag cannot be trusted, so deletion is refused for this workspace.
- * Returns true when it is safe to proceed.
+ * one of your own mailboxes — which should be zero (usually leftovers from a
+ * mailbox that was disconnected after the warmup ran).
+ *
+ * The old behavior aborted the entire workspace run when this exceeded a small
+ * threshold, which let a handful of stale rows block deletion of the whole
+ * genuine warmup set forever. The new behavior quarantines them: they are
+ * excluded from every deletion pass (each pass re-asserts pool membership at
+ * the query level, so a quarantined row is safe by construction), the external
+ * addresses involved are logged to the activity feed for human review, and the
+ * run proceeds with the pool-safe set.
+ *
+ * Returns false only when the flag columns themselves cannot be read (migration
+ * 0015 not applied) — in that case there is nothing safe to do.
  */
-async function anomalyCheck(
+async function quarantineAnomalies(
   supabase: SupabaseClient,
   workspaceId: string,
   pool: WorkspacePool,
@@ -188,17 +202,39 @@ async function anomalyCheck(
     .in("to_email", poolArr);
 
   const anomalies = (flagged.count ?? 0) - (safe.count ?? 0);
-  if (anomalies > ANOMALY_ABORT_THRESHOLD) {
-    result.aborted.push(
-      `${workspaceId}: ${anomalies} flagged rows are not warmup by the pool — refusing to delete`,
-    );
-    await logActivity(supabase, {
-      workspaceId,
-      action: "warmup.purge_aborted",
-      meta: { stage: "preflight", flagged_but_external: anomalies },
-    });
-    return false;
+  if (anomalies <= ANOMALY_QUARANTINE_THRESHOLD) return true;
+
+  // Fetch a sample of the offending rows so the activity log shows WHICH
+  // external addresses are involved — that is what a human needs to review.
+  const { data: sampleRows } = await supabase
+    .from("messages")
+    .select("from_email,to_email")
+    .eq("workspace_id", workspaceId)
+    .eq("is_warmup", true)
+    .is("deleted_at", null)
+    .order("sent_at", { ascending: false })
+    .limit(5000);
+
+  const external = new Map<string, number>();
+  for (const row of (sampleRows ?? []) as { from_email: string; to_email: string }[]) {
+    if (pool.emails.has(row.from_email) && pool.emails.has(row.to_email)) continue;
+    for (const addr of [row.from_email, row.to_email]) {
+      if (!pool.emails.has(addr)) external.set(addr, (external.get(addr) ?? 0) + 1);
+    }
   }
+  const topExternal = [...external.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([address, count]) => ({ address, count }));
+
+  result.skipped.push(
+    `${workspaceId}: ${anomalies} flagged rows are not warmup by the pool — quarantined (excluded from deletion) for review`,
+  );
+  await logActivity(supabase, {
+    workspaceId,
+    action: "warmup.anomalies_quarantined",
+    meta: { stage: "preflight", quarantined: anomalies, external_addresses: topExternal },
+  });
   return true;
 }
 
