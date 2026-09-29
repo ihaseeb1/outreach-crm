@@ -74,8 +74,8 @@ export async function POST(request: Request) {
       created_by: session.userId,
       mailbox_ids: [],
       settings: {
-        send_window_start: 9,
-        send_window_end: 17,
+        send_window_start: 1,
+        send_window_end: 24,
         send_days: [1, 2, 3, 4, 5],
         timezone: DEFAULT_TIMEZONE,
       },

@@ -17,8 +17,8 @@ export interface ResolvedWindow {
 }
 
 const DEFAULTS: ResolvedWindow = {
-  startHour: 9,
-  endHour: 17,
+  startHour: 1,
+  endHour: 24,
   // Monday–Friday. 0 = Sunday.
   days: [1, 2, 3, 4, 5],
   timezone: DEFAULT_TIMEZONE,

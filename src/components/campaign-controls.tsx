@@ -154,8 +154,8 @@ export function CampaignControls({
   const [saved, setSaved] = useState(false);
   const [rescheduled, setRescheduled] = useState<number | null>(null);
 
-  const [startHour, setStartHour] = useState(settings.send_window_start ?? 9);
-  const [endHour, setEndHour] = useState(settings.send_window_end ?? 17);
+  const [startHour, setStartHour] = useState(settings.send_window_start ?? 1);
+  const [endHour, setEndHour] = useState(settings.send_window_end ?? 24);
   const [days, setDays] = useState<number[]>(settings.send_days ?? [1, 2, 3, 4, 5]);
   const [timezone, setTimezone] = useState(settings.timezone ?? DEFAULT_TIMEZONE);
   const [selected, setSelected] = useState<string[]>(selectedMailboxIds);
