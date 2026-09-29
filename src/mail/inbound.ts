@@ -675,11 +675,16 @@ async function contactIdFor(
   workspaceId: string,
   email: string,
 ): Promise<string | null> {
+  const normalized = normalizeEmail(email);
+  if (!normalized) return null;
+  // Use ilike for case-insensitive match: contacts created before
+  // normalization may have mixed-case emails. Exact match would silently
+  // fail to find them, leaving sequences running after a reply.
   const { data } = await supabase
     .from("contacts")
     .select("id")
     .eq("workspace_id", workspaceId)
-    .eq("email", email)
+    .ilike("email", normalized)
     .limit(1)
     .maybeSingle();
   return (data as { id: string } | null)?.id ?? null;

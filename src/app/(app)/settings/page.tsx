@@ -219,9 +219,11 @@ export default async function SettingsPage() {
       <section className="card card-pad space-y-3">
         <h2 className="text-sm font-semibold">Background jobs</h2>
         <p className="hint">
-          Every job is a bounded, idempotent batch. Point any scheduler at the tick
-          endpoint every 5–10 minutes, sending{" "}
-          <code>Authorization: Bearer $CRON_SECRET</code>.
+          The engine runs on GitHub Actions runners (not Vercel): the fast lane
+          every 5 minutes (campaigns, warmup, inbox polling, health) and the
+          slow lane every 30 minutes (validation, scraping, backlinks,
+          warmup-purge, discovery, publishers, enrichment, leads). Each lane
+          writes a heartbeat row per job below.
         </p>
         <code className="block overflow-x-auto rounded-md bg-[var(--color-canvas)] px-3 py-2 text-xs">
           {appUrl}/api/cron/tick
@@ -235,6 +237,111 @@ export default async function SettingsPage() {
           </li>
         </ul>
       </section>
+
+      <EngineStatus />
     </div>
+  );
+}
+
+/** Expected cadence per engine job, used to flag a stale lane. */
+const ENGINE_JOBS: { job: string; cadence: string; staleAfterMin: number }[] = [
+  { job: "campaigns", cadence: "fast · every 5 min", staleAfterMin: 30 },
+  { job: "warmup", cadence: "fast · every 5 min", staleAfterMin: 30 },
+  { job: "inbound", cadence: "fast · every 5 min", staleAfterMin: 30 },
+  { job: "health", cadence: "fast · every 5 min", staleAfterMin: 30 },
+  { job: "validate", cadence: "slow · every 30 min", staleAfterMin: 90 },
+  { job: "scrape", cadence: "slow · every 30 min", staleAfterMin: 90 },
+  { job: "backlinks", cadence: "slow · every 30 min", staleAfterMin: 90 },
+  { job: "warmup-purge", cadence: "slow · every 30 min", staleAfterMin: 90 },
+  { job: "discovery", cadence: "slow · every 30 min", staleAfterMin: 90 },
+  { job: "publishers", cadence: "slow · every 30 min", staleAfterMin: 90 },
+  { job: "enrich", cadence: "slow · every 30 min", staleAfterMin: 90 },
+  { job: "leads", cadence: "slow · every 30 min", staleAfterMin: 90 },
+];
+
+function ageLabel(finishedAt: string): string {
+  const mins = Math.max(0, Math.round((Date.now() - Date.parse(finishedAt)) / 60000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} h ${mins % 60} min ago`;
+  return `${Math.floor(hours / 24)} d ago`;
+}
+
+async function EngineStatus() {
+  const supabase = await createSupabaseServerClient();
+  const latest = new Map<
+    string,
+    { ok: boolean; finished_at: string; error: string | null }
+  >();
+  let unavailable = false;
+  try {
+    const { data, error } = await supabase
+      .from("worker_runs")
+      .select("job, ok, finished_at, error")
+      .is("workspace_id", null)
+      .order("finished_at", { ascending: false })
+      .limit(400);
+    if (error) {
+      unavailable = true;
+    } else {
+      for (const row of (data ?? []) as {
+        job: string;
+        ok: boolean;
+        finished_at: string;
+        error: string | null;
+      }[]) {
+        if (!latest.has(row.job)) latest.set(row.job, row);
+      }
+    }
+  } catch {
+    unavailable = true;
+  }
+
+  return (
+    <section className="card card-pad space-y-3">
+      <h2 className="text-sm font-semibold">Engine status</h2>
+      <p className="hint">
+        Live heartbeat of the background engine. A job turns amber when it has
+        not run within its expected cadence — that means the lane is paused or
+        failing, and nothing behind it (sending, warmup, cleanup) is moving.
+      </p>
+      {unavailable ? (
+        <p className="hint">Heartbeat unavailable (telemetry table not reachable).</p>
+      ) : (
+        <ul className="divide-y divide-[var(--color-line)]">
+          {ENGINE_JOBS.map(({ job, cadence, staleAfterMin }) => {
+            const run = latest.get(job);
+            const ageMin = run
+              ? (Date.now() - Date.parse(run.finished_at)) / 60000
+              : Infinity;
+            const state = !run ? "never" : !run.ok ? "failed" : ageMin > staleAfterMin ? "stale" : "ok";
+            const dot =
+              state === "ok"
+                ? "bg-emerald-500"
+                : state === "failed"
+                  ? "bg-red-500"
+                  : "bg-amber-500";
+            return (
+              <li key={job} className="flex items-center gap-3 py-2">
+                <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${dot}`} />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium">
+                    {job}{" "}
+                    <span className="hint font-normal">· {cadence}</span>
+                  </p>
+                  <p className="hint truncate">
+                    {!run
+                      ? "never ran"
+                      : `${ageLabel(run.finished_at)}${run.ok ? "" : ` — failed: ${run.error ?? "unknown error"}`}`}
+                  </p>
+                </div>
+                <span className="hint shrink-0 capitalize">{state}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
   );
 }

@@ -5,6 +5,14 @@ const nextConfig = {
   // playwright is optional and only ever loaded by the standalone worker.
   serverExternalPackages: ["imapflow", "nodemailer", "playwright"],
 
+  async redirects() {
+    return [
+      // The approvals page lives under /admin; catch the bare path too so a
+      // typed or bookmarked /approvals lands in the right place.
+      { source: "/approvals", destination: "/admin/approvals", permanent: false },
+    ];
+  },
+
   async headers() {
     return [
       {
