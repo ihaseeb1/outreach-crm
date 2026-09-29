@@ -10,6 +10,14 @@ export type HealthStatus = "healthy" | "warning" | "paused";
 export interface HealthSignals {
   /** Campaign emails sent in the last 7 days — the denominator for the rates. */
   sent7d: number;
+  /**
+   * THE bounce rate — the single definition shown everywhere it appears (the
+   * Mailboxes banner via paused_reason, the Deliverability page, the dashboard,
+   * reports): inbound messages flagged as bounces in the trailing 7 days ÷
+   * outbound messages sent in the trailing 7 days, per mailbox. Recomputed by
+   * the daily health check; the Mailboxes banner text is refreshed from the
+   * same check so the two pages can never disagree.
+   */
   bounceRate: number;
   complaintRate: number;
   /** Fraction of recent warmup mail that had to be rescued from spam. */

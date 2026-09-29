@@ -287,6 +287,11 @@ export default async function DeliverabilityPage() {
                             value={pct(latest.warmup_spam_rate)}
                           />
                         </dl>
+                        <p className="hint">
+                          Bounce rate = bounce receipts in the last 7 days ÷
+                          emails sent in the last 7 days. The Mailboxes page
+                          banner shows this same number, refreshed daily.
+                        </p>
 
                         <div className="flex flex-wrap gap-2">
                           <AuthBadge label="SPF" ok={latest.spf_ok} />
