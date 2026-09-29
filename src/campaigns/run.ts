@@ -312,6 +312,52 @@ async function processCampaignContact(
   }
   const contact = contactRow as Contact;
 
+  // Reply guard: if the contact replied since being enrolled and the inbound
+  // poller missed it (linking failure, race, whatever), stop here instead of
+  // sending another step. The inbound handler does this too; this is the
+  // belt-and-braces check at the last moment before an email goes out.
+  const { data: replyRow } = await supabase
+    .from("messages")
+    .select("id")
+    .eq("workspace_id", campaign.workspace_id)
+    .eq("direction", "inbound")
+    .eq("is_bounce", false)
+    .eq("is_auto_reply", false)
+    .eq("from_email", contact.email)
+    .limit(1)
+    .maybeSingle();
+
+  if (replyRow) {
+    await supabase
+      .from("campaign_contacts")
+      .update({
+        status: "replied",
+        replied_at: new Date().toISOString(),
+        next_send_at: null,
+        locked_until: null,
+        paused_reason: "Contact replied (caught at send time)",
+      })
+      .eq("id", entry.id);
+    // Also suppress, mirroring the inbound handler: a reply retires the
+    // address from the cold-sending pool for good.
+    const { suppressEmail } = await import("@/mail/suppressions");
+    await suppressEmail(supabase, {
+      workspaceId: campaign.workspace_id,
+      email: contact.email,
+      reason: "replied",
+      source: "campaign:send_time_guard",
+      meta: { campaign: campaign.name, auto: true },
+    });
+    await logActivity(supabase, {
+      workspaceId: campaign.workspace_id,
+      action: "campaign.reply_stop",
+      entityType: "contact",
+      entityId: contact.id,
+      meta: { campaign: campaign.name, step: stepNumber, caught_at: "send_time" },
+    });
+    return "stopped";
+  }
+
   const { mailbox, waiting, switched } = mailboxForContact(
     entry.mailbox_id,
     mailboxes,
