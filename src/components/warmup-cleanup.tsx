@@ -279,6 +279,8 @@ function describeAction(action: string): string {
       return "Auto-deletion turned off";
     case "warmup.purge_aborted":
       return "Cleanup aborted (safety)";
+    case "warmup.anomalies_quarantined":
+      return "Non-pool rows quarantined (review)";
     case "warmup.purge_anomaly":
       return "Anomaly skipped (safety)";
     default:
