@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
-import { countFound, parseQuote, type ParsedQuote } from "@/deals/parse-quote";
+import { CANONICAL_NICHES, countFound, parseQuote, type ParsedQuote } from "@/deals/parse-quote";
 import type { DealStatus, DealWithPrices } from "@/types/db";
 
 /** One email in this publisher's history, as /api/messages/thread returns it. */
@@ -44,27 +44,13 @@ interface PriceRow {
   price: string;
 }
 
-const COMMON_NICHES = [
-  "General",
-  "Business",
-  "Tech",
-  "Health",
-  "Finance",
-  "Crypto",
-  "Casino",
-  "CBD",
-  "Adult",
-  "Dating",
-  // Publishers price these alongside the niches, in the same list, so they
-  // belong in the same suggestions: a rate card that says "Link insertion 150"
-  // is quoting a product, not a subject.
-  "Link insertion",
-  "Niche edit",
-  "Homepage link",
-  "Footer text link",
-  "Banner",
-  "Press release",
-];
+/**
+ * Price-category suggestions for the niche field. This is the same fixed
+ * taxonomy the parser and the deals table use (CANONICAL_NICHES), so a
+ * hand-typed price lands in the same vocabulary — and the same table column —
+ * as an auto-captured one.
+ */
+const COMMON_NICHES: readonly string[] = CANONICAL_NICHES;
 
 /** Options for the fields that have a fixed set of answers. */
 const OPTIONS = {

@@ -1,29 +1,14 @@
 import type { DealWithPrices } from "@/types/db";
+import { CANONICAL_NICHES } from "@/deals/parse-quote";
 
 /**
  * Turns deals into a flat grid for Excel.
  *
- * One row per publisher, with a column per niche discovered across the export —
- * which is how a rate card is actually read and compared. Pure functions, so the
- * shape is covered by tests and reused by the XLSX, CSV, and clipboard-TSV paths.
+ * One row per publisher, with a column per price category in the fixed taxonomy
+ * (see CANONICAL_NICHES) that appears across the export — which is how a rate
+ * card is actually read and compared. Pure functions, so the shape is covered
+ * by tests and reused by the XLSX, CSV, and clipboard-TSV paths.
  */
-
-/** Niches shown first when present, so common columns stay in a stable order. */
-const PREFERRED_NICHE_ORDER = [
-  "General",
-  "Business",
-  "Tech",
-  "Health",
-  "Finance",
-  "Crypto",
-  "Casino",
-  "Gambling",
-  "CBD",
-  "Adult",
-  "Dating",
-  "Essay",
-  "Vape",
-];
 
 export const BASE_COLUMNS = [
   "Domain",
@@ -53,19 +38,20 @@ export interface ExportGrid {
 }
 
 export function nicheColumns(deals: DealWithPrices[]): string[] {
+  // The column set is the fixed taxonomy, in taxonomy order — never the raw
+  // phrases on the rows. Rows written before canonicalization (or typed by
+  // hand) that do not match the taxonomy are simply not pivoted into columns;
+  // their prices still live on the deal itself.
+  const canonical = new Set<string>(CANONICAL_NICHES);
   const found = new Set<string>();
   for (const deal of deals) {
     for (const price of deal.deal_prices ?? []) {
-      if (price.niche?.trim()) found.add(price.niche.trim());
+      const niche = price.niche?.trim();
+      if (niche && canonical.has(niche)) found.add(niche);
     }
   }
 
-  const preferred = PREFERRED_NICHE_ORDER.filter((niche) => found.has(niche));
-  const rest = [...found]
-    .filter((niche) => !PREFERRED_NICHE_ORDER.includes(niche))
-    .sort((a, b) => a.localeCompare(b));
-
-  return [...preferred, ...rest];
+  return CANONICAL_NICHES.filter((niche) => found.has(niche));
 }
 
 export interface DealRowContext {

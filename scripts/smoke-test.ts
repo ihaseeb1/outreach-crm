@@ -1272,15 +1272,21 @@ test("a column is created for every niche across the export", () => {
   assert.equal(grid.rows.length, 2);
 });
 
-test("common niches keep a stable leading order", () => {
+test("niche columns follow taxonomy order and junk labels get no column", () => {
   const niches = nicheColumns([
     deal("a.com", [
-      { niche: "Zebra", price: 10 },
+      { niche: "30 Days Footer Text Link", price: 30 },
       { niche: "Casino", price: 400 },
       { niche: "General", price: 150 },
     ]),
   ]);
-  assert.deepEqual(niches, ["General", "Casino", "Zebra"]);
+  assert.deepEqual(niches, ["General", "Casino"]);
+});
+
+test("an absurd price is dropped, not filed on the deal", () => {
+  const quote = parseQuote("General $150\nPremium placement $90,028");
+  assert.equal(quote.prices.length, 1);
+  assert.equal(quote.prices[0]?.niche, "General");
 });
 
 test("a niche a publisher does not quote is blank, not zero", () => {
@@ -2432,8 +2438,8 @@ test("quoted lines are dropped but a reply written below one is kept", () => {
   assert.match(stripped, /Our price is \$300/);
 });
 
-test("an unrecognised niche keeps the publisher's own wording", () => {
-  assert.equal(canonicalNiche("Pet care"), "Pet care");
+test("an unrecognised niche falls back to General, never its own column", () => {
+  assert.equal(canonicalNiche("Pet care"), "General");
   assert.equal(canonicalNiche("iGaming & Sportsbook"), "Casino");
   assert.equal(canonicalNiche("general business"), "Business");
 });
@@ -2495,13 +2501,13 @@ test("a price list with no separators and no currency is read", () => {
   assert.equal(prices["Link insertion"], 150);
 });
 
-test("a product whose name starts with a number keeps it", () => {
+test("a product whose name starts with a number keeps it, canonicalized", () => {
   const prices = Object.fromEntries(
     parseQuote(BULK_REPLY).prices.map((row) => [row.niche, row.price]),
   );
 
-  assert.equal(prices["30 Days Footer Text Link"], 30);
-  assert.equal(prices["30 Days Banner"], 50);
+  assert.equal(prices["Footer text link"], 30);
+  assert.equal(prices["Banner"], 50);
 });
 
 test("the placement is the one they lead with, not a line item further down", () => {

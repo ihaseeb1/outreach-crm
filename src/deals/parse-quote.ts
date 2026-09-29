@@ -101,6 +101,56 @@ const PLACEMENTS: [RegExp, string][] = [
 ];
 
 /**
+ * The fixed price-category vocabulary.
+ *
+ * Every price the parser files lands on one of these — never on the
+ * publisher's free text. This is what bounds the deals table (and the export)
+ * to a fixed column set instead of one column per distinct phrase ever seen on
+ * a rate card. The deal form suggests from this same list, so hand-typed and
+ * auto-captured prices share the vocabulary.
+ */
+export const CANONICAL_NICHES = [
+  "General",
+  "Business",
+  "Tech",
+  "Health",
+  "Finance",
+  "Crypto",
+  "Casino",
+  "CBD",
+  "Adult",
+  "Dating",
+  "Legal",
+  "Real estate",
+  "Travel",
+  "Education",
+  "Home",
+  "Link insertion",
+  "Niche edit",
+  "Homepage link",
+  "Footer text link",
+  "Banner",
+  "Press release",
+] as const;
+
+/** Publisher wording → the product category this CRM files it under. */
+const PRODUCT_ALIASES: [RegExp, string][] = [
+  [/\bniche\s*edits?\b/i, "Niche edit"],
+  [/\b(link\s*insertion|link\s*placement|contextual\s*link)\b/i, "Link insertion"],
+  [/\bfooter\b/i, "Footer text link"],
+  [/\bhome\s*page\b|\bhomepage\b/i, "Homepage link"],
+  [/\b(banner|sidebar)\b/i, "Banner"],
+  [/\bpress\s*release\b/i, "Press release"],
+];
+
+/**
+ * Amounts above this are never a real per-link price — they are a misread or a
+ * typo ("USD 90,028" for a guest post). Rejected at parse time so they never
+ * reach the database.
+ */
+export const MAX_SANE_PRICE = 20_000;
+
+/**
  * Words that make a bare number something other than money. "DA 45" and "1000
  * words" are not a price; a number wearing a currency is, whatever it sits next
  * to.
@@ -212,6 +262,15 @@ function readPrices(lines: string[], quote: ParsedQuote): void {
     for (const segment of splitPriceSegments(line)) {
       const money = readMoney(segment);
       if (!money) continue;
+      // Absurd amounts are a misread or a typo, never a real per-link price —
+      // skip the segment rather than filing "USD 90,028" on the deal.
+      if (
+        !Number.isFinite(money.amount) ||
+        money.amount <= 0 ||
+        money.amount > MAX_SANE_PRICE
+      ) {
+        continue;
+      }
 
       const label = labelFor(segment, money.at, money.raw.length);
       if (!label) continue;
@@ -365,35 +424,45 @@ function labelFor(segment: string, at: number, length: number): string | null {
 /**
  * Publisher's wording → the niche name this CRM files it under.
  *
- * A label naming several niches goes by *their* order, not this list's:
- * "Business/Tech" is a business price they also accept tech for. The one
- * exception is the restricted set — a label mentioning casino or CBD anywhere
- * in it is that price whatever came first, because "SEO for casinos" is quoted
- * at the casino rate, not the SEO one.
+ * The result is always one of CANONICAL_NICHES, never the raw label — a label
+ * like "30 Days Footer Text Link" becomes "Footer text link", and something
+ * unrecognised becomes "General". The price is kept either way and the original
+ * wording stays in the evidence line, but no new table column is invented for
+ * it.
+ *
+ * Priority: restricted subjects first ("SEO for casinos" is a casino price),
+ * then products ("Footer link" is a product, not a subject), then named
+ * subjects ("general business" is a business price), then General.
  */
 export function canonicalNiche(label: string): string {
-  const matches: { at: number; niche: string; restricted: boolean }[] = [];
+  const matches: { at: number; niche: string; tier: number }[] = [];
 
-  for (const [pattern, niche] of NICHE_ALIASES) {
-    const found = new RegExp(pattern.source, "i").exec(label);
-    if (found) {
-      matches.push({ at: found.index, niche, restricted: RESTRICTED.has(niche) });
+  const collect = (aliases: [RegExp, string][], tier: number) => {
+    for (const [pattern, niche] of aliases) {
+      const found = new RegExp(pattern.source, "i").exec(label);
+      if (found) matches.push({ at: found.index, niche, tier });
     }
-  }
+  };
+
+  collect(
+    NICHE_ALIASES.filter(([, niche]) => RESTRICTED.has(niche)),
+    0,
+  );
+  collect(PRODUCT_ALIASES, 1);
+  collect(
+    NICHE_ALIASES.filter(([, niche]) => !RESTRICTED.has(niche) && niche !== "General"),
+    2,
+  );
+  collect(
+    NICHE_ALIASES.filter(([, niche]) => niche === "General"),
+    3,
+  );
 
   if (matches.length > 0) {
-    const restricted = matches.filter((match) => match.restricted);
-    // "General" means "no particular niche", so it loses to any niche that is
-    // actually named: "general business" is a business price.
-    const named = matches.filter((match) => match.niche !== "General");
-    const pool = restricted.length > 0 ? restricted : named.length > 0 ? named : matches;
-    const best = pool.sort((a, b) => a.at - b.at)[0];
+    const best = matches.sort((a, b) => a.tier - b.tier || a.at - b.at)[0];
     if (best) return best.niche;
   }
-  // Unrecognised is kept as they wrote it — a rate card may name a niche this
-  // list has never seen, and inventing "General" for it would lose the price.
-  const cleaned = label.replace(/\s{2,}/g, " ").trim();
-  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+  return "General";
 }
 
 // ---------------------------------------------------------------------------
