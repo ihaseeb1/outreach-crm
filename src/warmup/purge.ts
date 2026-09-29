@@ -69,10 +69,11 @@ export interface PurgeResult {
   dryRun: boolean;
 }
 
-/** Rows selected/updated per statement — bounded so no single query times out. */
+/** Rows selected per statement — bounded so no single query times out. */
 const SELECT_PAGE = 1000;
-/** URL length safe: id-lists go in the query string; 1000 uuids ≈ 37 KB. */
-const ID_CHUNK = 1000;
+/** IDs per write statement — kept small because id-lists go in the query string
+ *  and ~1000 uuids (≈37 KB of URL) gets rejected with 400 Bad Request. */
+const ID_CHUNK = 100;
 /** A mailbox's IMAP folders are re-scanned at most this often. */
 const MAILBOX_REPURGE_MS = 20 * 60 * 60 * 1000;
 /** Newest N warmup messages a single folder scan returns before it moves them. */
