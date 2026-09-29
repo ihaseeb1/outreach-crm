@@ -26,12 +26,43 @@ export interface ScrapeBatchResult {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Reaper thresholds.
+ *
+ * A website sits in `scraping` only while a worker holds it. The claim is
+ * atomic but there is no heartbeat, so a dead worker (killed runner, tick
+ * timeout, OOM) leaves the row orphaned: the batch only ever selects
+ * `pending`, so nothing would ever pick it up again, and the parent job —
+ * which only completes when every site is terminal — would sit in `running`
+ * forever. These thresholds bound that failure mode.
+ */
+/** Claimed longer ago than this without finishing: the worker is presumed dead. */
+const STALE_SCRAPING_MS = 30 * 60 * 1000;
+/** Times an orphaned website is reclaimed for retry before it is failed outright. */
+const MAX_SCRAPE_ATTEMPTS = 3;
+/** A `running` job with no activity for this long is timed out and failed. */
+const STALE_JOB_MS = 2 * 60 * 60 * 1000;
+
 export async function runScrapeBatch(
   supabase: SupabaseClient,
   options: { limit?: number; scraper?: Scraper; workspaceId?: string } = {},
 ): Promise<ScrapeBatchResult> {
   const limit = options.limit ?? 10;
   const scraper = options.scraper ?? defaultScraper;
+
+  const result: ScrapeBatchResult = {
+    processed: 0,
+    contactsCreated: 0,
+    skippedRobots: 0,
+    failed: 0,
+  };
+
+  // Reaper first: reclaim websites orphaned by dead workers and time out jobs
+  // that have seen no activity past the deadline, so a crashed run can never
+  // leave websites or jobs stuck forever. Reaped websites go back to `pending`
+  // (their scrape_job_id is untouched — no data is deleted).
+  const reapedJobIds = await reapStaleWebsites(supabase, result);
+  await timeoutStaleJobs(supabase, result);
 
   let pendingQuery = supabase
     .from("websites")
@@ -45,13 +76,6 @@ export async function runScrapeBatch(
   }
 
   const { data: pending } = await pendingQuery;
-
-  const result: ScrapeBatchResult = {
-    processed: 0,
-    contactsCreated: 0,
-    skippedRobots: 0,
-    failed: 0,
-  };
 
   const touchedJobs = new Set<string>();
   // Per-workspace "respect robots.txt" flag, read once per workspace. The batch
@@ -120,7 +144,7 @@ export async function runScrapeBatch(
     }
   }
 
-  for (const jobId of touchedJobs) {
+  for (const jobId of new Set([...touchedJobs, ...reapedJobIds])) {
     await refreshJobProgress(supabase, jobId);
   }
 
@@ -298,27 +322,171 @@ export async function refreshJobProgress(
   supabase: SupabaseClient,
   jobId: string,
 ): Promise<void> {
+  const progress = await jobProgress(supabase, jobId);
+  const complete = progress.total > 0 && progress.processed === progress.total;
+
+  await supabase
+    .from("scrape_jobs")
+    .update({
+      total_count: progress.total,
+      processed_count: progress.processed,
+      found_count: progress.found,
+      status: complete ? "completed" : "running",
+      completed_at: complete ? new Date().toISOString() : null,
+    })
+    .eq("id", jobId);
+}
+
+interface JobProgress {
+  total: number;
+  processed: number;
+  found: number;
+  /** Websites still queued or actively being scraped. */
+  pendingOrActive: number;
+}
+
+/** Shared counter computation for refresh + timeout decisions. */
+async function jobProgress(
+  supabase: SupabaseClient,
+  jobId: string,
+): Promise<JobProgress> {
   const { data: sites } = await supabase
     .from("websites")
     .select("status, emails_found")
     .eq("scrape_job_id", jobId);
 
   const rows = (sites ?? []) as { status: string; emails_found: number }[];
-  const total = rows.length;
-  const processed = rows.filter(
-    (r) => r.status === "done" || r.status === "failed" || r.status === "skipped_robots",
-  ).length;
-  const found = rows.reduce((sum, r) => sum + (r.emails_found ?? 0), 0);
-  const complete = total > 0 && processed === total;
+  const isTerminal = (s: string) =>
+    s === "done" || s === "failed" || s === "skipped_robots";
+  return {
+    total: rows.length,
+    processed: rows.filter((r) => isTerminal(r.status)).length,
+    found: rows.reduce((sum, r) => sum + (r.emails_found ?? 0), 0),
+    pendingOrActive: rows.filter(
+      (r) => r.status === "pending" || r.status === "scraping",
+    ).length,
+  };
+}
 
-  await supabase
+/**
+ * Reclaims websites orphaned by dead workers.
+ *
+ * A row in `scraping` whose `updated_at` is older than STALE_SCRAPING_MS cannot
+ * still be held by a live worker — the claim has no heartbeat, so the worker
+ * died mid-scrape (killed runner, tick timeout, OOM). Without this, the batch
+ * (which only selects `pending`) would never pick the row up again, and the
+ * parent job — which only completes when every site is terminal — would sit in
+ * `running` forever.
+ *
+ * Orphaned rows go back to `pending` for retry, with the attempt counted in
+ * `meta.scrape_attempts`; after MAX_SCRAPE_ATTEMPTS the site itself is presumed
+ * to be the problem and it is failed with an error instead. Returns the ids of
+ * the jobs that had sites reaped, so their progress counters get refreshed.
+ * Nothing is deleted.
+ */
+async function reapStaleWebsites(
+  supabase: SupabaseClient,
+  result: ScrapeBatchResult,
+): Promise<Set<string>> {
+  const jobIds = new Set<string>();
+  const cutoff = new Date(Date.now() - STALE_SCRAPING_MS).toISOString();
+
+  const { data } = await supabase
+    .from("websites")
+    .select("id, scrape_job_id, meta")
+    .eq("status", "scraping")
+    .lt("updated_at", cutoff)
+    .limit(200);
+
+  const rows = (data ?? []) as {
+    id: string;
+    scrape_job_id: string | null;
+    meta: Record<string, unknown> | null;
+  }[];
+
+  for (const row of rows) {
+    if (row.scrape_job_id) jobIds.add(row.scrape_job_id);
+    const attempts = Number(row.meta?.scrape_attempts ?? 0);
+    const meta = { ...(row.meta ?? {}), scrape_attempts: attempts + 1 };
+
+    if (attempts + 1 >= MAX_SCRAPE_ATTEMPTS) {
+      // Reclaimed repeatedly but never finishes — the site, not the worker,
+      // is the problem. Fail it cleanly with an error; the job can then close.
+      result.failed += 1;
+      await supabase
+        .from("websites")
+        .update({
+          status: "failed",
+          error: `Scrape worker died mid-scrape ${attempts + 1} times — giving up.`,
+          meta,
+          scraped_at: new Date().toISOString(),
+        })
+        .eq("id", row.id);
+    } else {
+      await supabase
+        .from("websites")
+        .update({ status: "pending", error: null, meta })
+        .eq("id", row.id);
+    }
+  }
+
+  return jobIds;
+}
+
+/**
+ * Times out `running` jobs that have seen no activity past STALE_JOB_MS.
+ *
+ * `updated_at` is bumped by a trigger on every write, and refreshJobProgress
+ * rewrites the job row on every batch that touches it — so a `running` job
+ * with a stale `updated_at` is one no worker has made progress on. Jobs with
+ * sites still queued or being scraped are left alone (they are slow, not
+ * stuck); a job whose sites are all terminal but never got its final refresh
+ * is completed rather than failed. Everything else is marked `failed` with an
+ * error. Nothing is deleted.
+ */
+async function timeoutStaleJobs(
+  supabase: SupabaseClient,
+  result: ScrapeBatchResult,
+): Promise<void> {
+  const cutoff = new Date(Date.now() - STALE_JOB_MS).toISOString();
+
+  const { data } = await supabase
     .from("scrape_jobs")
-    .update({
-      total_count: total,
-      processed_count: processed,
-      found_count: found,
-      status: complete ? "completed" : "running",
-      completed_at: complete ? new Date().toISOString() : null,
-    })
-    .eq("id", jobId);
+    .select("id")
+    .eq("status", "running")
+    .lt("updated_at", cutoff)
+    .limit(50);
+
+  const rows = (data ?? []) as { id: string }[];
+
+  for (const row of rows) {
+    const progress = await jobProgress(supabase, row.id);
+
+    if (progress.total > 0 && progress.processed === progress.total) {
+      await supabase
+        .from("scrape_jobs")
+        .update({
+          status: "completed",
+          completed_at: new Date().toISOString(),
+          total_count: progress.total,
+          processed_count: progress.processed,
+          found_count: progress.found,
+        })
+        .eq("id", row.id);
+      continue;
+    }
+
+    if (progress.pendingOrActive > 0) continue;
+
+    result.failed += 1;
+    await supabase
+      .from("scrape_jobs")
+      .update({
+        status: "failed",
+        error:
+          "Job timed out: no activity for over 2 hours with nothing left to process.",
+        completed_at: new Date().toISOString(),
+      })
+      .eq("id", row.id);
+  }
 }

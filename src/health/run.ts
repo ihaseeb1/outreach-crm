@@ -155,6 +155,18 @@ export async function runHealthChecks(
           meta: { score: verdict.score },
         });
       }
+    } else if (verdict.status === "paused") {
+      // No transition, but the reason text embeds point-in-time numbers (e.g.
+      // the bounce rate) that go stale while the mailbox sits paused: the
+      // Deliverability page recomputes them on every daily check, so the
+      // Mailboxes banner would show a different number for the same mailbox.
+      // Refresh the text from the current check's issues so both pages always
+      // agree — the embedded rate comes from the same signals row that
+      // mailbox_health.bounce_rate was just written from.
+      await supabase
+        .from("mailboxes")
+        .update({ paused_reason: verdict.issues.join(" ") || null })
+        .eq("id", mailbox.id);
     }
   }
 
