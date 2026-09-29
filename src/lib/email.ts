@@ -1,7 +1,20 @@
 /** Small shared helpers for handling addresses, domains and URLs. */
 
 export function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase();
+  return (
+    email
+      // Scraped data sometimes carries literal escape sequences (e.g. the six
+      // characters "\u00a0" instead of a real non-breaking space). Decode them
+      // before trimming so they don't become part of the stored address.
+      .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex: string) =>
+        String.fromCharCode(parseInt(hex, 16)),
+      )
+      .replace(/\\x([0-9a-fA-F]{2})/g, (_, hex: string) =>
+        String.fromCharCode(parseInt(hex, 16)),
+      )
+      .trim()
+      .toLowerCase()
+  );
 }
 
 export function emailDomain(email: string): string {

@@ -12,7 +12,7 @@
  * paths never call these helpers.
  */
 
-export const DEFAULT_TIMEZONE = "Asia/Karachi";
+export const DEFAULT_TIMEZONE = "America/New_York";
 
 type DateInput = string | number | Date | null | undefined;
 
@@ -22,7 +22,7 @@ function toDate(value: DateInput): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-/** Date + time, in Pakistan time. e.g. "21 Aug 2026, 02:14 pm". */
+/** Date + time, in the workspace timezone. e.g. "21 Aug 2026, 02:14 pm". */
 export function fmtDateTime(value: DateInput, fallback = "—"): string {
   const date = toDate(value);
   if (!date) return fallback;
@@ -37,7 +37,7 @@ export function fmtDateTime(value: DateInput, fallback = "—"): string {
   });
 }
 
-/** Date only, in Pakistan time. e.g. "21 Aug 2026". */
+/** Date only, in the workspace timezone. e.g. "21 Aug 2026". */
 export function fmtDate(value: DateInput, fallback = "—"): string {
   const date = toDate(value);
   if (!date) return fallback;
