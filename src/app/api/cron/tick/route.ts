@@ -81,7 +81,12 @@ export async function GET(request: Request) {
   );
   await step("campaigns", 12_000, () => runCampaignBatch(supabase, { limit: 10 }));
   await step("inbound", 22_000, () =>
-    runInboundPoll(supabase, { limit: 2, concurrency: 2, budgetMs: 20_000 }),
+    runInboundPoll(supabase, {
+      limit: 4,
+      concurrency: 2,
+      budgetMs: 20_000,
+      prioritizeRecentSenders: true,
+    }),
   );
   await step("warmup", 15_000, () => runWarmupBatch(supabase, { sendLimit: 3 }));
   // Skips any mailbox already checked today, so calling it every tick is cheap.

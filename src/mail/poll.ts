@@ -72,6 +72,16 @@ export async function runInboundPoll(
      * been left out.
      */
     includeInactive?: boolean;
+    /**
+     * Prioritize mailboxes that sent campaign emails recently.
+     *
+     * A reply to an active campaign is time-sensitive: every 5-minute tick that
+     * passes without the reply being processed is another follow-up that goes
+     * out after the contact already replied. Mailboxes with outbound campaign
+     * emails in the last 2 hours are polled first, so their replies are
+     * picked up quickly. Remaining slots go to the least-recently-polled.
+     */
+    prioritizeRecentSenders?: boolean;
   } = {},
 ): Promise<{
   polled: number;
@@ -86,20 +96,61 @@ export async function runInboundPoll(
   const budgetMs = options.budgetMs ?? 40_000;
   const startedAt = Date.now();
 
-  let query = supabase
-    .from("mailboxes")
-    .select("*")
-    .not("encrypted_credentials", "is", null)
-    // nullsFirst so a freshly connected mailbox is polled straight away.
-    .order("last_polled_at", { ascending: true, nullsFirst: true });
+  let queue: Mailbox[] = [];
 
-  if (!options.includeInactive) query = query.eq("is_active", true);
-  if (options.limit !== undefined) query = query.limit(options.limit);
-  if (options.workspaceId) query = query.eq("workspace_id", options.workspaceId);
-  if (options.mailboxId) query = query.eq("id", options.mailboxId);
+  // Prioritize mailboxes with recent campaign sends: a reply to an active
+  // campaign is time-sensitive. These are polled first so replies are picked
+  // up before the next follow-up goes out.
+  if (options.prioritizeRecentSenders && !options.mailboxId) {
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const { data: recentSenders } = await supabase
+      .from("messages")
+      .select("mailbox_id")
+      .eq("direction", "outbound")
+      .gte("sent_at", twoHoursAgo)
+      .not("mailbox_id", "is", null);
 
-  const { data } = await query;
-  const queue = (data ?? []) as Mailbox[];
+    const senderIds = [...new Set((recentSenders ?? []).map((r) => r.mailbox_id))];
+    if (senderIds.length > 0) {
+      let priorityQuery = supabase
+        .from("mailboxes")
+        .select("*")
+        .not("encrypted_credentials", "is", null)
+        .in("id", senderIds)
+        .order("last_polled_at", { ascending: true, nullsFirst: true });
+      if (!options.includeInactive) priorityQuery = priorityQuery.eq("is_active", true);
+      if (options.workspaceId) priorityQuery = priorityQuery.eq("workspace_id", options.workspaceId);
+      // Take up to half the limit for priority mailboxes, so the regular
+      // round-robin still makes progress on the rest.
+      const priorityLimit = options.limit ? Math.max(1, Math.ceil(options.limit / 2)) : undefined;
+      if (priorityLimit !== undefined) priorityQuery = priorityQuery.limit(priorityLimit);
+
+      const { data: priorityData } = await priorityQuery;
+      queue = (priorityData ?? []) as Mailbox[];
+    }
+  }
+
+  // Fill remaining slots with the least-recently-polled mailboxes.
+  const remainingLimit = options.limit !== undefined ? options.limit - queue.length : undefined;
+  if (remainingLimit === undefined || remainingLimit > 0) {
+    const queuedIds = new Set(queue.map((m) => m.id));
+    let query = supabase
+      .from("mailboxes")
+      .select("*")
+      .not("encrypted_credentials", "is", null)
+      // nullsFirst so a freshly connected mailbox is polled straight away.
+      .order("last_polled_at", { ascending: true, nullsFirst: true });
+
+    if (!options.includeInactive) query = query.eq("is_active", true);
+    if (remainingLimit !== undefined) query = query.limit(remainingLimit + queuedIds.size);
+    if (options.workspaceId) query = query.eq("workspace_id", options.workspaceId);
+    if (options.mailboxId) query = query.eq("id", options.mailboxId);
+
+    const { data } = await query;
+    const rest = ((data ?? []) as Mailbox[]).filter((m) => !queuedIds.has(m.id));
+    queue = [...queue, ...rest.slice(0, remainingLimit ?? rest.length)];
+  }
+
   const queued = queue.length;
 
   // Anything that could not even join the queue, named rather than silently

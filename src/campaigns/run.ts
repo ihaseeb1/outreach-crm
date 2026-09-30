@@ -316,6 +316,12 @@ async function processCampaignContact(
   // poller missed it (linking failure, race, whatever), stop here instead of
   // sending another step. The inbound handler does this too; this is the
   // belt-and-braces check at the last moment before an email goes out.
+  //
+  // Uses ilike (case-insensitive) because contact emails stored with mixed
+  // case would otherwise miss replies from the lowercased from_email.
+  // Also matches on contact_id, catching replies linked to the contact even
+  // if the from address differs in case or formatting.
+  const normalizedEmail = contact.email.toLowerCase();
   const { data: replyRow } = await supabase
     .from("messages")
     .select("id")
@@ -323,7 +329,7 @@ async function processCampaignContact(
     .eq("direction", "inbound")
     .eq("is_bounce", false)
     .eq("is_auto_reply", false)
-    .eq("from_email", contact.email)
+    .or(`contact_id.eq.${entry.contact_id},from_email.ilike.${normalizedEmail}`)
     .limit(1)
     .maybeSingle();
 
