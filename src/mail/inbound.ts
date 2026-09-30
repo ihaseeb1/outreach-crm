@@ -370,6 +370,7 @@ async function processInbound(
       : null;
 
     if (bounced && message.bounceType === "hard") {
+      const bouncedContactId = await contactIdFor(supabase, workspaceId, bounced);
       await suppressEmail(supabase, {
         workspaceId,
         email: bounced,
@@ -380,7 +381,7 @@ async function processInbound(
       await markCampaignContacts(supabase, workspaceId, bounced, {
         status: "bounced",
         paused_reason: "Hard bounce",
-      });
+      }, bouncedContactId);
     }
 
     const stored = await insertInbound(supabase, mailbox, message, {
@@ -435,12 +436,15 @@ async function processInbound(
   if (stored.error) return { kind: "failed", error: stored.error };
 
   // Compliance rule #6: a reply immediately pauses that contact's sequence.
+  // Pass the already-resolved contactId: re-resolving by email here would miss
+  // threaded replies where the contact was linked via In-Reply-To but the
+  // from address doesn't match the stored contact email.
   await markCampaignContacts(supabase, workspaceId, fromEmail, {
     status: "replied",
     replied_at: new Date().toISOString(),
     next_send_at: null,
     paused_reason: "Contact replied",
-  });
+  }, contactId);
 
   // A reply also retires the address from the cold-sending pool for good: it is
   // added to the global suppression list so no *future* campaign re-emails
@@ -658,8 +662,12 @@ async function markCampaignContacts(
   workspaceId: string,
   email: string,
   patch: Record<string, unknown>,
+  contactIdOverride?: string | null,
 ): Promise<void> {
-  const contactId = await contactIdFor(supabase, workspaceId, email);
+  // Use the already-resolved contactId when available (e.g. from threading).
+  // Re-resolving by email would miss replies where the from address doesn't
+  // match the stored contact email, leaving the sequence running after a reply.
+  const contactId = contactIdOverride ?? (await contactIdFor(supabase, workspaceId, email));
   if (!contactId) return;
 
   await supabase
