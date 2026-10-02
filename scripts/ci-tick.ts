@@ -29,7 +29,10 @@ import { syncSuppressedCampaignContacts } from "../src/campaigns/enroll";
 import { runInboundPoll } from "../src/mail/poll";
 import { runWarmupBatch } from "../src/warmup/engine";
 import { runHealthChecks } from "../src/health/run";
-import { runValidationBatch } from "../src/validation/run";
+import {
+  runRevalidationBatch,
+  runValidationBatch,
+} from "../src/validation/run";
 import { runScrapeBatch } from "../src/scraper/run";
 import { verifyDueBacklinks } from "../src/deals/verify";
 import { runWarmupPurge } from "../src/warmup/purge";
@@ -118,6 +121,11 @@ async function runSlowLane(supabase: SupabaseClient): Promise<void> {
   // Heavier, non-time-critical jobs. Best-effort: any whose migration is not yet
   // applied throws and is logged by step(), exactly as the API routes tolerate.
   await step(supabase, "validate", () => runValidationBatch(supabase, { limit: 200 }));
+  // Re-verify stale verdicts and, first, the lists on unhealthy mailboxes —
+  // this is what actually cleans the addresses generating bounces today.
+  await step(supabase, "revalidate", () =>
+    runRevalidationBatch(supabase, { limit: 150 }),
+  );
   await step(supabase, "scrape", () => runScrapeBatch(supabase, { limit: 25 }));
   await step(supabase, "backlinks", () => verifyDueBacklinks(supabase, { limit: 20 }));
   await step(supabase, "warmup-purge", () =>

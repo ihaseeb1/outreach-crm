@@ -76,6 +76,111 @@ export async function runValidationBatch(
   });
 }
 
+type RevalidateCandidate = Pick<
+  Contact,
+  "id" | "workspace_id" | "email" | "meta" | "validation_status" | "validated_at"
+>;
+
+const REVALIDATE_COLUMNS =
+  "id, workspace_id, email, meta, validation_status, validated_at";
+
+/**
+ * Cron batch: re-verify contacts whose verdict is stale — and, first, contacts
+ * sitting on unhealthy (warning/paused) mailboxes.
+ *
+ * The regular batch only ever touches `unknown` contacts, so a list that was
+ * marked `valid` months ago (or by an older engine) never gets re-checked, and
+ * its dead addresses keep bouncing forever — which is exactly how a mailbox
+ * lands in `warning`/`paused` and stays there. This batch closes that hole:
+ *
+ *   Pass 1 — contacts in active/pending sequences on mailboxes whose
+ *            health_status is not `healthy`. These are the lists generating
+ *            bounces right now.
+ *   Pass 2 — the oldest verdicts (default: validated over 90 days ago).
+ *
+ * Runs anywhere (quick mode, no port 25). Undeliverable addresses are
+ * suppressed, stopped in their campaigns, and removed per the workspace's
+ * auto-purge setting — the same treatment as the regular batch.
+ */
+export async function runRevalidationBatch(
+  supabase: SupabaseClient,
+  options: { limit?: number; workspaceId?: string; staleDays?: number } = {},
+): Promise<ValidationBatchResult> {
+  const limit = options.limit ?? 100;
+  const staleDays = options.staleDays ?? 90;
+  const staleCutoff = new Date(
+    Date.now() - staleDays * 86400 * 1000,
+  ).toISOString();
+  // Don't churn the same addresses every tick — a week between re-checks.
+  const recentCutoff = new Date(Date.now() - 7 * 86400 * 1000).toISOString();
+
+  const seen = new Set<string>();
+  const candidates: RevalidateCandidate[] = [];
+  const take = (rows: RevalidateCandidate[]) => {
+    for (const row of rows) {
+      if (candidates.length >= limit || seen.has(row.id)) continue;
+      // Already-undeliverable rows were handled when first found; re-checking
+      // them every cycle is pure churn.
+      if (isUndeliverableStatus(row.validation_status)) continue;
+      seen.add(row.id);
+      candidates.push(row);
+    }
+  };
+
+  // Pass 1 — unhealthy mailboxes' active contacts.
+  const { data: badBoxes } = await supabase
+    .from("mailboxes")
+    .select("id")
+    .neq("health_status", "healthy")
+    .limit(50);
+  if (badBoxes && (badBoxes as { id: string }[]).length > 0) {
+    const { data: ccRows } = await supabase
+      .from("campaign_contacts")
+      .select("contact_id")
+      .in(
+        "mailbox_id",
+        (badBoxes as { id: string }[]).map((b) => b.id),
+      )
+      .in("status", ["active", "pending"])
+      .limit(limit * 3);
+    const contactIds = [
+      ...new Set(
+        ((ccRows ?? []) as { contact_id: string }[]).map((r) => r.contact_id),
+      ),
+    ].slice(0, limit);
+    if (contactIds.length > 0) {
+      let cQuery = supabase
+        .from("contacts")
+        .select(REVALIDATE_COLUMNS)
+        .in("id", contactIds)
+        .or(`validated_at.is.null,validated_at.lt.${recentCutoff}`);
+      if (options.workspaceId)
+        cQuery = cQuery.eq("workspace_id", options.workspaceId);
+      const { data } = await cQuery;
+      take((data ?? []) as RevalidateCandidate[]);
+    }
+  }
+
+  // Pass 2 — oldest verdicts first.
+  if (candidates.length < limit) {
+    let sQuery = supabase
+      .from("contacts")
+      .select(REVALIDATE_COLUMNS)
+      .lt("validated_at", staleCutoff)
+      .order("validated_at", { ascending: true })
+      .limit(limit - candidates.length);
+    if (options.workspaceId)
+      sQuery = sQuery.eq("workspace_id", options.workspaceId);
+    const { data } = await sQuery;
+    take((data ?? []) as RevalidateCandidate[]);
+  }
+
+  return applyVerdicts(supabase, candidates, {
+    force: true,
+    mode: "quick",
+  });
+}
+
 /**
  * Deep (power) verification — run by `scripts/verify-worker.ts` on a box where
  * outbound port 25 is open. Picks contacts that passed the quick check and are
@@ -245,6 +350,22 @@ async function applyVerdicts(
         meta: verificationMeta(verification),
       });
       result.suppressed += 1;
+
+      // Stop the address in every running sequence FIRST, before the row is
+      // (optionally) deleted below. Without this, the contact's
+      // campaign_contacts rows stay active — either orphaned (contact gone,
+      // sends fail) or still being attempted. A bounced/stopped row also keeps
+      // the honest audit trail instead of silently vanishing.
+      await supabase
+        .from("campaign_contacts")
+        .update({
+          status: "bounced",
+          paused_reason: `Undeliverable (${verification.status})`,
+          next_send_at: null,
+          locked_until: null,
+        })
+        .eq("contact_id", contact.id)
+        .in("status", ["pending", "active"]);
 
       if (purgeByWorkspace.get(contact.workspace_id)) {
         const { error } = await supabase.from("contacts").delete().eq("id", contact.id);
