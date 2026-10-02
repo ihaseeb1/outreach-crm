@@ -1,0 +1,40 @@
+name: CRM integrity check (daily)
+
+# Read-only daily audit: stuck replies, mailbox health, send-window drift.
+# Runs the check script with the repo's existing Supabase secrets and uploads
+# the JSON summary as an artifact for the daily review job.
+#
+# Cadence: every day at 12:00 UTC (08:00 EDT / 07:00 EST). Also runnable on
+# demand via workflow_dispatch.
+
+on:
+  schedule:
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: integrity-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Run integrity check
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: npx tsx scripts/integrity-check.ts
+      - name: Upload summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: integrity-summary
+          path: integrity-summary.json
+          retention-days: 30
