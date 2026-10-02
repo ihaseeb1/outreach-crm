@@ -197,6 +197,12 @@ export class SmtpProvider implements MailboxProvider {
 
       const client = await this.imapClient();
       this.liveClients.add(client);
+      // A dead socket makes close()/logout() emit 'error' asynchronously;
+      // without a listener Node treats that emit as an uncaught exception
+      // and kills the whole tick process (seen 2026-10-01: 3 crashed runs,
+      // inbound poll + health check skipped). Swallow it here — the
+      // try/catch around the work already records the real failure.
+      client.on("error", () => undefined);
 
       try {
         await client.connect();
