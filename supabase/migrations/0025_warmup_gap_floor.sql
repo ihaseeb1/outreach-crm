@@ -5,9 +5,10 @@
 -- production: 3 sends from one mailbox within 2 seconds, and routine 0.0-minute
 -- gaps). Campaigns got the same atomic fix in 0019; warmup needs it too.
 --
--- The floor is warmup's own minimum gap: 4 minutes (240s), matching
--- WARMUP_MIN_GAP_SECONDS in src/warmup/plan.ts. The JS pacer still adds jitter
--- up to WARMUP_MAX_GAP_SECONDS on top; this only guarantees the minimum, so a
+-- The floor is warmup's minimum gap: 20 minutes (1200s), matching
+-- WARMUP_MIN_GAP_SECONDS in src/warmup/plan.ts (owner decision 2026-10-03:
+-- warmup sends 20-25 min apart). The JS pacer still adds jitter up to
+-- WARMUP_MAX_GAP_SECONDS on top; this only guarantees the minimum, so a
 -- failed reservation just defers that warmup to a later tick (send.ts already
 -- handles a false reservation as "try later").
 
@@ -31,7 +32,7 @@ begin
      -- each read a stale last_warmup_at and all reserved at once (bursts).
      and (
        last_warmup_at is null
-       or last_warmup_at <= now() - make_interval(secs => 240)
+       or last_warmup_at <= now() - make_interval(secs => 1200)
      );
 
   get diagnostics updated = row_count;

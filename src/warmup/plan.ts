@@ -38,19 +38,16 @@ export function quotaRemaining(dailyVolume: number, sentToday: number): number {
 }
 
 /**
- * Warmup's own pacing gap, deliberately much shorter than the outreach one.
+ * Warmup's own pacing gap.
  *
- * Outreach waits 2–4 hours between sends so a mailbox looks like a person
- * typing. Warmup goes between your own mailboxes and only has to hit the daily
- * target without arriving in one burst, so a few minutes apart is plenty — and
- * anything longer is exactly what starved warmup before. At a 30-minute tick a
- * mailbox is always rested by the time the next tick runs, so it can warm up
- * every tick and actually reach its number. Warmup is paced on `last_warmup_at`
- * (migration 0014), never on the outreach `last_send_at`, so firing this often
- * does not push real outreach out of its window.
+ * Owner decision 2026-10-03: warmup sends 20–25 minutes apart (was 4–16 min).
+ * Warmup goes between your own mailboxes, but the owner wants the whole
+ * mailbox — warmup plus outreach — on a calm, human daily rhythm, not bursts.
+ * Warmup is paced on `last_warmup_at` (migration 0014), never on the outreach
+ * `last_send_at`.
  */
-export const WARMUP_MIN_GAP_SECONDS = 4 * 60;
-export const WARMUP_MAX_GAP_SECONDS = 16 * 60;
+export const WARMUP_MIN_GAP_SECONDS = 20 * 60;
+export const WARMUP_MAX_GAP_SECONDS = 25 * 60;
 
 export interface WarmupState {
   enabled: boolean;
