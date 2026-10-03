@@ -5,12 +5,12 @@
 -- production: 3 sends from one mailbox within 2 seconds, and routine 0.0-minute
 -- gaps). Campaigns got the same atomic fix in 0019; warmup needs it too.
 --
--- The floor is warmup's minimum gap: 20 minutes (1200s), matching
--- WARMUP_MIN_GAP_SECONDS in src/warmup/plan.ts (owner decision 2026-10-03:
--- warmup sends 20-25 min apart). The JS pacer still adds jitter up to
--- WARMUP_MAX_GAP_SECONDS on top; this only guarantees the minimum, so a
--- failed reservation just defers that warmup to a later tick (send.ts already
--- handles a false reservation as "try later").
+-- The floor is a 20-minute anti-burst minimum. The real pacing is dynamic in
+-- JS (warmupGapForTarget in src/warmup/plan.ts: 23h window ÷ the mailbox's
+-- current daily warmup target, ±10% jitter); this DB floor only guarantees
+-- parallel ticks can never fire warmups seconds apart. A failed reservation
+-- just defers that warmup to a later tick (send.ts already handles a false
+-- reservation as "try later").
 
 create or replace function public.mailbox_reserve_warmup(mailbox uuid)
 returns boolean

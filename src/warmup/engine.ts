@@ -14,8 +14,7 @@ import {
   shouldRampToday,
   shouldContinueThread,
   shouldReply,
-  WARMUP_MAX_GAP_SECONDS,
-  WARMUP_MIN_GAP_SECONDS,
+  warmupGapForTarget,
   type PeerCandidate,
 } from "@/warmup/plan";
 import { newWarmupToken } from "@/warmup/token";
@@ -175,16 +174,14 @@ export async function runWarmupSends(
       // reserve allows a paused box through so this can send.
       if (!mailbox.is_active) continue;
       if (quotaRemaining(settings.current_daily_volume, sentToday) <= 0) continue;
-      // Paced on the warmup clock, not the outreach one: a short gap so a
-      // mailbox actually reaches its daily number, without the 2–4h wait that
-      // held warmup to a handful a day.
-      if (
-        !mailboxIsRested(
-          entry.lastWarmupAt,
-          WARMUP_MIN_GAP_SECONDS,
-          WARMUP_MAX_GAP_SECONDS,
-        )
-      ) {
+      // Paced on the warmup clock, not the outreach one. The gap is dynamic:
+      // 23h window ÷ this mailbox's current daily warmup target (±10% jitter),
+      // so the day's warmups spread across the full window even as the target
+      // ramps up or down.
+      const { minSeconds: warmMin, maxSeconds: warmMax } = warmupGapForTarget(
+        settings.target_daily_volume ?? 10,
+      );
+      if (!mailboxIsRested(entry.lastWarmupAt, warmMin, warmMax)) {
         continue;
       }
 

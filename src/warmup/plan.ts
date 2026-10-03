@@ -38,16 +38,27 @@ export function quotaRemaining(dailyVolume: number, sentToday: number): number {
 }
 
 /**
- * Warmup's own pacing gap.
+ * Dynamic warmup pacing: spread the day's warmup target across the 23-hour
+ * send window (owner decision 2026-10-03).
  *
- * Owner decision 2026-10-03: warmup sends 20–25 minutes apart (was 4–16 min).
- * Warmup goes between your own mailboxes, but the owner wants the whole
- * mailbox — warmup plus outreach — on a calm, human daily rhythm, not bursts.
- * Warmup is paced on `last_warmup_at` (migration 0014), never on the outreach
- * `last_send_at`.
+ * gap = 23h / target_daily_volume, with a ±10% jitter margin. The target ramps
+ * up and down per mailbox, so the gap is recomputed from each mailbox's
+ * current target on every tick — never a fixed number. Examples:
+ * target 10 → 125–152 min; target 20 → 62–76 min; target 5 → 248–304 min.
  */
-export const WARMUP_MIN_GAP_SECONDS = 20 * 60;
-export const WARMUP_MAX_GAP_SECONDS = 25 * 60;
+export const WARMUP_WINDOW_SECONDS = 23 * 3600;
+
+export function warmupGapForTarget(targetDailyVolume: number): {
+  minSeconds: number;
+  maxSeconds: number;
+} {
+  const target = Math.max(1, Math.floor(targetDailyVolume));
+  const avg = WARMUP_WINDOW_SECONDS / target;
+  return {
+    minSeconds: Math.floor(avg * 0.9),
+    maxSeconds: Math.ceil(avg * 1.1),
+  };
+}
 
 export interface WarmupState {
   enabled: boolean;
