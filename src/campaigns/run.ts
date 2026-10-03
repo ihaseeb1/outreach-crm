@@ -367,10 +367,12 @@ async function processCampaignContact(
   const { mailbox, waiting, switched } = mailboxForContact(
     entry.mailbox_id,
     mailboxes,
-    // Owner decision 2026-09-29: every active mailbox (including warning-health
-    // ones) works its full daily limit. Warning boxes are no longer held as
-    // last-resort fallback; they rotate evenly with healthy ones.
-    { preferHealthy: false },
+    // Health protection 2026-10-03: prefer healthy mailboxes; warning-health
+    // ones are last-resort fallback only. Reverts the 2026-09-29 decision
+    // (preferHealthy: false) after 41 bounces in one day pushed 9 mailboxes
+    // to warning and 2 to paused — pushing cold outreach through warning
+    // boxes worsens their reputation.
+    { preferHealthy: true },
   );
   if (!mailbox) {
     // Either every mailbox is at its limit / resting, or the assigned one is.
