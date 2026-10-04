@@ -187,8 +187,8 @@ import {
   shouldContinueThread,
   shouldRampToday,
   shouldReply,
-  WARMUP_MIN_GAP_SECONDS,
-  WARMUP_MAX_GAP_SECONDS,
+  WARMUP_WINDOW_SECONDS,
+  warmupGapForTarget,
 } from "../src/warmup/plan";
 import { isValidWarmupToken, newWarmupToken } from "../src/warmup/token";
 import { domainFromUrl, isRoleAccount, normalizeUrl, splitName } from "../src/lib/email";
@@ -2935,13 +2935,18 @@ test("counted days survive folding into weeks", () => {
 
 console.log("\nwarmup pacing gap");
 
-test("the warmup gap is far shorter than an outreach rest gap", () => {
-  // The whole point of the pacing change: warmup waits minutes, not hours, so a
-  // mailbox actually reaches its daily number.
-  assert.ok(WARMUP_MIN_GAP_SECONDS >= 60);
-  assert.ok(WARMUP_MAX_GAP_SECONDS > WARMUP_MIN_GAP_SECONDS);
-  // Comfortably under a 30-minute tick, so a mailbox is rested every tick.
-  assert.ok(WARMUP_MAX_GAP_SECONDS < 30 * 60);
+test("warmup gaps spread the daily target across the 23-hour window", () => {
+  // Dynamic pacing (owner decision 2026-10-03): gap = 23h / target ±10% jitter,
+  // recomputed from each mailbox's current target every tick.
+  const { minSeconds, maxSeconds } = warmupGapForTarget(10);
+  assert.ok(minSeconds >= 60);
+  assert.ok(maxSeconds > minSeconds);
+  // At 10/day the gaps tile the 23h window, so the daily target stays reachable.
+  const avgSeconds = (minSeconds + maxSeconds) / 2;
+  assert.ok(Math.abs(avgSeconds * 10 - WARMUP_WINDOW_SECONDS) < 3600);
+  // Higher target -> shorter gap; lower target -> longer gap.
+  assert.ok(warmupGapForTarget(20).maxSeconds < maxSeconds);
+  assert.ok(warmupGapForTarget(5).minSeconds > minSeconds);
 });
 
 console.log("\nhealth trend alerts");
