@@ -11,7 +11,8 @@
  *      mailbox_health rows carrying warnings/issues.
  *   3. Send windows — campaigns whose send window drifted off the 1→24
  *      (1 AM–midnight) standard, and mailboxes whose inter-send gaps drifted
- *      off the 300s/720s standard (migration 0024).
+ *      off the 1500s/1980s (25–33 min) inter-send gap standard
+ *      (owner decision 2026-10-04; migration 0024's 300s/720s superseded).
  *
  * Writes NOTHING to business tables. The only write is the standard worker
  * heartbeat row (recordWorkerRun, job "integrity") so runs are auditable.
@@ -49,7 +50,8 @@ interface Issue {
 }
 
 const EXPECTED_WINDOW = { start: 1, end: 24 };
-const EXPECTED_GAP = { min: 300, max: 720 };
+// Owner-decided mailbox standard (2026-10-04): 40/day, 25–33 min gaps.
+const EXPECTED_GAP = { min: 1500, max: 1980 };
 
 function summarize(rows: Record<string, unknown>[], fields: string[]) {
   return rows.slice(0, 10).map((r) => {
@@ -300,7 +302,7 @@ async function checkSendWindows(
     issues.push({
       check: "send_windows",
       severity: "warning",
-      title: `Active mailboxes off the 300s/720s inter-send gap standard`,
+      title: `Active mailboxes off the 1500s/1980s (25–33 min) inter-send gap standard`,
       count: gapDrift.length,
       sample: summarize(gapDrift, [
         "email",
