@@ -1,5 +1,3 @@
-import Link from "next/link";
-
 import {
   ReportMailboxTable,
   type ReportMailboxRow,
@@ -14,12 +12,7 @@ import {
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { requireSession } from "@/lib/workspace";
 import { MAX_REPORT_MAILBOX_WINDOW } from "@/mailboxes/volume";
-import {
-  buildFunnel,
-  formatPercent,
-  summariseByNiche,
-  type NichePrice,
-} from "@/reports/metrics";
+import { buildFunnel, formatPercent } from "@/reports/metrics";
 import { loadReportData } from "@/reports/data";
 import {
   parseReportBucket,
@@ -61,6 +54,7 @@ export default async function ReportsPage({
     { data: mailboxRows },
     { data: healthRows },
     { data: dealRows },
+    { data: activityRows },
     contactedResult,
     lifetime,
   ] = await Promise.all([
@@ -88,6 +82,17 @@ export default async function ReportsPage({
       .select("id, status, currency, deal_prices(niche, price)")
       .eq("workspace_id", workspaceId)
       .limit(5000),
+    // The Latest activity feed: the most recent real email traffic. Warmup
+    // chatter is excluded so mailbox-to-mailbox noise never drowns the feed.
+    supabase
+      .from("messages")
+      .select(
+        "id, direction, status, is_bounce, is_auto_reply, subject, from_email, to_email, sent_at, received_at, created_at, mailbox:mailboxes(email), contact:contacts(email, first_name, last_name)",
+      )
+      .eq("workspace_id", workspaceId)
+      .eq("is_warmup", false)
+      .order("created_at", { ascending: false })
+      .limit(15),
     supabase
       .from("contacts")
       .select("id", { count: "exact", head: true })
@@ -107,14 +112,9 @@ export default async function ReportsPage({
     deal_prices: { niche: string; price: number }[];
   }[];
 
-  const nichePrices: NichePrice[] = deals.flatMap((deal) =>
-    (deal.deal_prices ?? []).map((price) => ({
-      niche: price.niche,
-      price: Number(price.price),
-      status: deal.status,
-    })),
+  const activity = ((activityRows ?? []) as unknown as ActivityRow[]).map(
+    toActivity,
   );
-  const niches = summariseByNiche(nichePrices);
 
   const wonDeals = deals.filter((deal) =>
     ["agreed", "ordered", "live"].includes(deal.status),
@@ -241,6 +241,53 @@ export default async function ReportsPage({
         />
       </div>
 
+      <section className="card">
+        <div className="flex items-center justify-between border-b border-[var(--color-line)] px-5 py-3">
+          <div>
+            <h2 className="text-sm font-semibold">Latest activity</h2>
+            <p className="hint mt-0.5">
+              Real email traffic · warmup chatter excluded
+            </p>
+          </div>
+          <a
+            className="text-sm text-[var(--color-brand)] hover:underline"
+            href="/inbox"
+          >
+            Inbox →
+          </a>
+        </div>
+        {activity.length === 0 ? (
+          <p className="px-5 py-6 text-sm text-[var(--color-muted)]">
+            No email activity yet. As soon as the engine sends or a reply lands,
+            it shows up here.
+          </p>
+        ) : (
+          <ul className="divide-y divide-[var(--color-line)]">
+            {activity.map((item) => (
+              <li
+                key={item.id}
+                className="flex items-center gap-3 px-5 py-3"
+              >
+                <span
+                  aria-hidden
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold text-white"
+                  style={{ background: item.color }}
+                >
+                  {item.badge}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium">{item.title}</p>
+                  <p className="truncate text-sm text-[var(--color-muted)]">
+                    {item.detail}
+                  </p>
+                </div>
+                <span className="hint shrink-0">{item.when}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
       <section className="card card-pad space-y-3">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-sm font-semibold">{BUCKET_HEADINGS[range.bucket]}</h2>
@@ -352,49 +399,6 @@ export default async function ReportsPage({
 
       <ReportMailboxTable mailboxes={mailboxRowsForTable} volumes={volumes} />
 
-      <section className="card">
-        <div className="flex items-center justify-between border-b border-[var(--color-line)] px-5 py-3">
-          <h2 className="text-sm font-semibold">Value by niche</h2>
-          <Link className="text-sm text-[var(--color-brand)] hover:underline" href="/deals">
-            All deals →
-          </Link>
-        </div>
-        {niches.length === 0 ? (
-          <p className="px-5 py-6 text-sm text-[var(--color-muted)]">
-            No deals logged yet.
-          </p>
-        ) : (
-          <div className="table-wrap">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Niche</th>
-                  <th>Quoted</th>
-                  <th>Won</th>
-                  <th>Won value</th>
-                  <th>Average</th>
-                  <th>Range</th>
-                </tr>
-              </thead>
-              <tbody>
-                {niches.map((niche) => (
-                  <tr key={niche.niche}>
-                    <td className="font-medium">{niche.niche}</td>
-                    <td>{niche.quoted}</td>
-                    <td>{niche.won}</td>
-                    <td>{Math.round(niche.wonValue).toLocaleString()}</td>
-                    <td>{Math.round(niche.averagePrice).toLocaleString()}</td>
-                    <td>
-                      {Math.round(niche.lowestPrice).toLocaleString()} –{" "}
-                      {Math.round(niche.highestPrice).toLocaleString()}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
     </div>
   );
 }
@@ -441,6 +445,148 @@ async function loadLifetimeTotals(
     bounces: bounces.count ?? 0,
     contacts: contacts.count ?? 0,
   };
+}
+
+type ActivityRow = {
+  id: string;
+  direction: "outbound" | "inbound";
+  status: string;
+  is_bounce: boolean;
+  is_auto_reply: boolean;
+  subject: string | null;
+  from_email: string | null;
+  to_email: string | null;
+  sent_at: string | null;
+  received_at: string | null;
+  created_at: string;
+  // Supabase types the embedded to-one join as an array; normalize at use.
+  mailbox: { email: string } | { email: string }[] | null;
+  contact:
+    | { email: string; first_name: string | null; last_name: string | null }
+    | { email: string; first_name: string | null; last_name: string | null }[]
+    | null;
+};
+
+type ActivityItem = {
+  id: string;
+  title: string;
+  detail: string;
+  when: string;
+  badge: string;
+  color: string;
+};
+
+const ACTIVITY_COLORS = {
+  sent: "var(--color-brand)",
+  reply: "var(--color-ok)",
+  bad: "var(--color-danger)",
+  auto: "var(--color-warn)",
+} as const;
+
+function first<T>(value: T | T[] | null | undefined): T | null {
+  if (!value) return null;
+  return Array.isArray(value) ? (value[0] ?? null) : value;
+}
+
+function contactLabel(row: ActivityRow): string {
+  const contact = first(row.contact);
+  const name = [contact?.first_name, contact?.last_name]
+    .filter(Boolean)
+    .join(" ");
+  return name || contact?.email || row.to_email || row.from_email || "unknown";
+}
+
+function mailboxLabel(row: ActivityRow): string | null {
+  const mailbox = first(row.mailbox);
+  return mailbox ? (mailbox.email.split("@")[0] ?? mailbox.email) : null;
+}
+
+/**
+ * One message row becomes one feed line: "Reply received — maria@blog.io
+ * replied to 'Guest post collab' — 2 min ago".
+ */
+function toActivity(row: ActivityRow): ActivityItem {
+  const at = row.received_at ?? row.sent_at ?? row.created_at;
+  const subject = row.subject ? `“${row.subject}”` : "no subject";
+  const peer = contactLabel(row);
+
+  if (row.direction === "outbound") {
+    if (row.status === "failed") {
+      return {
+        id: row.id,
+        title: "Send failed",
+        detail: `${peer} · ${subject}`,
+        when: timeAgo(at),
+        badge: "!",
+        color: ACTIVITY_COLORS.bad,
+      };
+    }
+    if (row.status === "bounced" || row.is_bounce) {
+      return {
+        id: row.id,
+        title: "Email bounced",
+        detail: `${peer} · ${subject}`,
+        when: timeAgo(at),
+        badge: "B",
+        color: ACTIVITY_COLORS.bad,
+      };
+    }
+    const via = mailboxLabel(row);
+    return {
+      id: row.id,
+      title: "Email sent",
+      detail: `${peer}${via ? ` · via ${via}` : ""} · ${subject}`,
+      when: timeAgo(at),
+      badge: "S",
+      color: ACTIVITY_COLORS.sent,
+    };
+  }
+
+  if (row.is_bounce) {
+    return {
+      id: row.id,
+      title: "Bounce received",
+      detail: `${row.from_email ?? peer} · ${subject}`,
+      when: timeAgo(at),
+      badge: "B",
+      color: ACTIVITY_COLORS.bad,
+    };
+  }
+  if (row.is_auto_reply) {
+    return {
+      id: row.id,
+      title: "Auto-reply received",
+      detail: `${row.from_email ?? peer} · ${subject}`,
+      when: timeAgo(at),
+      badge: "A",
+      color: ACTIVITY_COLORS.auto,
+    };
+  }
+  return {
+    id: row.id,
+    title: "Reply received",
+    detail: `${row.from_email ?? peer} replied to ${subject}`,
+    when: timeAgo(at),
+    badge: "R",
+    color: ACTIVITY_COLORS.reply,
+  };
+}
+
+function timeAgo(iso: string): string {
+  const seconds = Math.max(
+    0,
+    Math.floor((Date.now() - new Date(iso).getTime()) / 1000),
+  );
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo ago`;
+  return `${Math.floor(months / 12)}y ago`;
 }
 
 function Monitor({
