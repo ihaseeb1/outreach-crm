@@ -1,0 +1,42 @@
+# Power SMTP verification worker — runs on the self-hosted runner.
+#
+# The deep verification step (real SMTP RCPT TO against each recipient's MX,
+# scripts/verify-worker.ts) needs outbound port 25, which GitHub-hosted
+# runners block. crm-smtp-runner is a self-hosted runner on a box with
+# port 25 open, registered with the "smtp" label — only this workflow
+# targets that label.
+#
+# HOW TO ADD (VM token lacks `workflow` scope, so this needs the web UI):
+#   Repo → .github/workflows → Add file → Create new file
+#   Name:  .github/workflows/verify-worker.yml
+#   Paste this whole file → Commit changes → Commit directly to main.
+
+name: verify-worker (power SMTP verification)
+
+on:
+  schedule:
+    # Every 6 hours. Each run drains the needs_power queue, then the
+    # timeout below stops the worker gracefully (SIGTERM → finishes batch).
+    - cron: "17 2,8,14,20 * * *"
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: [self-hosted, smtp]
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Power-verify contacts flagged needs_power
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          VERIFY_BATCH_SIZE: "20"
+        run: npx tsx scripts/verify-worker.ts
