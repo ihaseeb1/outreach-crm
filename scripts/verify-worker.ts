@@ -28,6 +28,9 @@ import { runPowerVerificationBatch } from "../src/validation/run";
 
 const BATCH_SIZE = Number(process.env.VERIFY_BATCH_SIZE ?? 20);
 const IDLE_DELAY_MS = Number(process.env.VERIFY_IDLE_DELAY_MS ?? 30_000);
+// Exit successfully after this many consecutive idle checks (empty queue).
+// Default 20 × 30s = ~10 min of drained queue. Set to 0 to disable (run forever).
+const IDLE_EXIT_AFTER = Number(process.env.VERIFY_IDLE_EXIT_AFTER ?? 20);
 const BUSY_DELAY_MS = Number(process.env.VERIFY_BUSY_DELAY_MS ?? 2_000);
 
 async function main() {
@@ -59,15 +62,25 @@ async function main() {
     "This needs outbound port 25. If every check comes back 'could not connect', your host is blocking it — move to a VPS that allows port 25.",
   );
 
+  let idleStreak = 0;
   while (!stopping) {
     try {
       const result = await runPowerVerificationBatch(supabase, { limit: BATCH_SIZE });
 
       if (result.processed > 0) {
+        idleStreak = 0;
         console.log(
           `Checked ${result.processed}: ${result.valid} kept, ${result.removed} removed, ` +
             `${result.suppressed} suppressed.`,
         );
+      } else if (IDLE_EXIT_AFTER > 0) {
+        idleStreak++;
+        if (idleStreak >= IDLE_EXIT_AFTER) {
+          console.log(
+            `Queue drained (empty for ${idleStreak} consecutive checks) — exiting successfully.`,
+          );
+          break;
+        }
       }
 
       await sleep(result.processed > 0 ? BUSY_DELAY_MS : IDLE_DELAY_MS);
