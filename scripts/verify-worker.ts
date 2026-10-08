@@ -18,6 +18,11 @@
  */
 
 import { createClient } from "@supabase/supabase-js";
+import { WebSocket as WS } from "ws";
+
+// @supabase/realtime-js needs a WebSocket constructor; Node 20 has no native
+// one (only 22+), so provide the `ws` polyfill before createClient() runs.
+(globalThis as { WebSocket?: unknown }).WebSocket ??= WS;
 
 import { runPowerVerificationBatch } from "../src/validation/run";
 
