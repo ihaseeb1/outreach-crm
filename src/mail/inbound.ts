@@ -384,9 +384,18 @@ async function processInbound(
       }, bouncedContactId);
     }
 
+    // Delay DSNs ("Delivery Status Notification (Delay)", Gmail's "Delivery
+    // incomplete") are transient — the receiving server asked Gmail to retry,
+    // and delivery usually succeeds within hours. They are NOT real bounces:
+    // counting them inflates the 7-day bounce rate and wrongly auto-pauses
+    // mailboxes. Store them for the audit trail, but keep them out of the
+    // bounce metric. Soft (4xx) classifications are likewise transient.
+    const isDelayDsn = /delay|delivery incomplete/i.test(message.subject ?? "");
+    const isRealBounce = !isDelayDsn && message.bounceType !== "soft";
+
     const stored = await insertInbound(supabase, mailbox, message, {
       contactId: bounced ? await contactIdFor(supabase, workspaceId, bounced) : null,
-      isBounce: true,
+      isBounce: isRealBounce,
       isAutoReply: false,
     });
     if (stored.error) return { kind: "failed", error: stored.error };
