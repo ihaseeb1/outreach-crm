@@ -53,9 +53,7 @@ const DSN_SENDER_PARTS = [
 ];
 
 function isDsnSender(fromEmail: unknown): boolean {
-  const local = String(fromEmail ?? "")
-    .split("@")[0]
-    .toLowerCase();
+  const local = (String(fromEmail ?? "").split("@")[0] ?? "").toLowerCase();
   return DSN_SENDER_PARTS.some((s) => local.includes(s));
 }
 
