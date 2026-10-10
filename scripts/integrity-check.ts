@@ -41,6 +41,24 @@ try {
 
 type Severity = "critical" | "warning";
 
+// Bounce/DSN senders whose transient notices are stored with is_bounce=false
+// for the audit trail only (delay DSNs / soft bounces are not real bounces
+// and are never replies). Keep them out of the "missed reply" check.
+const DSN_SENDER_PARTS = [
+  "mailer-daemon",
+  "postmaster",
+  "mail-delivery",
+  "maildeliverysystem",
+  "no-reply-delivery",
+];
+
+function isDsnSender(fromEmail: unknown): boolean {
+  const local = String(fromEmail ?? "")
+    .split("@")[0]
+    .toLowerCase();
+  return DSN_SENDER_PARTS.some((s) => local.includes(s));
+}
+
 interface Issue {
   check: "stuck_replies" | "mailbox_health" | "send_windows";
   severity: Severity;
@@ -171,7 +189,10 @@ async function checkStuckReplies(
         inbound_from: (inboundByContact.get(
           cc.contact_id as string,
         ) as Record<string, unknown> | undefined)?.from_email,
-      }));
+      }))
+      // Drop transient DSN notices stored with is_bounce=false — the bounce
+      // pipeline already handled them, and they are not missed replies.
+      .filter((m) => !isDsnSender(m.inbound_from));
   }
   if (missed.length > 0) {
     issues.push({
