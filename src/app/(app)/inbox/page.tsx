@@ -74,7 +74,7 @@ export default async function InboxPage({
       .eq("workspace_id", session.workspace.id)
       .in("id", repliedIds)
       .order("last_message_at", { ascending: false })
-      .limit(100);
+      .limit(500);
 
     if (filter === "unread") listQuery = listQuery.eq("is_read", false);
     else if (filter === "open") listQuery = listQuery.eq("status", "open");
