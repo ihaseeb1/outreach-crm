@@ -271,37 +271,48 @@ async function autoPurgeEnabled(
   return verification.auto_purge !== false;
 }
 
-async function applyVerdicts(
+/**
+ * Bounded-parallel mapper: runs `fn` over `items` with at most `size` in
+ * flight. Lets the 60s-capped on-demand validate route finish a full
+ * selection instead of dying mid-batch on slow DNS.
+ */
+async function mapPool<T>(
+  items: T[],
+  size: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let cursor = 0;
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(size, items.length)) },
+    async () => {
+      while (cursor < items.length) {
+        const item = items[cursor++];
+        if (item === undefined) continue;
+        await fn(item);
+      }
+    },
+  );
+  await Promise.all(workers);
+}
+
+interface ContactVerdictCtx {
+  result: ValidationBatchResult;
+  force: boolean;
+  mode: VerificationMode;
+  suppressedByWorkspace: Map<string, Set<string>>;
+  mailFromByWorkspace: Map<string, string | null>;
+  purgeByWorkspace: Map<string, boolean>;
+}
+
+/** One contact's verify-and-record step, extracted for the pool above. */
+async function applyContactVerdict(
   supabase: SupabaseClient,
-  contacts: Candidate[],
-  options: { force: boolean; mode: VerificationMode },
-): Promise<ValidationBatchResult> {
-  const result = emptyResult();
-  if (contacts.length === 0) return result;
+  contact: Candidate,
+  ctx: ContactVerdictCtx,
+): Promise<void> {
+  const { result } = ctx;
 
-  const workspaceIds = [...new Set(contacts.map((c) => c.workspace_id))];
-
-  // Suppression always wins over a freshly-computed verdict.
-  const suppressedByWorkspace = new Map<string, Set<string>>();
-  const mailFromByWorkspace = new Map<string, string | null>();
-  const purgeByWorkspace = new Map<string, boolean>();
-  for (const workspaceId of workspaceIds) {
-    const emails = contacts
-      .filter((c) => c.workspace_id === workspaceId)
-      .map((c) => c.email);
-    suppressedByWorkspace.set(
-      workspaceId,
-      await suppressedSubset(supabase, workspaceId, emails),
-    );
-    mailFromByWorkspace.set(
-      workspaceId,
-      options.mode === "power" ? await mailFromFor(supabase, workspaceId) : null,
-    );
-    purgeByWorkspace.set(workspaceId, await autoPurgeEnabled(supabase, workspaceId));
-  }
-
-  for (const contact of contacts) {
-    const alreadySuppressed = suppressedByWorkspace
+    const alreadySuppressed = ctx.suppressedByWorkspace
       .get(contact.workspace_id)
       ?.has(contact.email.toLowerCase());
 
@@ -315,16 +326,16 @@ async function applyVerdicts(
           meta: { ...(contact.meta ?? {}), needs_power: false },
         })
         .eq("id", contact.id);
-      if (!options.force) update = update.eq("validation_status", "unknown");
+      if (!ctx.force) update = update.eq("validation_status", "unknown");
       await update;
       result.processed += 1;
       result.suppressed += 1;
-      continue;
+      return;
     }
 
     const verification = await verifyEmail(contact.email, {
-      mode: options.mode,
-      mailFrom: mailFromByWorkspace.get(contact.workspace_id) ?? undefined,
+      mode: ctx.mode,
+      mailFrom: ctx.mailFromByWorkspace.get(contact.workspace_id) ?? undefined,
     });
 
     // A transient MX lookup failure must NEVER write the contact off. Leave the
@@ -333,7 +344,7 @@ async function applyVerdicts(
     if (verification.status === "unknown" && verification.mxLookupFailed) {
       result.processed += 1;
       result.deferred += 1;
-      continue;
+      return;
     }
 
     result.processed += 1;
@@ -367,7 +378,7 @@ async function applyVerdicts(
         .eq("contact_id", contact.id)
         .in("status", ["pending", "active"]);
 
-      if (purgeByWorkspace.get(contact.workspace_id)) {
+      if (ctx.purgeByWorkspace.get(contact.workspace_id)) {
         const { error } = await supabase.from("contacts").delete().eq("id", contact.id);
         if (!error) result.removed += 1;
       } else {
@@ -386,7 +397,7 @@ async function applyVerdicts(
           })
           .eq("id", contact.id);
       }
-      continue;
+      return;
     }
 
     // Store the verdict and decide whether a (further) power check is wanted.
@@ -399,9 +410,9 @@ async function applyVerdicts(
     const unconfirmed =
       isSendableStatus(verification.status) || isHoldStatus(verification.status);
     const smtpInconclusive =
-      options.mode === "power" && verification.canConnectSmtp !== true;
+      ctx.mode === "power" && verification.canConnectSmtp !== true;
     const needsPower =
-      unconfirmed && (options.mode === "quick" || smtpInconclusive);
+      unconfirmed && (ctx.mode === "quick" || smtpInconclusive);
     const meta = {
       ...(contact.meta ?? {}),
       verification: verificationMeta(verification),
@@ -418,13 +429,61 @@ async function applyVerdicts(
         meta,
       })
       .eq("id", contact.id);
-    if (!options.force) update = update.eq("validation_status", "unknown");
+    if (!ctx.force) update = update.eq("validation_status", "unknown");
     await update;
 
     if (isSendableStatus(verification.status)) result.valid += 1;
     else result.invalid += 1;
     if (needsPower) result.queuedForPower += 1;
   }
+
+async function applyVerdicts(
+  supabase: SupabaseClient,
+  contacts: Candidate[],
+  options: { force: boolean; mode: VerificationMode },
+): Promise<ValidationBatchResult> {
+  const result = emptyResult();
+  if (contacts.length === 0) return result;
+
+  const workspaceIds = [...new Set(contacts.map((c) => c.workspace_id))];
+
+  // Suppression always wins over a freshly-computed verdict.
+  const suppressedByWorkspace = new Map<string, Set<string>>();
+  const mailFromByWorkspace = new Map<string, string | null>();
+  const purgeByWorkspace = new Map<string, boolean>();
+  for (const workspaceId of workspaceIds) {
+    const emails = contacts
+      .filter((c) => c.workspace_id === workspaceId)
+      .map((c) => c.email);
+    suppressedByWorkspace.set(
+      workspaceId,
+      await suppressedSubset(supabase, workspaceId, emails),
+    );
+    mailFromByWorkspace.set(
+      workspaceId,
+      options.mode === "power" ? await mailFromFor(supabase, workspaceId) : null,
+    );
+    purgeByWorkspace.set(workspaceId, await autoPurgeEnabled(supabase, workspaceId));
+  }
+
+  // Was a plain sequential for-loop: with slow DNS each MX lookup takes
+  // seconds, so the 60s-capped on-demand route died after ~15 contacts and the
+  // rest of the selection silently stayed unchecked. A pool of 10 keeps a
+  // 50-contact selection inside the cap; the cron batches benefit too. Each
+  // contact's work is independent (own row, own suppression entry), and every
+  // `result` mutation below is a synchronous statement, so sharing the
+  // accumulator across workers is safe.
+  await mapPool(contacts, 10, (contact) =>
+    applyContactVerdict(supabase, contact, {
+      result,
+      force: options.force,
+      mode: options.mode,
+      suppressedByWorkspace,
+      mailFromByWorkspace,
+      purgeByWorkspace,
+    }),
+  );
+
 
   for (const workspaceId of workspaceIds) {
     await logActivity(supabase, {
