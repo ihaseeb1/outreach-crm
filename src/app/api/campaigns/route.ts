@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { nextSendAt, resolveWindow } from "@/campaigns/schedule";
+import { preflight } from "@/campaigns/preflight";
 import { DEFAULT_TIMEZONE } from "@/lib/datetime";
 import { logActivity } from "@/lib/activity";
 import type { CampaignSettings } from "@/types/db";
@@ -121,6 +122,8 @@ const patchSchema = z.object({
       timezone: z.string().max(64).optional(),
     })
     .optional(),
+  /** ISO timestamp to auto-activate a draft/paused campaign; null clears it. */
+  scheduled_activate_at: z.string().nullable().optional(),
 });
 
 export async function PATCH(request: Request) {
@@ -136,6 +139,43 @@ export async function PATCH(request: Request) {
 
   const { id, ...patch } = parsed.data;
   const supabase = await createSupabaseServerClient();
+
+  // Scheduling a future activation: only draft/paused campaigns, future time.
+  // This never touches the send window or send days — it only decides when the
+  // campaign flips to active.
+  if (patch.scheduled_activate_at !== undefined) {
+    const { data: current } = await supabase
+      .from("campaigns")
+      .select("status")
+      .eq("id", id)
+      .eq("workspace_id", session.workspace.id)
+      .maybeSingle();
+    if (!current) {
+      return NextResponse.json({ error: "Campaign not found." }, { status: 404 });
+    }
+    if (patch.scheduled_activate_at !== null) {
+      const when = new Date(patch.scheduled_activate_at);
+      if (!Number.isFinite(when.getTime())) {
+        return NextResponse.json(
+          { error: "That schedule time is not a valid date." },
+          { status: 400 },
+        );
+      }
+      if (when.getTime() <= Date.now()) {
+        return NextResponse.json(
+          { error: "Schedule time must be in the future." },
+          { status: 400 },
+        );
+      }
+      if (!["draft", "paused"].includes((current as { status: string }).status)) {
+        return NextResponse.json(
+          { error: "Only draft or paused campaigns can be scheduled." },
+          { status: 400 },
+        );
+      }
+      patch.scheduled_activate_at = when.toISOString();
+    }
+  }
 
   // Activating a campaign is the point of no return, so check the things that
   // would otherwise fail silently on every single contact.
@@ -159,6 +199,23 @@ export async function PATCH(request: Request) {
       action: `campaign.${patch.status}`,
       entityType: "campaign",
       entityId: id,
+    });
+  }
+
+  if (patch.scheduled_activate_at !== undefined) {
+    await logActivity(supabase, {
+      workspaceId: session.workspace.id,
+      actorId: session.userId,
+      action:
+        patch.scheduled_activate_at === null
+          ? "campaign.schedule_cleared"
+          : "campaign.scheduled",
+      entityType: "campaign",
+      entityId: id,
+      meta:
+        patch.scheduled_activate_at === null
+          ? {}
+          : { activate_at: patch.scheduled_activate_at },
     });
   }
 
@@ -218,49 +275,4 @@ export async function DELETE(request: Request) {
   return NextResponse.json({ ok: true });
 }
 
-/** Everything that must be true before a campaign is allowed to start sending. */
-async function preflight(
-  supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>,
-  workspaceId: string,
-  campaignId: string,
-): Promise<string | null> {
-  const { data: workspace } = await supabase
-    .from("workspaces")
-    .select("sending_postal_address")
-    .eq("id", workspaceId)
-    .single();
 
-  const postal = (workspace as { sending_postal_address: string | null } | null)
-    ?.sending_postal_address;
-  if (!postal || !postal.trim()) {
-    return "Add a sending postal address in Settings first — CAN-SPAM requires it in every campaign email.";
-  }
-
-  const { count: stepCount } = await supabase
-    .from("sequence_steps")
-    .select("id", { count: "exact", head: true })
-    .eq("campaign_id", campaignId);
-  if (!stepCount) {
-    return "This campaign has no sequence steps yet.";
-  }
-
-  const { count: mailboxCount } = await supabase
-    .from("mailboxes")
-    .select("id", { count: "exact", head: true })
-    .eq("workspace_id", workspaceId)
-    .eq("is_active", true)
-    .neq("health_status", "paused");
-  if (!mailboxCount) {
-    return "No active mailbox is available to send from.";
-  }
-
-  const { count: contactCount } = await supabase
-    .from("campaign_contacts")
-    .select("id", { count: "exact", head: true })
-    .eq("campaign_id", campaignId);
-  if (!contactCount) {
-    return "Add some contacts to this campaign first.";
-  }
-
-  return null;
-}

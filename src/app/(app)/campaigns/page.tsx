@@ -94,6 +94,26 @@ export default async function CampaignsPage() {
                         <span className={`badge ${STATUS_STYLES[campaign.status] ?? ""}`}>
                           {campaign.status}
                         </span>
+                        {campaign.scheduled_activate_at && (
+                          <div
+                            className="hint mt-1"
+                            title={`Auto-activates at ${campaign.scheduled_activate_at}`}
+                          >
+                            scheduled →{" "}
+                            {(() => {
+                              try {
+                                return new Intl.DateTimeFormat("en-US", {
+                                  day: "numeric",
+                                  month: "short",
+                                  hour: "numeric",
+                                  minute: "2-digit",
+                                }).format(new Date(campaign.scheduled_activate_at as string));
+                              } catch {
+                                return "soon";
+                              }
+                            })()}
+                          </div>
+                        )}
                       </td>
                       <td>{stat?.total_contacts ?? 0}</td>
                       <td>{stat?.active ?? 0}</td>

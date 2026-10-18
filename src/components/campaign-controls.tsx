@@ -135,18 +135,107 @@ function PushFollowupsButton({
   );
 }
 
+/**
+ * Milliseconds the wall clock in `timeZone` is ahead of UTC at `date`.
+ * Positive east of Greenwich.
+ */
+function tzOffsetMs(date: Date, timeZone: string): number {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const get = (type: string) =>
+    dtf.formatToParts(date).find((part) => part.type === type)?.value ?? "";
+  const asUtc = Date.UTC(
+    Number(get("year")),
+    Number(get("month")) - 1,
+    Number(get("day")),
+    Number(get("hour")) % 24,
+    Number(get("minute")),
+    Number(get("second")),
+  );
+  return asUtc - date.getTime();
+}
+
+/**
+ * Interprets a datetime-local value ("YYYY-MM-DDTHH:MM") as wall-clock time in
+ * `timeZone` and returns the matching UTC instant. Two passes so a DST change
+ * between "now" and the target does not skew the result by an hour.
+ */
+function zonedInputToUtc(input: string, timeZone: string): Date | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(input);
+  if (!match) return null;
+  const [y, mo, d, h, mi] = match.slice(1).map(Number) as [
+    number,
+    number,
+    number,
+    number,
+    number,
+  ];
+  let utc = new Date(Date.UTC(y, mo - 1, d, h, mi));
+  for (let i = 0; i < 2; i++) {
+    utc = new Date(Date.UTC(y, mo - 1, d, h, mi) - tzOffsetMs(utc, timeZone));
+  }
+  return utc;
+}
+
+/** ISO UTC instant -> "20 Oct 2026, 9:00 AM" rendered in `timeZone`. */
+function formatZoned(iso: string, timeZone: string): string {
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return iso;
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(date);
+  } catch {
+    return iso;
+  }
+}
+
+/** Default schedule input: tomorrow 09:00, wall-clock in `timeZone`. */
+function defaultScheduleInput(timeZone: string): string {
+  const dtf = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const get = (type: string) =>
+    dtf.formatToParts(new Date()).find((part) => part.type === type)?.value ?? "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const tomorrow = new Date(
+    Date.UTC(Number(get("year")), Number(get("month")) - 1, Number(get("day")) + 1),
+  );
+  return `${tomorrow.getUTCFullYear()}-${pad(tomorrow.getUTCMonth() + 1)}-${pad(
+    tomorrow.getUTCDate(),
+  )}T09:00`;
+}
+
 export function CampaignControls({
   campaignId,
   status,
   settings,
   mailboxes,
   selectedMailboxIds,
+  scheduledActivateAt,
 }: {
   campaignId: string;
   status: CampaignStatus;
   settings: CampaignSettings;
   mailboxes: { id: string; email: string }[];
   selectedMailboxIds: string[];
+  scheduledActivateAt: string | null;
 }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
@@ -159,6 +248,9 @@ export function CampaignControls({
   const [days, setDays] = useState<number[]>(settings.send_days ?? [1, 2, 3, 4, 5]);
   const [timezone, setTimezone] = useState(settings.timezone ?? DEFAULT_TIMEZONE);
   const [selected, setSelected] = useState<string[]>(selectedMailboxIds);
+  const [scheduleInput, setScheduleInput] = useState(() =>
+    defaultScheduleInput(settings.timezone ?? DEFAULT_TIMEZONE),
+  );
 
   async function patch(body: Record<string, unknown>, thenRefresh = true) {
     setBusy(true);
@@ -210,6 +302,64 @@ export function CampaignControls({
           Status: <strong>{status}</strong>
         </span>
       </div>
+
+      {(status === "draft" || status === "paused") && (
+        <div className="space-y-2 rounded-md border border-[var(--color-line)] p-3">
+          <p className="text-sm font-medium">Schedule activation</p>
+          {scheduledActivateAt ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="hint">
+                Starts automatically on{" "}
+                <strong>{formatZoned(scheduledActivateAt, timezone)}</strong>{" "}
+                ({timezone}).
+              </span>
+              <button
+                className="btn-secondary"
+                type="button"
+                disabled={busy}
+                onClick={() => patch({ scheduled_activate_at: null })}
+              >
+                {busy ? "…" : "Cancel schedule"}
+              </button>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-end gap-3">
+              <div>
+                <label className="label" htmlFor="schedule-at">
+                  Start at ({timezone})
+                </label>
+                <input
+                  id="schedule-at"
+                  type="datetime-local"
+                  className="input"
+                  value={scheduleInput}
+                  onChange={(e) => setScheduleInput(e.target.value)}
+                />
+              </div>
+              <button
+                className="btn-secondary"
+                type="button"
+                disabled={busy || !scheduleInput}
+                onClick={() => {
+                  const utc = zonedInputToUtc(scheduleInput, timezone);
+                  if (!utc) {
+                    setError("Pick a valid date and time.");
+                    return;
+                  }
+                  patch({ scheduled_activate_at: utc.toISOString() });
+                }}
+              >
+                {busy ? "Scheduling…" : "Schedule"}
+              </button>
+            </div>
+          )}
+          <p className="hint">
+            The campaign activates itself at that time and starts sending inside
+            its normal window. The sending window and days above are not
+            changed.
+          </p>
+        </div>
+      )}
 
       <div className="space-y-2 rounded-md border border-[var(--color-line)] p-3">
         <p className="text-sm font-medium">Send the first batch now</p>

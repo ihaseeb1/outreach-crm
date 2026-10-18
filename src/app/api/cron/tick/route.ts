@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { assertCronAuthorized } from "@/lib/cron";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { activateDueScheduledCampaigns } from "@/campaigns/activation";
 import { runCampaignBatch } from "@/campaigns/run";
 import { syncSuppressedCampaignContacts } from "@/campaigns/enroll";
 import { runHealthChecks } from "@/health/run";
@@ -76,6 +77,12 @@ export async function GET(request: Request) {
   // after the other, so the step still fits its 22s slice. The parallel
   // per-job endpoints are the real poller; this single-call fallback stays
   // deliberately small.
+  // Scheduled campaign activations first: a campaign whose scheduled time has
+  // arrived becomes active (after preflight) before the send loop runs, so it
+  // can start sending on the same tick.
+  await step("scheduledActivations", 5_000, () =>
+    activateDueScheduledCampaigns(supabase),
+  );
   await step("suppressionSync", 3_000, () =>
     syncSuppressedCampaignContacts(supabase, { limit: 200 }),
   );

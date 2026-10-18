@@ -335,6 +335,7 @@ export default async function CampaignDetailPage({
         selectedMailboxIds={
           Array.isArray(campaign.mailbox_ids) ? campaign.mailbox_ids : []
         }
+        scheduledActivateAt={campaign.scheduled_activate_at ?? null}
       />
 
       <CampaignAdmin

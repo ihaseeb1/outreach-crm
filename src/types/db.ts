@@ -190,6 +190,8 @@ export interface Campaign {
   status: CampaignStatus;
   mailbox_ids: Uuid[];
   settings: CampaignSettings;
+  /** When set (draft/paused only), the engine auto-activates at this time. */
+  scheduled_activate_at: Timestamp | null;
   created_by: Uuid | null;
   created_at: Timestamp;
   updated_at: Timestamp;
