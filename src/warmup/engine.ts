@@ -36,6 +36,7 @@ import type { Mailbox } from "@/types/db";
  *   5. canSend() inside sendEmail — so a suppressed address is never warmed to
  */
 
+import { workspaceDay } from "@/lib/datetime";
 export interface WarmupRunResult {
   ramped: number;
   sent: number;
@@ -80,7 +81,7 @@ export async function rampWarmupVolumes(
   supabase: SupabaseClient,
   options: { workspaceId?: string } = {},
 ): Promise<number> {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = workspaceDay();
 
   let query = supabase.from("warmup_settings").select("*").eq("enabled", true);
   if (options.workspaceId) query = query.eq("workspace_id", options.workspaceId);

@@ -38,6 +38,7 @@ export interface DealCaptureFields {
   payment_terms: string | null;
   payment_method: string | null;
 }
+import { workspaceDay } from "@/lib/datetime";
 
 export interface CapturePrice {
   niche: string;
@@ -205,7 +206,7 @@ export function buildCaptureNote(
 ): string {
   if (plan.isEmpty) return "";
 
-  const date = when.toISOString().slice(0, 10);
+  const date = workspaceDay(when);
   const lines: string[] = [`${NOTE_START} (${date}) ──`];
 
   if (plan.newPrices.length > 0) {

@@ -1,4 +1,5 @@
 import { mailboxIsRested } from "@/campaigns/schedule";
+import { workspaceDay } from "@/lib/datetime";
 import type { Mailbox } from "@/types/db";
 
 /**
@@ -26,8 +27,9 @@ export type RotationMailbox = Pick<
 >;
 
 function sentToday(mailbox: RotationMailbox, now: Date): number {
-  const today = now.toISOString().slice(0, 10);
-  return mailbox.sent_today_date === today ? mailbox.sent_today : 0;
+  // The day rolls at 12:00 AM Pakistan time (workspaceDay), matching the
+  // `mailbox_reserve_send` database function.
+  return mailbox.sent_today_date === workspaceDay(now) ? mailbox.sent_today : 0;
 }
 
 export function remainingCapacity(mailbox: RotationMailbox, now: Date): number {
@@ -89,9 +91,8 @@ export function isEligible(
  * that rotation reads from.
  */
 export function recordSend(mailbox: RotationMailbox, now: Date = new Date()): void {
-  const today = now.toISOString().slice(0, 10);
   mailbox.sent_today = sentToday(mailbox, now) + 1;
-  mailbox.sent_today_date = today;
+  mailbox.sent_today_date = workspaceDay(now);
   mailbox.last_send_at = now.toISOString();
 }
 

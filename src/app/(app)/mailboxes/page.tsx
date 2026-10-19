@@ -2,7 +2,7 @@ import Link from "next/link";
 
 import { MailboxActions } from "@/components/mailbox-actions";
 import { MailboxConnectForm } from "@/components/mailbox-connect-form";
-import { fmtDateTime } from "@/lib/datetime";
+import { fmtDateTime, workspaceDay } from "@/lib/datetime";
 import { MailboxPacing } from "@/components/mailbox-pacing";
 import { MailboxSignature } from "@/components/mailbox-signature";
 import {
@@ -57,7 +57,7 @@ export default async function MailboxesPage({
     .order("created_at", { ascending: true });
 
   const mailboxes = (data ?? []) as Mailbox[];
-  const today = new Date().toISOString().slice(0, 10);
+  const today = workspaceDay();
 
   const { data: warmupRows } = await supabase
     .from("warmup_settings")

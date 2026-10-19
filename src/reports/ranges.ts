@@ -10,6 +10,7 @@
  * Pure and dependency-free so the awkward one — year to date, whose length
  * changes every midnight — is covered by tests.
  */
+import { startOfWorkspaceDay, workspaceDay } from "@/lib/datetime";
 
 export const REPORT_RANGE_KEYS = [
   "7",
@@ -90,7 +91,7 @@ export function parseReportBucket(value: unknown): ReportBucket | null {
 export interface ResolvedRange extends ReportRangeOption {
   /** Days in the window, counting today. */
   days: number;
-  /** ISO timestamp for the `gte` — midnight UTC on the window's first day. */
+  /** ISO timestamp for the `gte` — midnight Pakistan time on the window's first day. */
   since: string;
   /** How the volume chart should bucket: a bar a day, a week, or a month. */
   bucket: ReportBucket;
@@ -118,12 +119,13 @@ export function parseReportRange(value: unknown): ReportRangeKey {
 /**
  * Turns a key into the window to query and chart.
  *
- * `since` is midnight UTC on the first day rather than "now minus N × 24h". The
- * chart buckets by UTC calendar day, so a mid-afternoon cutoff would give the
- * earliest bar only part of its traffic and make it look like a quiet day.
+ * `since` is midnight Pakistan time on the first day rather than "now minus
+ * N × 24h". The chart buckets by workspace calendar day, so a mid-afternoon
+ * cutoff would give the earliest bar only part of its traffic and make it look
+ * like a quiet day.
  *
- * Year to date is measured from 1 January in UTC. In August that is ~232 days;
- * on 1 January it is 1 day, which is correct and not an empty report.
+ * Year to date is measured from 1 January in Pakistan time. In August that is
+ * ~232 days; on 1 January it is 1 day, which is correct and not an empty report.
  */
 export function resolveReportRange(
   key: ReportRangeKey,
@@ -131,7 +133,7 @@ export function resolveReportRange(
   bucket: ReportBucket | null = null,
 ): ResolvedRange {
   const days = key === "ytd" ? daysSinceJanuaryFirst(now) : Number(key);
-  const startMs = startOfUtcDay(now) - (days - 1) * DAY_MS;
+  const startMs = startOfWorkspaceDay(now).getTime() - (days - 1) * DAY_MS;
 
   return {
     key,
@@ -147,15 +149,9 @@ export function resolveReportRange(
   };
 }
 
-function startOfUtcDay(now: Date): number {
-  return Date.UTC(
-    now.getUTCFullYear(),
-    now.getUTCMonth(),
-    now.getUTCDate(),
-  );
-}
-
 function daysSinceJanuaryFirst(now: Date): number {
-  const january = Date.UTC(now.getUTCFullYear(), 0, 1);
-  return Math.floor((startOfUtcDay(now) - january) / DAY_MS) + 1;
+  const year = Number(workspaceDay(now).slice(0, 4));
+  // 1 January, midnight Pakistan time, as a UTC instant.
+  const january = Date.UTC(year, 0, 1) - 5 * 3_600_000;
+  return Math.floor((startOfWorkspaceDay(now).getTime() - january) / DAY_MS) + 1;
 }

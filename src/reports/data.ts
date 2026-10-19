@@ -11,6 +11,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { workspaceDay } from "@/lib/datetime";
 import {
   bucketSeries,
   densifyDaily,
@@ -268,7 +269,7 @@ async function loadFromRows(
     if (!row.sent_at) continue;
     const summary = readTracking(row.meta);
     if (!summary || !summary.tracked) continue;
-    const day = (row.sent_at as string).slice(0, 10);
+    const day = workspaceDay(new Date(row.sent_at as string));
     const found = engCounts.get(day) ?? { sent: 0, replies: 0, bounces: 0 };
     if (summary.opens > 0) found.sent += 1;
     if (summary.clicks > 0) found.replies += 1;
@@ -300,7 +301,7 @@ function tallyByDay(
 ): Map<string, { sent: number; replies: number; bounces: number }> {
   const counts = new Map<string, { sent: number; replies: number; bounces: number }>();
   const bump = (iso: string, key: "sent" | "replies" | "bounces") => {
-    const day = iso.slice(0, 10);
+    const day = workspaceDay(new Date(iso));
     const found = counts.get(day) ?? { sent: 0, replies: 0, bounces: 0 };
     found[key] += 1;
     counts.set(day, found);

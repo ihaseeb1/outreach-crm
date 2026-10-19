@@ -38,6 +38,7 @@ export interface WarmupActivityResult {
   byMailbox: Map<string, WarmupActivity>;
   totals: WarmupActivity;
 }
+import { workspaceDay } from "@/lib/datetime";
 
 export async function loadWarmupActivity(
   supabase: SupabaseClient,
@@ -92,7 +93,7 @@ async function fromRows(
   now: Date,
 ): Promise<WarmupActivityResult> {
   const since = new Date(now.getTime() - 7 * 86_400_000).toISOString();
-  const today = now.toISOString().slice(0, 10);
+  const today = workspaceDay(now);
 
   const { data } = await supabase
     .from("warmup_messages")
@@ -124,7 +125,7 @@ async function fromRows(
   };
 
   for (const row of rows) {
-    const isToday = row.sent_at.slice(0, 10) === today;
+    const isToday = workspaceDay(new Date(row.sent_at)) === today;
     const sender = get(row.from_mailbox_id);
     sender.sent7d += 1;
     if (isToday) sender.sentToday += 1;

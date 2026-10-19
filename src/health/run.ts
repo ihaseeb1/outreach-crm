@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { workspaceDay } from "@/lib/datetime";
 
 import { logActivity } from "@/lib/activity";
 import { checkAuthRecords, checkBlacklists, sendingDomain } from "@/health/dns";
@@ -38,7 +39,7 @@ export async function runHealthChecks(
     warnings: 0,
   };
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = workspaceDay();
 
   // Which mailboxes already have today's check? Fetch that FIRST, so the mailbox
   // query below can exclude them and hand each tick the ones still outstanding.

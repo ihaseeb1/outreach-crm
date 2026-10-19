@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import * as XLSX from "xlsx";
+import { workspaceDay } from "@/lib/datetime";
 
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { getSession } from "@/lib/workspace";
@@ -66,7 +67,7 @@ export async function GET(request: Request) {
     ),
   });
 
-  const stamp = new Date().toISOString().slice(0, 10);
+  const stamp = workspaceDay();
 
   if (format === "tsv") {
     return new NextResponse(gridToTsv(grid), {

@@ -13,6 +13,7 @@
  * ever deleted. Every check fails safe: missing data, an unparseable date, or a
  * single external recipient all resolve to "do not delete".
  */
+import { startOfWorkspaceDay } from "@/lib/datetime";
 
 export type PoolSet = Set<string>;
 
@@ -153,18 +154,17 @@ const DAY_MS = 86_400_000;
 /**
  * Anything sent strictly BEFORE this instant is past retention.
  *
- *  - "today": the start of the current UTC day, so a warmup sent on any earlier
- *    UTC day is expired — i.e. it is deleted at the end of the day it was sent.
- *    (The UTC boundary matches `sent_today_date`, which the whole app writes as
- *    toISOString().slice(0,10), so this can never disagree with the daily
- *    counter about which day a send belongs to.)
+ *  - "today": the start of the current workspace day (12:00 AM Pakistan time),
+ *    so a warmup sent on any earlier workspace day is expired — i.e. it is
+ *    deleted at the end of the day it was sent.
+ *    (The workspace-day boundary matches `sent_today_date`, which the whole app
+ *    writes as the Asia/Karachi calendar day, so this can never disagree with
+ *    the daily counter about which day a send belongs to.)
  *  - "7d" / "14d": now minus 7 / 14 days.
  */
 export function retentionCutoff(rule: RetentionRule, now: Date = new Date()): Date {
   if (rule === "today") {
-    return new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-    );
+    return startOfWorkspaceDay(now);
   }
   const days = rule === "7d" ? 7 : 14;
   return new Date(now.getTime() - days * DAY_MS);

@@ -2,6 +2,7 @@
  * Reporting maths. Pure functions so the rates — the numbers you would actually
  * make decisions on — are covered by tests rather than assumed.
  */
+import { workspaceDay } from "@/lib/datetime";
 
 export interface DailyPoint {
   date: string;
@@ -63,9 +64,9 @@ export function buildDailySeries(
   const index = new Map<string, DailyPoint>();
 
   for (let offset = days - 1; offset >= 0; offset -= 1) {
-    const day = new Date(today.getTime() - offset * 86_400_000)
-      .toISOString()
-      .slice(0, 10);
+    // Day labels are workspace (Pakistan) calendar days, so the chart's last
+    // bar is always "today" in the user's timezone.
+    const day = workspaceDay(new Date(today.getTime() - offset * 86_400_000));
     const point: DailyPoint = { date: day, sent: 0, replies: 0, bounces: 0 };
     series.push(point);
     index.set(day, point);
@@ -73,7 +74,7 @@ export function buildDailySeries(
 
   const tally = (timestamps: string[], key: "sent" | "replies" | "bounces") => {
     for (const timestamp of timestamps) {
-      const day = timestamp.slice(0, 10);
+      const day = workspaceDay(new Date(timestamp));
       const point = index.get(day);
       if (point) point[key] += 1;
     }
@@ -112,9 +113,7 @@ export function densifyDaily(
 ): DailyPoint[] {
   const series: DailyPoint[] = [];
   for (let offset = days - 1; offset >= 0; offset -= 1) {
-    const day = new Date(today.getTime() - offset * 86_400_000)
-      .toISOString()
-      .slice(0, 10);
+    const day = workspaceDay(new Date(today.getTime() - offset * 86_400_000));
     const found = counts.get(day);
     series.push({
       date: day,

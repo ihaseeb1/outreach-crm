@@ -11,6 +11,7 @@
  * that matters and warmup is reported as a share of it, never as a second figure
  * to be added on.
  */
+import { workspaceDay } from "@/lib/datetime";
 
 export const VOLUME_WINDOWS = [7, 14, 30] as const;
 
@@ -19,8 +20,8 @@ export type VolumeWindow = (typeof VOLUME_WINDOWS)[number];
 /**
  * "Today" is a fourth view, and it is not "the last 24 hours".
  *
- * The daily limit resets on the UTC date — `sent_today_date` is written as
- * `toISOString().slice(0, 10)` everywhere in the app — so today's count has to
+ * The daily limit resets on the workspace date — `sent_today_date` is written
+ * as the Asia/Karachi calendar day everywhere in the app — so today's count has to
  * use the same boundary. A rolling 24 hours would disagree with the "Sent today"
  * figure on the same card every evening, and the one that would look wrong is
  * this one.
@@ -35,12 +36,7 @@ export const VOLUME_VIEWS: readonly { key: VolumeKey; label: string }[] = [
   ...VOLUME_WINDOWS.map((days) => ({ key: days as VolumeKey, label: `${days} days` })),
 ];
 
-/** The UTC date a timestamp falls on — the same boundary as the daily limit. */
-export function utcDay(value: Date): string {
-  return value.toISOString().slice(0, 10);
-}
-
-/** Widest window, so the page and this module agree on how far back to read. */
+ /** Widest window, so the page and this module agree on how far back to read. */
 export const MAX_VOLUME_WINDOW = Math.max(...VOLUME_WINDOWS) as VolumeWindow;
 
 /**
@@ -127,7 +123,7 @@ export function summariseVolume(
 ): Record<string, MailboxVolume> {
   const nowMs = now.getTime();
   const widest = Math.max(...windows);
-  const today = utcDay(now);
+  const today = workspaceDay(now);
   const byMailbox: Record<string, MailboxVolume> = {};
 
   for (const row of rows) {
@@ -147,13 +143,13 @@ export function summariseVolume(
 
     const volume = (byMailbox[row.mailbox_id] ??= emptyVolume(windows));
 
-    // Counted from the date, not from the age in days: a send at 23:00 UTC and
-    // one at 01:00 the next morning are two hours apart and belong to different
-    // days, which is exactly how the daily limit sees them.
+    // Counted from the workspace date, not from the age in days: a send at
+    // 23:00 PKT and one at 01:00 the next morning are two hours apart and
+    // belong to different days, which is exactly how the daily limit sees them.
     // Re-derived from the parsed timestamp rather than sliced off the string:
     // Postgres hands back an offset ("+00:00" today, but a session in another
-    // zone would not), and the date has to be the UTC one either way.
-    if (utcDay(new Date(at)) === today) {
+    // zone would not), and the date has to be the workspace one either way.
+    if (workspaceDay(new Date(at)) === today) {
       const counts = volume.today;
       if (counts) counts[bucket] += 1;
     }

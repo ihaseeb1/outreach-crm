@@ -27,6 +27,7 @@ function csvCell(value: unknown): string {
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
+import { workspaceDay } from "@/lib/datetime";
 /** CSV export honouring the same filters as the contacts table. */
 export async function GET(request: Request) {
   const session = await getSession();
@@ -69,7 +70,7 @@ export async function GET(request: Request) {
     ),
   ];
 
-  const stamp = new Date().toISOString().slice(0, 10);
+  const stamp = workspaceDay();
   return new NextResponse(`﻿${lines.join("\r\n")}`, {
     headers: {
       "content-type": "text/csv; charset=utf-8",

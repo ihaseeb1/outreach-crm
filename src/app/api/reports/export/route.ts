@@ -19,6 +19,7 @@ function csvCell(value: unknown): string {
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
+import { workspaceDay } from "@/lib/datetime";
 /**
  * CSV of the volume series for the current range — sent, replies and bounces per
  * bucket — so the numbers can be tracked outside the app. Uses the same uncapped
@@ -53,7 +54,7 @@ export async function GET(request: Request) {
     mailboxSince,
   });
 
-  const stamp = new Date().toISOString().slice(0, 10);
+  const stamp = workspaceDay();
   const csv = (lines: string[], name: string) =>
     new NextResponse(`﻿${lines.join("\r\n")}`, {
       headers: {

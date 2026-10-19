@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { workspaceDay } from "@/lib/datetime";
 
 import { DoneTasksList, TasksPanel, type TaskItem } from "@/components/notes-tasks";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
@@ -27,7 +28,7 @@ export default async function TasksPage() {
   const open = tasks.filter((task) => !task.done);
   const done = tasks.filter((task) => task.done);
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = workspaceDay();
   const overdue = open.filter((task) => task.due_date && task.due_date < today);
 
   return (

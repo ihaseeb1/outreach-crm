@@ -1,5 +1,6 @@
 "use client";
 
+import { workspaceDay } from "@/lib/datetime";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
@@ -227,7 +228,7 @@ export function TasksPanel({
     }
   }
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = workspaceDay();
   const doneCount = tasks.filter((task) => task.done).length;
 
   return (
