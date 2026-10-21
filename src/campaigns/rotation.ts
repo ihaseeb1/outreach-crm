@@ -22,9 +22,28 @@ export type RotationMailbox = Pick<
   | "min_gap_seconds"
   | "max_gap_seconds"
   | "last_send_at"
+  | "last_warmup_at"
   | "is_active"
   | "health_status"
 >;
+
+/**
+ * The shared send clock (owner decision 2026-10-21): warmup and outreach
+ * share ONE pacing slot per mailbox — no send of either kind may go out
+ * less than the mailbox's gap after the previous send of any kind. So the
+ * rest check reads whichever of the two clocks pinged most recently, not
+ * just the outreach one. (Before this, warmup paced itself on
+ * `last_warmup_at` alone, so a warmup and an outreach email could leave
+ * the same mailbox minutes apart.)
+ */
+export function lastSharedSendAt(
+  mailbox: Pick<Mailbox, "last_send_at" | "last_warmup_at">,
+): string | null {
+  const send = mailbox.last_send_at ? Date.parse(mailbox.last_send_at) : 0;
+  const warmup = mailbox.last_warmup_at ? Date.parse(mailbox.last_warmup_at) : 0;
+  if (send === 0 && warmup === 0) return null;
+  return send >= warmup ? mailbox.last_send_at : (mailbox.last_warmup_at ?? null);
+}
 
 function sentToday(mailbox: RotationMailbox, now: Date): number {
   // The day rolls at 12:00 AM Pakistan time (workspaceDay), matching the
@@ -65,8 +84,11 @@ export function isEligible(
     // The mailbox's own inter-send gap is the pacing — never bypassed, so a
     // mailbox never fires two sends seconds apart. It sends at most once per
     // rest gap, which across the day's ticks is what fills its daily limit.
+    // The gap is measured from the last send of ANY kind (shared clock —
+    // see lastSharedSendAt), so an outreach email never follows a warmup
+    // email inside the gap either.
     return mailboxIsRested(
-      mailbox.last_send_at,
+      lastSharedSendAt(mailbox),
       mailbox.min_gap_seconds,
       mailbox.max_gap_seconds,
       now,
@@ -94,6 +116,9 @@ export function recordSend(mailbox: RotationMailbox, now: Date = new Date()): vo
   mailbox.sent_today = sentToday(mailbox, now) + 1;
   mailbox.sent_today_date = workspaceDay(now);
   mailbox.last_send_at = now.toISOString();
+  // Shared clock: an outreach send also rests the warmup engine, and vice
+  // versa (the warmup engine stamps its own in-memory copy the same way).
+  mailbox.last_warmup_at = now.toISOString();
 }
 
 export function eligibleMailboxes(

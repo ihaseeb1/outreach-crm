@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { logActivity } from "@/lib/activity";
+import { lastSharedSendAt } from "@/campaigns/rotation";
 import { mailboxIsRested } from "@/campaigns/schedule";
 import { WARMUP_HEADER } from "@/mail/inbound-classify";
 import { loadMailboxProvider } from "@/mail/providers";
@@ -14,7 +15,6 @@ import {
   shouldRampToday,
   shouldContinueThread,
   shouldReply,
-  warmupGapForTarget,
   type PeerCandidate,
 } from "@/warmup/plan";
 import { newWarmupToken } from "@/warmup/token";
@@ -175,14 +175,23 @@ export async function runWarmupSends(
       // reserve allows a paused box through so this can send.
       if (!mailbox.is_active) continue;
       if (quotaRemaining(settings.current_daily_volume, sentToday) <= 0) continue;
-      // Paced on the warmup clock, not the outreach one. The gap is dynamic:
-      // 23h window ÷ this mailbox's current daily warmup target (±10% jitter),
-      // so the day's warmups spread across the full window even as the target
-      // ramps up or down.
-      const { minSeconds: warmMin, maxSeconds: warmMax } = warmupGapForTarget(
-        settings.target_daily_volume ?? 10,
-      );
-      if (!mailboxIsRested(entry.lastWarmupAt, warmMin, warmMax)) {
+      // Shared pacing (owner decision 2026-10-21): warmup and outreach now
+      // share ONE send slot per mailbox — no send of either kind inside the
+      // mailbox's gap (set to 60–65 min) after the previous send of any
+      // kind. So the rest check reads the shared clock (the later of
+      // last_send_at / last_warmup_at) with the mailbox's own gap, instead
+      // of the old warmup-only dynamic gap (23h ÷ target), under which a
+      // warmup and an outreach email could leave minutes apart.
+      if (
+        !mailboxIsRested(
+          lastSharedSendAt({
+            last_send_at: mailbox.last_send_at,
+            last_warmup_at: entry.lastWarmupAt,
+          }),
+          mailbox.min_gap_seconds,
+          mailbox.max_gap_seconds,
+        )
+      ) {
         continue;
       }
 
@@ -494,6 +503,32 @@ export async function runWarmupReplies(
       .maybeSingle();
     const senderEmail = (senderRow as { email: string } | null)?.email;
     if (!senderEmail) continue;
+
+    // Shared pacing (owner decision 2026-10-21): a warmup reply is a send
+    // like any other — it must respect the same one-slot gap from the
+    // replying mailbox's last send of any kind. If the mailbox is still
+    // resting, leave the row unreplied so a later tick picks it up.
+    const { data: replierRow } = await supabase
+      .from("mailboxes")
+      .select("min_gap_seconds, max_gap_seconds, last_send_at, last_warmup_at")
+      .eq("id", row.to_mailbox_id)
+      .maybeSingle();
+    const replier = replierRow as {
+      min_gap_seconds: number;
+      max_gap_seconds: number;
+      last_send_at: string | null;
+      last_warmup_at?: string | null;
+    } | null;
+    if (
+      replier &&
+      !mailboxIsRested(
+        lastSharedSendAt(replier),
+        replier.min_gap_seconds,
+        replier.max_gap_seconds,
+      )
+    ) {
+      continue;
+    }
 
     const token = newWarmupToken(row.workspace_id);
     const subject = row.subject?.startsWith("Re: ")

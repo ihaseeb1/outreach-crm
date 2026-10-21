@@ -13,7 +13,8 @@ import {
   type RotationMailbox,
 } from "@/campaigns/rotation";
 import { orderByPriority } from "@/campaigns/priority";
-import { sendingAllowance } from "@/warmup/plan";
+import { effectiveOutreachLimit, sendingAllowance } from "@/warmup/plan";
+import { startOfWorkspaceDay, workspaceDay } from "@/lib/datetime";
 import { contactVars, renderTemplate } from "@/mail/template";
 import { fetchSendingConfig, sendEmail } from "@/mail/send";
 import type { TrackingMode } from "@/mail/tracking-summary";
@@ -647,7 +648,7 @@ async function loadMailboxes(
   let query = supabase
     .from("mailboxes")
     .select(
-      "id, email, daily_limit, sent_today, sent_today_date, min_gap_seconds, max_gap_seconds, last_send_at, is_active, health_status",
+      "id, email, daily_limit, sent_today, sent_today_date, min_gap_seconds, max_gap_seconds, last_send_at, last_warmup_at, is_active, health_status",
     )
     .eq("workspace_id", campaign.workspace_id)
     .eq("is_active", true)
@@ -688,14 +689,59 @@ async function loadMailboxes(
     ]),
   );
 
-  return mailboxes.map((mailbox) => ({
-    ...mailbox,
-    daily_limit: sendingAllowance(
+  // Outreach sends so far today (Pakistan day), per mailbox — needed for
+  // the outreach/warmup split below. A send counts as warmup when either
+  // the is_warmup flag or the recorded kind says so (the flag is a
+  // best-effort follow-up write; the kind is written at insert).
+  const outreachSentByMailbox = new Map<string, number>();
+  const { data: sentRows } = await supabase
+    .from("messages")
+    .select("mailbox_id, is_warmup, meta")
+    .eq("workspace_id", campaign.workspace_id)
+    .eq("direction", "outbound")
+    .eq("status", "sent")
+    .gte("sent_at", startOfWorkspaceDay().toISOString())
+    .in(
+      "mailbox_id",
+      mailboxes.map((mailbox) => mailbox.id),
+    );
+  for (const row of (sentRows ?? []) as {
+    mailbox_id: string | null;
+    is_warmup: boolean | null;
+    meta: Record<string, unknown> | null;
+  }[]) {
+    if (!row.mailbox_id) continue;
+    const isWarmup = row.is_warmup === true || row.meta?.kind === "warmup";
+    if (isWarmup) continue;
+    outreachSentByMailbox.set(
+      row.mailbox_id,
+      (outreachSentByMailbox.get(row.mailbox_id) ?? 0) + 1,
+    );
+  }
+
+  const today = workspaceDay();
+  return mailboxes.map((mailbox) => {
+    const warmup = warmupByMailbox.get(mailbox.id) ?? null;
+    const allowance = sendingAllowance(
       mailbox.daily_limit,
-      warmupByMailbox.get(mailbox.id) ?? null,
+      warmup,
       mailbox.health_status,
-    ),
-  }));
+    );
+    // Split the shared daily limit (owner decision 2026-10-21: 15 outreach
+    // + 5 warmup of the 20/day total): reserve the warmup goal's slots so
+    // outreach can never eat them, however early in the day it runs.
+    return {
+      ...mailbox,
+      daily_limit: effectiveOutreachLimit({
+        dailyLimit: allowance,
+        sentTodayTotal:
+          mailbox.sent_today_date === today ? mailbox.sent_today : 0,
+        outreachSentToday: outreachSentByMailbox.get(mailbox.id) ?? 0,
+        warmupEnabled: warmup?.enabled ?? false,
+        warmupTargetDailyVolume: warmup?.targetDailyVolume ?? 0,
+      }),
+    };
+  });
 }
 
 interface ThreadAnchor {

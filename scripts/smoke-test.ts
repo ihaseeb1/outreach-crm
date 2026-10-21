@@ -176,6 +176,7 @@ import {
   warmupReply,
 } from "../src/warmup/content";
 import {
+  effectiveOutreachLimit,
   nextVolume,
   pickPeer,
   poolIsViable,
@@ -773,6 +774,70 @@ test("inactive and health-paused mailboxes never send", () => {
   assert.equal(
     isEligible(mailbox({ id: "c", health_status: "warning" }), { now: NOW }),
     true,
+  );
+});
+
+test("shared send slot: a recent warmup rests outreach, and vice versa", () => {
+  // Owner decision 2026-10-21: minimum 1-hour gap between ANY two sends.
+  // The mailbox() helper uses 90-300s gaps, so use explicit 1-hour gaps:
+  // a warmup 30 minutes ago must block outreach now...
+  const warmed = mailbox({
+    id: "a",
+    min_gap_seconds: 3600,
+    max_gap_seconds: 3600,
+    last_send_at: "2026-08-18T06:00:00Z",
+    last_warmup_at: "2026-08-18T09:30:00Z",
+  });
+  assert.equal(isEligible(warmed, { now: NOW }), false);
+  // ...and an outreach send 30 minutes ago must be what recordSend stamps
+  // onto BOTH clocks, so the warmup engine rests on it too.
+  const sent = mailbox({ id: "b", min_gap_seconds: 3600, max_gap_seconds: 3600 });
+  recordSend(sent, NOW);
+  assert.equal(sent.last_warmup_at, NOW.toISOString());
+  assert.equal(sent.last_send_at, NOW.toISOString());
+  // Two hours after the last send of any kind, the mailbox is free again.
+  const rested = mailbox({
+    id: "c",
+    min_gap_seconds: 3600,
+    max_gap_seconds: 3600,
+    last_send_at: "2026-08-18T06:00:00Z",
+    last_warmup_at: "2026-08-18T08:00:00Z",
+  });
+  assert.equal(isEligible(rested, { now: NOW }), true);
+});
+
+test("outreach/warmup split reserves the warmup slots", () => {
+  // 20/day total, warmup goal 5 -> outreach cap 15 (owner 2026-10-21).
+  const base = {
+    dailyLimit: 20,
+    warmupEnabled: true,
+    warmupTargetDailyVolume: 5,
+  };
+  // Nothing sent: synthetic limit 15 (rotation: 15 - 0 = 15 slots left).
+  assert.equal(
+    effectiveOutreachLimit({ ...base, sentTodayTotal: 0, outreachSentToday: 0 }),
+    15,
+  );
+  // 5 warmup + 2 outreach sent: 13 outreach slots left -> limit 7 + 13 = 20.
+  assert.equal(
+    effectiveOutreachLimit({ ...base, sentTodayTotal: 7, outreachSentToday: 2 }),
+    20,
+  );
+  // 15 outreach already out: no outreach left even though total is not hit.
+  assert.equal(
+    effectiveOutreachLimit({ ...base, sentTodayTotal: 17, outreachSentToday: 15 }),
+    17,
+  );
+  // Warmup off: outreach may use the whole shared limit.
+  assert.equal(
+    effectiveOutreachLimit({
+      dailyLimit: 20,
+      warmupEnabled: false,
+      warmupTargetDailyVolume: 5,
+      sentTodayTotal: 3,
+      outreachSentToday: 3,
+    }),
+    20,
   );
 });
 

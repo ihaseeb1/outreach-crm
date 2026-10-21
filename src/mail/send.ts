@@ -355,10 +355,13 @@ const MISSING_FN = /function|schema cache|PGRST202|does not exist/i;
  * one-argument form (blocks a paused mailbox), which exists in every schema
  * version.
  *
- * Warmup reserves through `mailbox_reserve_warmup` (migration 0014): it counts
- * against the same shared daily cap but pings `last_warmup_at`, not
- * `last_send_at`, so warming a mailbox aggressively never resets the outreach
- * rest clock. If that function is not there yet it falls back to the
+ * Warmup reserves through `mailbox_reserve_warmup` (migration 0014). Since
+ * migration 0028 (owner decision 2026-10-21: one shared send slot per
+ * mailbox, minimum 1-hour gap between ANY two sends) both reserve
+ * functions enforce the gap floor against the later of `last_send_at` /
+ * `last_warmup_at` and stamp both clocks, so the database itself — not
+ * just the engines' JS checks — keeps warmup and outreach an hour apart.
+ * If that function is not there yet it falls back to the
  * `allow_paused` reserve, and then to the strict form — so a deploy can always
  * land before its SQL migration without breaking sending.
  */

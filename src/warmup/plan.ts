@@ -99,6 +99,42 @@ export function sendingAllowance(
   return stillRamping ? Math.min(dailyLimit, warmed) : dailyLimit;
 }
 
+/**
+ * The outreach/warmup split of the shared daily limit (owner decision
+ * 2026-10-21: 15 outreach + 5 warmup per mailbox per day, 20 in total).
+ *
+ * `daily_limit` is a single shared counter — warmup spends it too — so on
+ * its own it cannot keep the split: whichever engine runs first could eat
+ * the whole 20. This folds the split into the synthetic `daily_limit` the
+ * campaign rotation already works off: reserve the warmup goal's slots
+ * for warmup, and let outreach use only what is left.
+ *
+ * Returns the limit value to hand to rotation, i.e. the value for which
+ * `limit - sentTodayTotal` equals the outreach slots genuinely left:
+ * min(outreach cap left, total cap left).
+ */
+export function effectiveOutreachLimit(input: {
+  /** Total shared cap for the day (after any warmup-ramp allowance). */
+  dailyLimit: number;
+  /** Every send so far today, warmup included (the shared counter). */
+  sentTodayTotal: number;
+  /** Outreach sends so far today (shared counter minus warmup sends). */
+  outreachSentToday: number;
+  warmupEnabled: boolean;
+  /** Slots reserved for warmup — the warmup goal for the day. */
+  warmupTargetDailyVolume: number;
+}): number {
+  const total = Math.max(0, Math.floor(input.dailyLimit));
+  const sentTotal = Math.max(0, Math.floor(input.sentTodayTotal));
+  const outreachSent = Math.max(0, Math.floor(input.outreachSentToday));
+  const outreachCap = input.warmupEnabled
+    ? Math.max(0, total - Math.max(0, Math.floor(input.warmupTargetDailyVolume)))
+    : total;
+  const outreachLeft = Math.max(0, outreachCap - outreachSent);
+  const totalLeft = Math.max(0, total - sentTotal);
+  return sentTotal + Math.min(outreachLeft, totalLeft);
+}
+
 export interface PeerCandidate {
   id: string;
   email: string;
