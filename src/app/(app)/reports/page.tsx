@@ -84,15 +84,19 @@ export default async function ReportsPage({
       .limit(5000),
     // The Latest activity feed: the most recent real email traffic. Warmup
     // chatter is excluded so mailbox-to-mailbox noise never drowns the feed.
+    // Fetch extra rows and also drop meta.kind = "warmup" in code below:
+    // failed warmup sends written before the send-path flag fix carry
+    // is_warmup = false, and a database-side meta filter would also hide
+    // real rows whose meta is null.
     supabase
       .from("messages")
       .select(
-        "id, direction, status, is_bounce, is_auto_reply, subject, from_email, to_email, sent_at, received_at, created_at, mailbox:mailboxes(email), contact:contacts(email, first_name, last_name)",
+        "id, direction, status, is_bounce, is_auto_reply, subject, from_email, to_email, sent_at, received_at, created_at, meta, mailbox:mailboxes(email), contact:contacts(email, first_name, last_name)",
       )
       .eq("workspace_id", workspaceId)
       .eq("is_warmup", false)
       .order("created_at", { ascending: false })
-      .limit(15),
+      .limit(50),
     supabase
       .from("contacts")
       .select("id", { count: "exact", head: true })
@@ -112,9 +116,10 @@ export default async function ReportsPage({
     deal_prices: { niche: string; price: number }[];
   }[];
 
-  const activity = ((activityRows ?? []) as unknown as ActivityRow[]).map(
-    toActivity,
-  );
+  const activity = ((activityRows ?? []) as unknown as ActivityRow[])
+    .filter((row) => row.meta?.kind !== "warmup")
+    .slice(0, 15)
+    .map(toActivity);
 
   const wonDeals = deals.filter((deal) =>
     ["agreed", "ordered", "live"].includes(deal.status),
@@ -459,6 +464,7 @@ type ActivityRow = {
   sent_at: string | null;
   received_at: string | null;
   created_at: string;
+  meta: { kind?: string } | null;
   // Supabase types the embedded to-one join as an array; normalize at use.
   mailbox: { email: string } | { email: string }[] | null;
   contact:

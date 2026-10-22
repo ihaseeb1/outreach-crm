@@ -322,6 +322,7 @@ export async function sendEmail(
     await release();
 
     await supabase.from("messages").insert({
+      id: rowId,
       workspace_id: input.workspaceId,
       campaign_id: input.campaignId ?? null,
       contact_id: input.contactId ?? null,
@@ -336,6 +337,22 @@ export async function sendEmail(
       error: reason,
       meta: { kind },
     } satisfies Partial<Message>);
+
+    // Tag failed warmup the same way successful warmup is tagged above.
+    // Without this, a failed warmup row keeps is_warmup = false and leaks
+    // into feeds that exclude warmup by that flag alone (Reports "Latest
+    // activity" filled with warmup SMTP failures on 2026-10-22). Best-effort,
+    // for the same migration-0015 reason as the success path.
+    if (kind === "warmup") {
+      await supabase
+        .from("messages")
+        .update({ is_warmup: true })
+        .eq("id", rowId)
+        .then(
+          () => undefined,
+          () => undefined,
+        );
+    }
 
     await supabase
       .from("mailboxes")
